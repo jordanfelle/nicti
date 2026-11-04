@@ -223,7 +223,8 @@ impl ExportUi {
                 "skipped": r.skipped.len(),
                 "failed": r.failed.len(),
                 "cancelled": r.cancelled,
-                "files": r.exported.iter().take(50).map(|(_, p)| p.display().to_string()).collect::<Vec<_>>(),
+                // Names only: this is a Read command, and where the user exports to is theirs.
+                "files": r.exported.iter().take(50).filter_map(|(_, p)| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>(),
                 "failures": r.failed.iter().take(20).map(|(id, why)| json!({"asset": id, "error": why})).collect::<Vec<_>>(),
                 "warnings": r.warnings.iter().take(20).collect::<Vec<_>>(),
             })

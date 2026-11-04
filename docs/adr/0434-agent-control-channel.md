@@ -294,3 +294,17 @@ decision; it gets its own ticket if wanted. The control channel does not depend 
   where the gate lives.
 - Already done in slice 2a (#543) and not touched here: the 1 MiB request cap before parsing
   (`MAX_LINE`) and waking an idle window when a request is queued.
+
+Review of #647 changed three things. **The subfolder check models what preen writes:** preen renders
+every part through `sanitize_component` (trims leading spaces and trailing dots/spaces, drops parts
+that come out empty, prefixes reserved device names, maps bidi controls), so a raw-string link check
+could be walked past -- `link.`, ` link` or ` ./link` all write into a pre-existing `link` symlink in
+the export folder. `validate_subfolder` now accepts only parts the sanitiser leaves unchanged, which
+also makes the inspected path the written path. **The 1000-photo cap applies to the default selection
+too**, not just an explicit `assets` list. **`export.status` lists output file names, not paths** (it
+is a Read command; where the user exports is theirs); failure and warning strings can still carry a
+path. The spec the channel exports with is built by the pure `channel_export_spec` (destination
+replaced, clash policy decided by the channel, GPS off) and unit-tested. Known and not changed: with
+the default `UniqueSuffix` policy repeated `export.run` calls keep adding files (no byte quota; the
+operator owns the folder and the disk), and a local process that can write to the export folder can
+still race the check (a link planted between check and write).

@@ -3980,7 +3980,6 @@ impl crate::cmd::CommandHost for PeltApp {
     }
 
     fn export_run(&mut self, req: &crate::cmd::ExportRequest) -> Result<serde_json::Value, String> {
-        use nicti_preen::spec::{CollisionPolicy, DestinationBase, DestinationSpec};
         if self.export.is_running() {
             return Err("an export is already running".into());
         }
@@ -4003,7 +4002,15 @@ impl crate::cmd::CommandHost for PeltApp {
         if ids.is_empty() {
             return Err("no photos to export (select some, or pass `assets`)".into());
         }
-        let mut spec = match &req.preset {
+        // The cap holds for the default selection too, not just an explicit list.
+        if ids.len() > crate::cmd::MAX_EXPORT_BATCH {
+            return Err(format!(
+                "{} photos selected; at most {} per export.run (name fewer `assets`)",
+                ids.len(),
+                crate::cmd::MAX_EXPORT_BATCH
+            ));
+        }
+        let spec = match &req.preset {
             Some(name) => self.export.preset_spec(name).ok_or_else(|| {
                 format!(
                     "no preset named `{name}` (have: {})",
@@ -4030,18 +4037,13 @@ impl crate::cmd::CommandHost for PeltApp {
         if let Some(sub) = &req.subfolder {
             crate::cmd::check_subfolder_unlinked(&base, sub)?;
         }
-        spec.destination = DestinationSpec {
-            base: DestinationBase::Folder(base.clone()),
-            subfolder: req.subfolder.clone(),
-        };
-        // A preset may carry "overwrite"; the channel decides this itself. GPS is never published
-        // from here (the dialog's per-export opt-in has no equivalent).
-        spec.collision = if req.overwrite {
-            CollisionPolicy::Overwrite
-        } else {
-            CollisionPolicy::UniqueSuffix
-        };
-        spec.metadata.include_location = false;
+        // The destination, clash policy and GPS are decided here, never taken from the preset.
+        let spec = crate::cmd::channel_export_spec(
+            spec,
+            base.clone(),
+            req.subfolder.clone(),
+            req.overwrite,
+        );
         // Export renders what the catalog holds: put Develop's pending edits there first.
         if !self.save_develop_edits(true) {
             return Err("couldn't save Develop's edits, so nothing was exported".into());

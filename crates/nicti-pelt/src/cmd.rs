@@ -318,14 +318,45 @@ pub fn validate_subfolder(s: &str) -> Result<String, String> {
                         '\\' | ':' | '{' | '}' | '*' | '?' | '"' | '<' | '>' | '|'
                     )
             });
-        if bad {
+        // The export renders every part through preen's sanitiser (it trims leading spaces and
+        // trailing dots/spaces, drops parts that come out empty, prefixes reserved device names
+        // and maps bidi controls). A part that it would change is a part that lands somewhere
+        // other than where it was checked: `link.` or ` link` name the folder `link`, and ` .`
+        // vanishes. Accept only parts it leaves exactly as they are.
+        let changed = nicti_preen::naming::sanitize_component(part) != part;
+        if bad || changed {
             return Err(format!(
                 "`subfolder` part {part:?} is not a plain folder name (no empty or hidden parts, \
-                 `..`, backslashes, drive letters, wildcards or templates)"
+                 `..`, backslashes, drive letters, wildcards, templates, leading spaces, trailing \
+                 dots or spaces, or reserved device names)"
             ));
         }
     }
     Ok(s.to_owned())
+}
+
+/// The spec an `export.run` really exports with, from the starting settings (a preset or the
+/// dialog's last): the destination is replaced by `base` + the validated subfolder (whatever the
+/// preset said is discarded), the clash policy is decided here and never taken from the preset,
+/// and GPS is never included.
+pub fn channel_export_spec(
+    mut spec: nicti_preen::spec::ExportSpec,
+    base: std::path::PathBuf,
+    subfolder: Option<String>,
+    overwrite: bool,
+) -> nicti_preen::spec::ExportSpec {
+    use nicti_preen::spec::{CollisionPolicy, DestinationBase, DestinationSpec};
+    spec.destination = DestinationSpec {
+        base: DestinationBase::Folder(base),
+        subfolder,
+    };
+    spec.collision = if overwrite {
+        CollisionPolicy::Overwrite
+    } else {
+        CollisionPolicy::UniqueSuffix
+    };
+    spec.metadata.include_location = false;
+    spec
 }
 
 /// Refuses a `subfolder` whose existing parts under `base` are links (or not folders): the
@@ -1302,6 +1333,18 @@ mod tests {
             "a|b",
             "tab\there",
             "trail ",
+            // What preen's sanitiser would change: a symlink named `link` inside the export folder
+            // is reached through these, past the link check.
+            "link.",
+            " link",
+            " ./link",
+            "x/ .",
+            "a/b.",
+            "a /b",
+            "CON",
+            "con.txt",
+            "a/NUL",
+            "\u{202E}gpj",
             long.as_str(),
         ] {
             assert!(validate_subfolder(bad).is_err(), "{bad:?}");
@@ -1397,5 +1440,59 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("--control-allow-destructive"));
+    }
+
+    #[test]
+    fn the_channels_export_settings_override_whatever_the_preset_says() {
+        use nicti_preen::spec::{CollisionPolicy, DestinationBase, DestinationSpec, ExportSpec};
+        let mut preset = ExportSpec {
+            collision: CollisionPolicy::Overwrite,
+            destination: DestinationSpec {
+                base: DestinationBase::Folder("/somewhere/else".into()),
+                subfolder: Some("../../escape".into()),
+            },
+            ..ExportSpec::default()
+        };
+        preset.metadata.include_location = true;
+        let base = std::path::PathBuf::from("/srv/exports");
+
+        let spec = channel_export_spec(preset.clone(), base.clone(), Some("shoot/a".into()), false);
+        assert_eq!(spec.destination.base, DestinationBase::Folder(base.clone()));
+        assert_eq!(spec.destination.subfolder.as_deref(), Some("shoot/a"));
+        assert_eq!(
+            spec.collision,
+            CollisionPolicy::UniqueSuffix,
+            "never the preset's overwrite"
+        );
+        assert!(
+            !spec.metadata.include_location,
+            "GPS is never published from the channel"
+        );
+        assert_eq!(spec.format, preset.format, "the rest of the preset is kept");
+
+        let spec = channel_export_spec(preset.clone(), base.clone(), None, true);
+        assert_eq!(
+            spec.collision,
+            CollisionPolicy::Overwrite,
+            "only an explicit overwrite"
+        );
+        assert!(spec.destination.subfolder.is_none());
+    }
+
+    #[test]
+    fn nothing_that_passes_validation_changes_under_the_export_sanitiser() {
+        // The property the link check relies on: a validated part is exactly the folder name preen
+        // will create, so what was inspected is what gets written to.
+        for ok in [
+            "shoot",
+            "2026/10/anthrocon",
+            "a b/c-d_e",
+            "caf\u{e9}/\u{65e5}\u{672c}",
+        ] {
+            let v = validate_subfolder(ok).unwrap();
+            for part in v.split('/') {
+                assert_eq!(nicti_preen::naming::sanitize_component(part), part);
+            }
+        }
     }
 }
