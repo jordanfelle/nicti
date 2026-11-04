@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use nicti_lair::ninelives::{BackupOutcome, BackupPolicy};
 use nicti_lair::patrol::SyncOptions;
 use nicti_lair::pounce_jobs::{
-    BackupJob, BaselineJob, ClearPositionJob, GeotagJob, GpxSource, IngestJob, SyncJob, VerifyJob,
+    BackupCopyJob, BackupJob, BaselineJob, ClearPositionJob, GeotagJob, GpxSource, IngestJob,
+    SyncJob, VerifyJob,
 };
 use nicti_lair::{CatalogStore, SqliteCatalog};
 use nicti_pounce::{JobState, Pounce};
@@ -511,4 +512,67 @@ fn jobs_report_an_asset_they_cannot_resolve_or_reach_as_failed_not_as_done() {
     assert_eq!((r.cleared, r.failed.len()), (0, 1), "{r:?}");
     assert!(r.failed[0].1.contains("not reachable"), "{r:?}");
     pounce.shutdown();
+}
+
+#[test]
+fn a_backup_copy_job_copies_a_folder_through_pounce_and_a_wrong_target_id_copies_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    let (src, dst) = (t.path().join("lib"), t.path().join("backup"));
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+    for (rel, bytes) in [
+        ("a.NEF", &b"aaa"[..]),
+        ("sub/b.NEF", b"bbb"),
+        ("sub/c.jpg", b"ccc"),
+    ] {
+        std::fs::write(src.join(rel), bytes).unwrap();
+    }
+    let target = nicti_lair::backup::init_target(&dst).unwrap();
+    let pounce = Pounce::new(u64::MAX, 2, 2, || {});
+    let run = |id: &str| {
+        let (job, slot) = BackupCopyJob::new(dst.clone(), id.to_string(), src.clone());
+        pounce.submit(Box::new(job));
+        assert!(wait_until(
+            || slot.lock().unwrap().is_some(),
+            Duration::from_secs(5)
+        ));
+        let report = slot.lock().unwrap().clone().unwrap();
+        report
+    };
+
+    // A wrong id (a different drive mounted at the same path) copies nothing and says why.
+    let wrong = run(&"0".repeat(32));
+    assert!(
+        wrong
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("different backup target"),
+        "{wrong:?}"
+    );
+    assert_eq!(wrong.report.copied, 0);
+    assert!(!dst.join("a.NEF").exists());
+
+    let ok = run(target.id());
+    assert!(ok.error.is_none() && !ok.stopped, "{ok:?}");
+    assert_eq!((ok.report.copied, ok.report.unchanged), (3, 0), "{ok:?}");
+    assert_eq!(std::fs::read(dst.join("sub/b.NEF")).unwrap(), b"bbb");
+
+    // A second run finds everything already there.
+    let again = run(target.id());
+    assert_eq!((again.report.copied, again.report.unchanged), (0, 3));
+    pounce.shutdown();
+}
+
+#[test]
+fn a_backup_copy_job_dropped_unrun_resolves_its_slot_as_stopped() {
+    let (job, slot) = BackupCopyJob::new("/x/backup".into(), "0".repeat(32), "/x/lib".into());
+    assert!(slot.lock().unwrap().is_none());
+    drop(job);
+    let r = slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("Drop resolves the slot");
+    assert!(r.stopped && r.error.is_none());
 }

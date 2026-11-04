@@ -61,6 +61,9 @@ pub enum JobKind {
     Baseline,
     /// Applying a GPX log to a selection of assets (#668) -- catalog + sidecar I/O, CPU lane.
     Geotag,
+    /// An additive verified copy of a library folder to a backup target drive (#622) --
+    /// disk-bound, CPU lane. Distinct from `Backup`, the catalog database snapshot.
+    BackupCopy,
     /// A RAW decode (#31) -- CPU-only, distinct from `Bake` (a GPU-lane Tapetum stage bake) per
     /// #206's own finding that decode shouldn't serialize behind GPU dispatch.
     Decode,

@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use nicti_pounce::{ChunkedJob, JobError, JobKind, JobSpec, Lane, Priority, Progress, Step};
 
+use crate::backup::{self, BackupRun};
 use crate::cardcopy::{CardCopy, CardCopyReport};
 use crate::carry::{Carry, CarryOptions, CarryOutcome, ResumeMoves, Resumed};
 use crate::ninelives::{self, BackupOutcome, BackupPolicy, BackupReport};
@@ -1252,6 +1253,131 @@ impl Drop for ClearPositionJob {
             let mut report = self.report.clone();
             report.stopped = true;
             *slot = Some(report);
+        }
+    }
+}
+
+/// How a [`BackupCopyJob`] went.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BackupCopyReport {
+    /// The folder that was backed up.
+    pub source: PathBuf,
+    pub report: backup::Report,
+    /// Why nothing could be backed up (target missing / wrong drive / folders overlap), if so.
+    pub error: Option<String>,
+    /// Cancelled (or dropped) before every file was handled.
+    pub stopped: bool,
+}
+
+/// Additive verified copy of one library folder to a backup target (#622): opens the target by its
+/// saved id on the first step (so a wrong or missing drive is an `error`, never a backup to the
+/// wrong place), lists the folder, then copies one file per `step`. Never returns `Err`.
+pub struct BackupCopyJob {
+    target_root: PathBuf,
+    target_id: String,
+    source: PathBuf,
+    run: Option<BackupRun>,
+    started: bool,
+    progress: Progress,
+    result: ReportSlot<BackupCopyReport>,
+}
+
+impl BackupCopyJob {
+    pub fn new(
+        target_root: PathBuf,
+        target_id: String,
+        source: PathBuf,
+    ) -> (Self, ReportSlot<BackupCopyReport>) {
+        let result = Arc::new(Mutex::new(None));
+        let job = BackupCopyJob {
+            target_root,
+            target_id,
+            source,
+            run: None,
+            started: false,
+            progress: Progress::default(),
+            result: result.clone(),
+        };
+        (job, result)
+    }
+
+    fn resolve(&self, error: Option<String>, run: Option<BackupRun>, stopped: bool) {
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(BackupCopyReport {
+            source: self.source.clone(),
+            report: run.map(BackupRun::into_report).unwrap_or_default(),
+            error,
+            stopped,
+        });
+    }
+}
+
+impl ChunkedJob for BackupCopyJob {
+    fn spec(&self) -> JobSpec {
+        JobSpec {
+            priority: Priority::Background,
+            kind: JobKind::BackupCopy,
+            lane: Lane::Cpu,
+            vram_bytes: 0,
+            image_index: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        format!("Back up: {}", self.source.display())
+    }
+
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn step(&mut self) -> Result<Step, JobError> {
+        if !self.started {
+            self.started = true;
+            let opened = backup::open_target(&self.target_root, &self.target_id)
+                .and_then(|t| BackupRun::new(&t, &self.source));
+            match opened {
+                Ok(run) => {
+                    let (done, total) = run.progress();
+                    self.progress = Progress {
+                        done: done as u64,
+                        total: Some(total as u64),
+                    };
+                    self.run = Some(run);
+                }
+                Err(e) => {
+                    self.resolve(Some(e.to_string()), None, false);
+                    return Ok(Step::Done);
+                }
+            }
+        }
+        let Some(run) = self.run.as_mut() else {
+            return Ok(Step::Done);
+        };
+        let more = run.step(&|| false);
+        let (done, total) = run.progress();
+        self.progress = Progress {
+            done: done as u64,
+            total: Some(total as u64),
+        };
+        if more {
+            return Ok(Step::Yield);
+        }
+        let run = self.run.take();
+        self.resolve(None, run, false);
+        Ok(Step::Done)
+    }
+}
+
+impl Drop for BackupCopyJob {
+    fn drop(&mut self) {
+        let unresolved = self
+            .result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none();
+        if unresolved {
+            let run = self.run.take();
+            self.resolve(None, run, true);
         }
     }
 }

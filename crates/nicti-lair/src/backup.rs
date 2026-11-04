@@ -267,6 +267,77 @@ pub struct Report {
     pub cancelled: bool,
 }
 
+/// A backup of one source folder, advanced one file per [`BackupRun::step`] so a scheduler can
+/// interleave it, show progress and cancel between files (a Pounce job drives it; [`back_up_root`]
+/// is the blocking loop over the same thing).
+pub struct BackupRun {
+    target: BackupTarget,
+    root: PathBuf,
+    files: Vec<crate::offering::CardFile>,
+    next: usize,
+    report: Report,
+}
+
+impl BackupRun {
+    /// Lists everything RAW/JPEG-shaped under `source_root`. Refuses a source that overlaps the
+    /// target. Listing reads the whole tree, so call this off the UI thread.
+    pub fn new(target: &BackupTarget, source_root: &Path) -> Result<Self, BackupError> {
+        let root = source_root
+            .canonicalize()
+            .map_err(|e| io_err(source_root, e))?;
+        if overlaps(&root, &target.root) {
+            return Err(BackupError::Overlap);
+        }
+        let (files, problems) = list_card_files(&root);
+        Ok(BackupRun {
+            target: target.clone(),
+            root,
+            files,
+            next: 0,
+            report: Report {
+                failed: problems,
+                ..Report::default()
+            },
+        })
+    }
+
+    /// `(files done, files total)`.
+    pub fn progress(&self) -> (usize, usize) {
+        (self.next, self.files.len())
+    }
+
+    /// Backs up the next file. Returns `true` while more remain; `false` once every file was
+    /// handled or `cancelled` fired mid-file (then [`Report::cancelled`] is set).
+    pub fn step(&mut self, cancelled: &dyn Fn() -> bool) -> bool {
+        let Some(f) = self.files.get(self.next) else {
+            return false;
+        };
+        match back_up_file(&self.target, &self.root, &f.path, cancelled) {
+            Ok(BackedUp::Copied { size, .. }) => {
+                self.report.copied += 1;
+                self.report.copied_bytes += size;
+            }
+            Ok(BackedUp::Unchanged { .. }) => self.report.unchanged += 1,
+            Ok(BackedUp::Differs { dest }) => self.report.differs.push(dest),
+            Ok(BackedUp::Cancelled) => {
+                self.report.cancelled = true;
+                return false;
+            }
+            Err(e) => self
+                .report
+                .failed
+                .push(format!("{}: {e}", f.path.display())),
+        }
+        self.next += 1;
+        self.next < self.files.len()
+    }
+
+    /// The report so far (final once `step` returned `false`).
+    pub fn into_report(self) -> Report {
+        self.report
+    }
+}
+
 /// Backs up every RAW/JPEG file under `source_root`. One bad file does not stop the run. Run it off
 /// the UI thread; `cancelled` is polled between chunks and `progress(done, total)` after each file.
 pub fn back_up_root(
@@ -275,35 +346,100 @@ pub fn back_up_root(
     cancelled: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Report, BackupError> {
-    let root = source_root
-        .canonicalize()
-        .map_err(|e| io_err(source_root, e))?;
-    if overlaps(&root, &target.root) {
-        return Err(BackupError::Overlap);
+    let mut run = BackupRun::new(target, source_root)?;
+    while run.step(cancelled) {
+        let (done, total) = run.progress();
+        progress(done, total);
     }
-    let (files, problems) = list_card_files(&root);
-    let mut report = Report {
-        failed: problems,
-        ..Report::default()
-    };
-    let total = files.len();
-    for (i, f) in files.iter().enumerate() {
-        match back_up_file(target, &root, &f.path, cancelled) {
-            Ok(BackedUp::Copied { size, .. }) => {
-                report.copied += 1;
-                report.copied_bytes += size;
-            }
-            Ok(BackedUp::Unchanged { .. }) => report.unchanged += 1,
-            Ok(BackedUp::Differs { dest }) => report.differs.push(dest),
-            Ok(BackedUp::Cancelled) => {
-                report.cancelled = true;
-                break;
-            }
-            Err(e) => report.failed.push(format!("{}: {e}", f.path.display())),
+    let (done, total) = run.progress();
+    progress(done, total);
+    Ok(run.into_report())
+}
+
+/// What is worth warning about before a folder becomes a backup target ([`assess_target_folder`]).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TargetAssessment {
+    /// The folder already holds files or folders (other than a backup marker).
+    pub non_empty: bool,
+    /// The folder is inside (or is) one of the library's folders: backups would land in the library.
+    pub inside_library: Option<PathBuf>,
+    /// One of the library's folders is inside the candidate: the library sits in the backup.
+    pub contains_library: Option<PathBuf>,
+    /// The folder already carries a backup marker (use its saved id, or pick another folder).
+    pub already_a_target: bool,
+}
+
+impl TargetAssessment {
+    /// Whether the UI should ask for confirmation before initialising the folder.
+    pub fn needs_confirmation(&self) -> bool {
+        self.non_empty || self.inside_library.is_some() || self.contains_library.is_some()
+    }
+
+    /// One line per concern, for the UI.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(p) = &self.inside_library {
+            out.push(format!(
+                "This folder is inside your library folder {}: the backup would sit in the very \
+                 place it protects. Pick a folder on another drive.",
+                p.display()
+            ));
         }
-        progress(i + 1, total);
+        if let Some(p) = &self.contains_library {
+            out.push(format!(
+                "Your library folder {} is inside this folder, so a backup would copy into itself. \
+                 Pick a folder on another drive.",
+                p.display()
+            ));
+        }
+        if self.non_empty {
+            out.push(
+                "This folder is not empty. Backups only add files and never touch what is \
+                 there, but a dedicated empty folder is safer."
+                    .into(),
+            );
+        }
+        if self.already_a_target {
+            out.push("This folder is already a backup target.".into());
+        }
+        out
     }
-    Ok(report)
+}
+
+/// Looks at `candidate` before [`init_target`]: is it non-empty, inside a library folder, or does
+/// it contain one? `library_roots` are the catalog's registered folder paths. Folders that do not
+/// resolve (an offline library drive) are skipped rather than guessed at. Reads at most a couple of
+/// directory entries.
+pub fn assess_target_folder(
+    candidate: &Path,
+    library_roots: &[PathBuf],
+) -> Result<TargetAssessment, BackupError> {
+    let cand = candidate.canonicalize().map_err(|e| io_err(candidate, e))?;
+    if !cand.is_dir() {
+        return Err(BackupError::Io(cand, "not a directory".into()));
+    }
+    let mut out = TargetAssessment::default();
+    for entry in fs::read_dir(&cand).map_err(|e| io_err(&cand, e))?.take(8) {
+        let entry = entry.map_err(|e| io_err(&cand, e))?;
+        if entry.file_name() == MARKER_NAME {
+            out.already_a_target = true;
+        } else {
+            out.non_empty = true;
+        }
+    }
+    for lib in library_roots {
+        let Ok(lib) = lib.canonicalize() else {
+            continue;
+        };
+        if cand.starts_with(&lib) {
+            out.inside_library = Some(lib);
+            break;
+        }
+        if lib.starts_with(&cand) && out.contains_library.is_none() {
+            out.contains_library = Some(lib);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -521,5 +657,100 @@ mod tests {
         let r = run(&t, &f.src);
         assert_eq!((r.copied, r.differs.len()), (0, 1));
         assert!(f.dst.join("a.NEF").is_dir());
+    }
+
+    #[test]
+    fn a_stepped_run_advances_one_file_at_a_time_and_matches_the_blocking_loop() {
+        let f = fx();
+        put(&f.src, "a.NEF", b"aaa");
+        put(&f.src, "sub/b.NEF", b"bbb");
+        put(&f.src, "sub/c.jpg", b"ccc");
+        let t = init_target(&f.dst).unwrap();
+        let mut run = BackupRun::new(&t, &f.src).unwrap();
+        assert_eq!(run.progress(), (0, 3));
+        let mut steps = 0;
+        while run.step(&never) {
+            steps += 1;
+            assert_eq!(run.progress().0, steps, "one file per step");
+        }
+        let (done, total) = run.progress();
+        assert_eq!((done, total), (3, 3));
+        let r = run.into_report();
+        assert_eq!((r.copied, r.unchanged, r.cancelled), (3, 0, false), "{r:?}");
+        // The same folder through the blocking loop is now entirely unchanged.
+        let again = run_blocking(&t, &f.src);
+        assert_eq!((again.copied, again.unchanged), (0, 3));
+        // An empty folder is a finished run with nothing to do, not an error or a hang.
+        let empty = f._t.path().join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        let mut run = BackupRun::new(&t, &empty).unwrap();
+        assert!(!run.step(&never));
+        assert_eq!(run.into_report(), Report::default());
+    }
+
+    fn run_blocking(t: &BackupTarget, src: &Path) -> Report {
+        run(t, src)
+    }
+
+    #[test]
+    fn a_stepped_run_refuses_overlap_like_the_blocking_loop() {
+        let f = fx();
+        let t = init_target(&f.dst).unwrap();
+        assert_eq!(BackupRun::new(&t, &f.dst).err(), Some(BackupError::Overlap));
+        assert_eq!(
+            BackupRun::new(&t, f.dst.parent().unwrap()).err(),
+            Some(BackupError::Overlap),
+            "a source that contains the target"
+        );
+    }
+
+    #[test]
+    fn assessing_a_folder_warns_about_non_empty_library_and_existing_targets() {
+        let f = fx();
+        let library = vec![f.src.clone()];
+        // Empty and elsewhere: nothing to say.
+        let a = assess_target_folder(&f.dst, &library).unwrap();
+        assert_eq!(a, TargetAssessment::default());
+        assert!(!a.needs_confirmation() && a.warnings().is_empty());
+
+        // Non-empty.
+        put(&f.dst, "old/photo.NEF", b"x");
+        let a = assess_target_folder(&f.dst, &library).unwrap();
+        assert!(a.non_empty && a.needs_confirmation());
+        assert!(a.warnings()[0].contains("not empty"));
+
+        // Inside a library folder.
+        let inner = f.src.join("backup-here");
+        fs::create_dir_all(&inner).unwrap();
+        let a = assess_target_folder(&inner, &library).unwrap();
+        assert_eq!(
+            a.inside_library.as_deref(),
+            Some(f.src.canonicalize().unwrap().as_path())
+        );
+        assert!(a
+            .warnings()
+            .iter()
+            .any(|w| w.contains("inside your library folder")));
+
+        // The library inside the candidate.
+        let a = assess_target_folder(f.src.parent().unwrap(), &library).unwrap();
+        assert!(a.contains_library.is_some() && a.needs_confirmation());
+        assert!(a.warnings().iter().any(|w| w.contains("copy into itself")));
+
+        // An offline library folder is skipped, not an error.
+        let a = assess_target_folder(&f.dst, &[f._t.path().join("gone")]).unwrap();
+        assert!(a.inside_library.is_none() && a.contains_library.is_none());
+
+        // A folder that is already a target says so, and its marker alone is not "non-empty".
+        let fresh = f._t.path().join("fresh");
+        fs::create_dir_all(&fresh).unwrap();
+        init_target(&fresh).unwrap();
+        let a = assess_target_folder(&fresh, &library).unwrap();
+        assert!(a.already_a_target && !a.non_empty);
+        assert!(a.warnings()[0].contains("already a backup target"));
+
+        // A path that is not a folder is an error.
+        assert!(assess_target_folder(&f.dst.join("old/photo.NEF"), &library).is_err());
+        assert!(assess_target_folder(&f.dst.join("missing"), &library).is_err());
     }
 }
