@@ -64,6 +64,18 @@ pub struct Scheduler {
     cancelled_while_queued: Vec<(JobId, Progress)>,
 }
 
+/// A job's progress for a status row, or the default if reading it panics. Called with the lane's
+/// scheduler lock held, where a panic would poison the lock and kill the worker (#538).
+fn safe_progress(job: &dyn ChunkedJob) -> Progress {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.progress())).unwrap_or_default()
+}
+
+/// Drops `value` without letting a panicking `Drop` impl escape: jobs are dropped under the lane's
+/// scheduler lock, where an unwind would poison it (#538).
+fn drop_guarded<T>(value: T) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(value)));
+}
+
 impl Scheduler {
     /// `vram_budget_bytes` is the total budget `admission::Admission` enforces against background
     /// jobs (decision rule #5) -- foreground is never refused on VRAM grounds regardless of this
@@ -159,7 +171,8 @@ impl Scheduler {
                     .pop_front()
                     .expect("just peeked via front()");
                 self.cancelled_while_queued
-                    .push((entry.id, entry.job.progress()));
+                    .push((entry.id, safe_progress(entry.job.as_ref())));
+                drop_guarded(entry);
                 continue;
             }
             break;
@@ -177,14 +190,18 @@ impl Scheduler {
         // and cancellation has nothing to do with the gate.
         let admission = &mut self.admission;
         let cancelled_while_queued = &mut self.cancelled_while_queued;
-        self.background.retain(|entry| {
+        // Not `retain`: a cancelled job is dropped here, under the lock, so its `Drop` must be
+        // guarded and `retain` gives no ownership to do that with.
+        let queued = std::mem::take(&mut self.background);
+        for entry in queued {
             if entry.cancel.is_cancelled() {
                 admission.release(entry.id);
-                cancelled_while_queued.push((entry.id, entry.job.progress()));
-                return false;
+                cancelled_while_queued.push((entry.id, safe_progress(entry.job.as_ref())));
+                drop_guarded(entry);
+            } else {
+                self.background.push(entry);
             }
-            true
-        });
+        }
 
         if self.editing_gate.is_editing() {
             return None;
@@ -198,9 +215,14 @@ impl Scheduler {
         // cancellation), so it never reaches a terminal status. Callers must therefore clamp a
         // declaration to the lane total (`Pounce::gpu_vram_budget`), as the render jobs do (#255),
         // or declare 0.
-        self.background.retain(|entry| {
-            admission.is_admitted(entry.id) || entry.job.spec().vram_bytes <= budget
-        });
+        let queued = std::mem::take(&mut self.background);
+        for entry in queued {
+            if admission.is_admitted(entry.id) || entry.job.spec().vram_bytes <= budget {
+                self.background.push(entry);
+            } else {
+                drop_guarded(entry);
+            }
+        }
 
         // Started jobs always run. Of the unstarted ones only the first in order may start, and
         // only if it fits: when it does not, nothing behind it is admitted ("no backfill"), or a
@@ -275,6 +297,8 @@ impl Scheduler {
                 Priority::Foreground => self.foreground.push_back(entry),
                 Priority::Background => self.insert_background_sorted(entry),
             }
+        } else {
+            drop_guarded(taken);
         }
         outcome == Outcome::Yielded && cancelled
     }

@@ -36,6 +36,13 @@
 //! against an `ort` environment some other, non-`nicti-haw` caller committed directly. That's not
 //! a real gap today: every `ort`/`load-dynamic` caller in this workspace goes through this crate.
 
+// Never-crash policy (#538): production code returns errors instead of panicking. Tests
+// are exempt. Needs a documented reason to `#[allow]` on any single site.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 

@@ -66,6 +66,7 @@ Full reasoning/history: `docs/decisions/jobs.md`.
   present on the reference machine and was re-installed fresh this pass (Python 3.13 venv,
   `onnxruntime-gpu==1.30.0`, `nvidia-cudnn-cu13==9.26.0.51` — matching #40's own cited versions,
   pip/winget only, no NVIDIA login) — check before assuming a prior pass's environment still holds.
+- **Panic isolation (#538)**: `runtime::worker_loop` runs `step()`/`progress()`/`on_change` under `catch_unwind` (`guarded`/`notify`), and `queue.rs` guards `progress()` reads and job drops done under the lane lock (`safe_progress`/`drop_guarded`); a panicking job is reported `Failed("job panicked: ...")` and never re-stepped, the worker (the single GPU one included) keeps running. A job the UI waits on via a `ReportSlot` needs a `Drop` that fills it (`BackupJob` got one). Not covered: ad-hoc threads outside Pounce (#706). Mutation-proved by `runtime::tests::a_panic*`.
 - **[#205](https://github.com/jordanfelle/nict ...
 - **[#206](https://github.com/jordanfelle/nict ...
 - **[#466](https://github.com/jordanfelle/nicti/issues/466)**: unchunked mask bake (~1s CUDA unmeasured, ~9s CPU) accepted as the foreground-preemption bound; CPU-lane move breaks ORT-env serialization; measure+chunk is #574.

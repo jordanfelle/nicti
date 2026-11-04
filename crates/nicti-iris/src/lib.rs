@@ -11,6 +11,13 @@
 //! [`lateral_ca`] holds the automatic lateral-chromatic-aberration estimator, the no-profile
 //! fallback.
 
+// Never-crash policy (#538): production code returns errors instead of panicking. Tests
+// are exempt. Needs a documented reason to `#[allow]` on any single site.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 pub mod dng;
 pub mod lateral_ca;
 pub mod lensfun;

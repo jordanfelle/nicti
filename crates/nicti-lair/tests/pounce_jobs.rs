@@ -10,8 +10,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nicti_lair::ninelives::{BackupOutcome, BackupPolicy};
 use nicti_lair::patrol::SyncOptions;
-use nicti_lair::pounce_jobs::{BaselineJob, IngestJob, SyncJob, VerifyJob};
+use nicti_lair::pounce_jobs::{BackupJob, BaselineJob, IngestJob, SyncJob, VerifyJob};
 use nicti_lair::{CatalogStore, SqliteCatalog};
 use nicti_pounce::{JobState, Pounce};
 
@@ -264,4 +265,30 @@ fn dropping_verify_and_baseline_jobs_reports_cancelled() {
     let (job, slot) = VerifyJob::new(store, root_id, dir.path());
     drop(job);
     assert!(slot.lock().unwrap().take().unwrap().cancelled);
+}
+
+/// A backup job that is dropped without reporting (its step panicked, or Pounce dropped it unrun)
+/// must still resolve its slot: `poll_backup` and `NineLives` only advance from a resolved report,
+/// so an unresolved one would hide every later scheduled backup's failure (#538).
+#[test]
+fn a_backup_job_dropped_without_reporting_resolves_its_slot_as_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(SqliteCatalog::open(&dir.path().join("catalog.db")).unwrap());
+    let policy = BackupPolicy::new(dir.path().join("backups"), "catalog");
+    let (job, slot) = BackupJob::new(catalog, policy, 1_700_000_000);
+    assert!(
+        slot.lock().unwrap().is_none(),
+        "unresolved while the job lives"
+    );
+    drop(job);
+    let report = slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("Drop resolves the slot");
+    assert!(
+        matches!(report.outcome, BackupOutcome::Failed(_)),
+        "{:?}",
+        report.outcome
+    );
 }

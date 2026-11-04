@@ -246,6 +246,26 @@ impl BackupJob {
     }
 }
 
+/// A backup job dropped without reporting (its `step` panicked, or Pounce dropped it unrun at
+/// shutdown/cancel) still resolves its slot: `poll_backup` only clears its pending result, and
+/// `NineLives` only advances its "last backup" bookkeeping, from a *resolved* report, so an
+/// unresolved slot would silently hide every later scheduled backup's failure.
+impl Drop for BackupJob {
+    fn drop(&mut self) {
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(BackupReport {
+                outcome: BackupOutcome::Failed(
+                    "the backup did not complete (cancelled, or the job failed unexpectedly)"
+                        .into(),
+                ),
+                stale_partials_removed: self.stale_partials_removed,
+                pruned: 0,
+            });
+        }
+    }
+}
+
 impl ChunkedJob for BackupJob {
     fn spec(&self) -> JobSpec {
         JobSpec {
