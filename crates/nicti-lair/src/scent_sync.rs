@@ -748,6 +748,9 @@ pub enum ClearOutcome {
     /// The sidecar changed under us and the write is held for review (see `resolve_review`);
     /// nothing was changed.
     HeldForReview,
+    /// The asset's file is not reachable (offline volume, moved file). Nothing was changed:
+    /// clearing only the catalog would let the file's position come back when it reappears.
+    Unreachable,
 }
 
 /// Removes an asset's GPS position (#668), from the catalog and -- through the usual write-back --
@@ -762,6 +765,11 @@ pub fn clear_position(
     now_ms: i64,
 ) -> Result<ClearOutcome, ScentSyncError> {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // The file itself (the RAW, or the JPEG that carries its own packet), not just its sidecar:
+    // an unreachable one may still hold a position we cannot see or remove.
+    if !raw_path.is_file() {
+        return Ok(ClearOutcome::Unreachable);
+    }
     let path = xmp_target(raw_path);
     let file_has_gps = load(&path)?.is_some_and(|l| l.markers.gps.is_some());
     let in_catalog = store.get_gps(&[asset_id])?.contains_key(&asset_id);

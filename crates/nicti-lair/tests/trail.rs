@@ -440,3 +440,60 @@ fn a_sidecar_changed_under_us_holds_the_clear_for_review_and_loses_nothing() {
         "catalog position kept"
     );
 }
+
+#[test]
+fn clearing_an_unreachable_file_changes_nothing_so_its_position_cannot_come_back() {
+    let f = fx();
+    let log = parse_gpx(LOG).unwrap();
+    let a = f.add("a.NEF", Some("2026:05:01 10:00:30"));
+    geotag_assets(
+        &f.store,
+        std::slice::from_ref(&a),
+        &log,
+        &GeotagOptions::default(),
+        false,
+        true,
+        1,
+    );
+    // The volume goes offline: the RAW and its sidecar are not reachable.
+    let moved = f.dir.path().join("offline");
+    std::fs::create_dir(&moved).unwrap();
+    std::fs::rename(&a.1, moved.join("a.NEF")).unwrap();
+    std::fs::rename(a.1.with_extension("xmp"), moved.join("a.xmp")).unwrap();
+
+    let out = clear_position(&f.store, a.0, &a.1, true, 2).unwrap();
+    assert_eq!(out, ClearOutcome::Unreachable);
+    assert!(
+        f.store.get_gps(&[a.0]).unwrap().contains_key(&a.0),
+        "the catalog keeps the position the offline file still carries"
+    );
+}
+
+#[test]
+fn clearing_a_jpeg_leaves_its_raw_pairs_sidecar_position_alone() {
+    let f = fx();
+    let log = parse_gpx(LOG).unwrap();
+    let raw = f.add("IMG_1.NEF", Some("2026:05:01 10:00:30"));
+    let jpg = f.add("IMG_1.jpg", Some("2026:05:01 10:00:30"));
+    geotag_assets(
+        &f.store,
+        &[raw.clone(), jpg.clone()],
+        &log,
+        &GeotagOptions::default(),
+        false,
+        true,
+        1,
+    );
+    assert!(read_gps(&sidecar(&raw.1)).is_some());
+
+    assert_eq!(
+        clear_position(&f.store, jpg.0, &jpg.1, true, 2).unwrap(),
+        ClearOutcome::Cleared
+    );
+    assert!(f.store.get_gps(&[jpg.0]).unwrap().is_empty());
+    assert!(
+        read_gps(&sidecar(&raw.1)).is_some(),
+        "the RAW's own sidecar (IMG_1.xmp) keeps its position"
+    );
+    assert!(f.store.get_gps(&[raw.0]).unwrap().contains_key(&raw.0));
+}

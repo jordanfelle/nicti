@@ -19,6 +19,8 @@ use nicti_lair::trail::GeotagReport;
 use nicti_lair::{CatalogStore, GeotagOptions, Gps};
 use nicti_pounce::Pounce;
 
+/// How often the open Info section re-reads its photo.
+const INFO_REFRESH: std::time::Duration = std::time::Duration::from_secs(3);
 /// The camera-clock offset range the form accepts (UTC-14:00 .. UTC+14:00), in minutes.
 const MAX_OFFSET_MINUTES: i32 = 14 * 60;
 /// Drift bound: a day either way is already far beyond a real camera clock.
@@ -218,6 +220,9 @@ pub struct GeotagUi {
     /// The Info section's data for one photo, kept until the cursor moves or a job finishes.
     info: Option<Result<Option<InfoData>, String>>,
     info_for: Option<i64>,
+    /// When `info` was read: it is re-read every few seconds so a position changed elsewhere (a
+    /// rescan, an XMP import) shows up without moving the cursor.
+    info_at: Option<std::time::Instant>,
     /// Tests draw the collapsed sections open.
     #[cfg(test)]
     force_open: bool,
@@ -237,6 +242,7 @@ impl Default for GeotagUi {
             status: None,
             info: None,
             info_for: None,
+            info_at: None,
             #[cfg(test)]
             force_open: false,
         }
@@ -268,6 +274,7 @@ impl GeotagUi {
         if finished {
             self.info = None;
             self.info_for = None;
+            self.info_at = None;
         }
         finished
     }
@@ -324,7 +331,8 @@ impl GeotagUi {
         ui: &mut egui::Ui,
         store: &Arc<dyn CatalogStore + Send + Sync>,
         pounce: &Pounce,
-        targets: &[i64],
+        target_count: usize,
+        targets: &dyn Fn() -> Vec<i64>,
         cursor: Option<i64>,
         auto_write: bool,
         busy_elsewhere: bool,
@@ -396,7 +404,7 @@ impl GeotagUi {
                     );
                 }
                 ui.horizontal(|ui| {
-                    let n = targets.len();
+                    let n = target_count;
                     if ui
                         .add_enabled(
                             idle && n > 0,
@@ -405,14 +413,14 @@ impl GeotagUi {
                         .on_hover_text("Tags the selected photos (or the cursor photo).")
                         .clicked()
                     {
-                        self.start_geotag(store, pounce, targets.to_vec(), auto_write);
+                        self.start_geotag(store, pounce, targets(), auto_write);
                     }
                     if ui
                         .add_enabled(idle && n > 0, egui::Button::new("Clear positions"))
                         .on_hover_text("Removes the stored position from the selected photos.")
                         .clicked()
                     {
-                        self.start_clear(store, pounce, targets.to_vec(), auto_write);
+                        self.start_clear(store, pounce, targets(), auto_write);
                     }
                 });
                 if let Some(msg) = &self.status {
@@ -428,10 +436,14 @@ impl GeotagUi {
                     ui.weak("No photo under the cursor.");
                     return;
                 };
-                if self.info_for != Some(id) {
+                let stale = self.info_at.is_none_or(|t| t.elapsed() > INFO_REFRESH);
+                if self.info_for != Some(id) || stale {
                     self.info = Some(InfoData::read(store.as_ref(), id));
                     self.info_for = Some(id);
+                    self.info_at = Some(std::time::Instant::now());
                 }
+                // Keep the section current while it is open and the app is otherwise idle.
+                ui.ctx().request_repaint_after(INFO_REFRESH);
                 match &self.info {
                     Some(Ok(Some(info))) => {
                         let info = info.clone();
@@ -701,7 +713,16 @@ mod tests {
         };
         let frame = |ui_state: &mut GeotagUi, cursor: Option<i64>, auto: bool, busy: bool| {
             let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-                ui_state.show(ui, &dyn_store, &pounce, &ids, cursor, auto, busy);
+                ui_state.show(
+                    ui,
+                    &dyn_store,
+                    &pounce,
+                    ids.len(),
+                    &|| ids.clone(),
+                    cursor,
+                    auto,
+                    busy,
+                );
             });
             out.textures_delta.clear();
         };
@@ -723,6 +744,42 @@ mod tests {
             .position
             .is_none());
         frame(&mut ui_state, None, true, false);
+        // A position changed elsewhere shows up on the next periodic re-read, with no cursor move.
+        store
+            .set_gps(
+                ids[1],
+                Some(Gps {
+                    latitude: 1.0,
+                    longitude: 2.0,
+                    altitude: None,
+                }),
+            )
+            .unwrap();
+        frame(&mut ui_state, Some(ids[1]), true, false);
+        assert!(
+            ui_state
+                .info
+                .clone()
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .position
+                .is_none(),
+            "fresh data is not re-read every frame"
+        );
+        ui_state.info_at = Some(std::time::Instant::now() - INFO_REFRESH * 2);
+        frame(&mut ui_state, Some(ids[1]), true, false);
+        assert!(
+            ui_state
+                .info
+                .clone()
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .position
+                .is_some(),
+            "stale data is re-read"
+        );
         // A missing photo is a message, not a panic.
         frame(&mut ui_state, Some(ids[1] + 100), true, false);
         assert!(matches!(ui_state.info, Some(Ok(None))));

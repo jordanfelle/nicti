@@ -475,3 +475,40 @@ fn a_clear_position_job_removes_what_a_geotag_job_wrote() {
     assert!(store.get_gps(&ids).unwrap().is_empty());
     pounce.shutdown();
 }
+
+#[test]
+fn jobs_report_an_asset_they_cannot_resolve_or_reach_as_failed_not_as_done() {
+    let (store, dir, ids) = geotag_fixture(2);
+    let log = nicti_scent::gpx::parse_gpx(GPX).unwrap();
+    let pounce = Pounce::new(u64::MAX, 2, 2, || {});
+    // One real asset, one id that is not in the catalog.
+    let (job, slot) = GeotagJob::new(
+        store.clone(),
+        vec![ids[0], 9_999],
+        GpxSource::Parsed(log),
+        nicti_scent::gpx::GeotagOptions::default(),
+        false,
+        true,
+    );
+    pounce.submit(Box::new(job));
+    assert!(wait_until(
+        || slot.lock().unwrap().is_some(),
+        Duration::from_secs(5)
+    ));
+    let r = slot.lock().unwrap().clone().unwrap();
+    assert_eq!((r.tagged, r.failed.len(), r.total()), (1, 1, 2), "{r:?}");
+    assert_eq!(r.failed[0].0, 9_999);
+
+    // Clearing a photo whose file went offline is a failure, not a quiet success.
+    std::fs::remove_file(dir.path().join("p0.NEF")).unwrap();
+    let (job, slot) = ClearPositionJob::new(store, vec![ids[0]], true);
+    pounce.submit(Box::new(job));
+    assert!(wait_until(
+        || slot.lock().unwrap().is_some(),
+        Duration::from_secs(5)
+    ));
+    let r = slot.lock().unwrap().clone().unwrap();
+    assert_eq!((r.cleared, r.failed.len()), (0, 1), "{r:?}");
+    assert!(r.failed[0].1.contains("not reachable"), "{r:?}");
+    pounce.shutdown();
+}

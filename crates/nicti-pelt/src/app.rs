@@ -717,6 +717,23 @@ impl PeltApp {
     }
 
     fn job_active(&self, kinds: &[JobKind]) -> bool {
+        // A geotag/clear run writes catalog rows and sidecars for a captured list of assets
+        // (#668); anything that moves, deletes, re-scans or re-hashes those files must wait for it.
+        if self.geotag_ui.is_running()
+            && kinds.iter().any(|k| {
+                matches!(
+                    k,
+                    JobKind::Import
+                        | JobKind::Sync
+                        | JobKind::Move
+                        | JobKind::Delete
+                        | JobKind::Verify
+                        | JobKind::Baseline
+                )
+            })
+        {
+            return true;
+        }
         // A card copy being planned has no job yet, but must still hold the same guards.
         if self.card_copy.is_busy()
             && kinds.iter().any(|k| {
@@ -2322,11 +2339,8 @@ impl PeltApp {
                 // #668: apply a GPX log to the selection; the Info section shows (and clears) the
                 // cursor photo's position.
                 {
-                    let targets = self
-                        .grid
-                        .as_ref()
-                        .map(GridSession::target_ids)
-                        .unwrap_or_default();
+                    let target_count = self.grid.as_ref().map_or(0, GridSession::target_count);
+                    let grid = self.grid.as_ref();
                     let cursor = self.grid.as_ref().and_then(GridSession::cursor_id);
                     let busy = other_running || self.card_copy.is_busy();
                     let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
@@ -2334,7 +2348,8 @@ impl PeltApp {
                         ui,
                         &dyn_store,
                         &self.pounce,
-                        &targets,
+                        target_count,
+                        &|| grid.map(GridSession::target_ids).unwrap_or_default(),
                         cursor,
                         self.xmp.autowrite(),
                         busy,

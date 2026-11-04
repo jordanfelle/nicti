@@ -1228,6 +1228,10 @@ impl ChunkedJob for ClearPositionJob {
                 Ok(ClearOutcome::NothingToClear) => self.report.nothing_to_clear += 1,
                 Ok(ClearOutcome::NeedsAutoWrite) => self.report.needs_auto_write += 1,
                 Ok(ClearOutcome::HeldForReview) => self.report.held_for_review += 1,
+                Ok(ClearOutcome::Unreachable) => self.report.failed.push((
+                    id,
+                    "its file is not reachable (offline volume?); nothing was changed".into(),
+                )),
                 Err(e) => self.report.failed.push((id, e)),
             }
         }
