@@ -190,10 +190,11 @@ pub fn scrub_injected(ctx: &egui::Context, open_now: bool) {
     let Some(w) = handle(ctx) else { return };
     let mut st = w.lock();
     st.awaiting_ui = false;
-    if !open_now || st.allow_destructive || st.injected_now.is_empty() {
+    // Taken on every path, so the key can never outlive the frame it describes.
+    let injected = std::mem::take(&mut st.injected_now);
+    if !open_now || st.allow_destructive || injected.is_empty() {
         return;
     }
-    let injected = std::mem::take(&mut st.injected_now);
     st.discarded += injected.len() as u64;
     ctx.input_mut(|i| {
         for ev in &injected {
