@@ -2372,6 +2372,7 @@ impl PeltApp {
         if preview_settings::show(ui, &mut self.preview_settings) {
             self.apply_preview_settings();
         }
+        crate::notices::show(ui);
         ui.separator();
         {
             let dyn_store: Arc<dyn CatalogStore + Send + Sync> = self.catalog.clone();

@@ -356,7 +356,7 @@ time and stored nowhere). Obligations to carry into the release notice (a distri
 not a compatibility question): (1) the crate's LGPL-3.0 text, its copyright line for the LensFun
 contributors (Zabolotny, Post and others, see its `NOTICE`) and a prominent LGPL notice; (2) CC BY-SA 3.0
 attribution for the lens database with a link to the licence; (3) the corresponding source stays available
-alongside the binary, which GitHub Releases already provides. **Not shipped yet: the notices themselves are tracked in [#689](https://github.com/jordanfelle/nicti/issues/689) and must land before a release that includes this feature.** The database is data inside a Cargo
+alongside the binary, which GitHub Releases already provides. **Shipped in [#689](https://github.com/jordanfelle/nicti/issues/689):** `assets/notices/` (`THIRD-PARTY-NOTICES.txt` with the LGPL notice, the LensFun contributors' copyright lines and the CC BY-SA 3.0 attribution + link, plus the full `LICENSE-LGPL-3.0.txt` / `LICENSE-GPL-3.0.txt`) is the single source: `packaging/windows/nicti.nsi` shows it as the installer's licence page and installs all three under `$INSTDIR\licenses`, and `nicti-pelt`'s `notices.rs` embeds the same files in the settings panel ("Third-party notices"). Keep these in step when a dependency adds an obligation. The LibRaw/rawler LGPL-2.1 notices are not in the file yet (follow-up). The database is data inside a Cargo
 dependency, not a file tracked in this repository, so `assets/ATTRIBUTION.md` (tracked fonts/images/models
 only) takes no row. `lensfun`'s `apps/` (GPL-3.0 tools) are not ported or linked. Outcome of the check
 "can the licence be satisfied for shipping": yes.

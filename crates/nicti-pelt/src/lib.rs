@@ -40,6 +40,7 @@ mod mask_edit;
 mod mask_models;
 mod mask_panel;
 mod mask_tool;
+mod notices;
 mod pending;
 mod prebake;
 mod preview_color;
