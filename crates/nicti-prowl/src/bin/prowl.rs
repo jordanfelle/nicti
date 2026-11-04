@@ -28,6 +28,36 @@ enum Command {
     Select(SelectArgs),
     /// Rebuild a ref-10k copy from a live photo library by matching files on sha256 (#136).
     Materialize(MaterializeArgs),
+    /// Compare benchmark CPU time against history.jsonl and fail on a regression (#538).
+    BenchGate(BenchGateArgs),
+}
+
+#[derive(Args)]
+struct BenchGateArgs {
+    /// The JSON-lines history of earlier runs (created on first `--append`).
+    #[arg(long, default_value = "bench-results/history.jsonl")]
+    history: PathBuf,
+    /// A `RunReport` JSON written by `perf::write_report` (repeatable).
+    #[arg(long = "report", required = true)]
+    reports: Vec<PathBuf>,
+    /// Regression threshold as a fraction (0.20 = more than 20 % over the baseline).
+    #[arg(long, default_value_t = 0.20)]
+    threshold: f64,
+    /// How many of the latest history entries make the baseline (median).
+    #[arg(long, default_value_t = 5)]
+    window: usize,
+    /// Benchmarks with fewer history entries than this are recorded but not gated.
+    #[arg(long, default_value_t = 3)]
+    min_history: usize,
+    /// Baselines under this many ms are too small to gate.
+    #[arg(long, default_value_t = 100.0)]
+    noise_floor_ms: f64,
+    /// Commit id to record with the new entries.
+    #[arg(long)]
+    commit: Option<String>,
+    /// Append the new entries to the history, but only when nothing regressed.
+    #[arg(long)]
+    append: bool,
 }
 
 #[derive(Args)]
@@ -98,6 +128,16 @@ fn main() -> anyhow::Result<()> {
         Command::Verify(args) => run_verify(args),
         Command::Select(args) => run_select(args),
         Command::Materialize(args) => run_materialize(args),
+        // Exit 1 is reserved for "regressed"; anything that stops the gate from judging at all
+        // (corrupt history, report without CPU time, unreadable file) exits 2, so a CI script can
+        // tell a slow build from a broken gate.
+        Command::BenchGate(args) => {
+            if let Err(e) = run_bench_gate(args) {
+                eprintln!("bench-gate: {e:#}");
+                std::process::exit(2);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -211,4 +251,57 @@ fn run_materialize(args: MaterializeArgs) -> anyhow::Result<()> {
     } else {
         anyhow::bail!("ref-10k is incomplete: the source library is missing some manifest files")
     }
+}
+
+fn run_bench_gate(args: BenchGateArgs) -> anyhow::Result<()> {
+    use nicti_prowl::gate::{self, Policy};
+    anyhow::ensure!(
+        args.threshold.is_finite() && args.threshold >= 0.0,
+        "--threshold must be a non-negative number"
+    );
+    let history = gate::read_history(&args.history)?;
+    let mut current: Vec<gate::Entry> = Vec::new();
+    for path in &args.reports {
+        let json = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+        let entry = gate::entry_from_report(&json, args.commit.as_deref())
+            .map_err(|e| anyhow::anyhow!("{}: {e:#}", path.display()))?;
+        // Two reports of one benchmark would be judged against the same history and both
+        // appended, double-weighting one run in every later median.
+        anyhow::ensure!(
+            !current.iter().any(|c| c.bench == entry.bench),
+            "{}: a second report for benchmark `{}`",
+            path.display(),
+            entry.bench
+        );
+        current.push(entry);
+    }
+    let policy = Policy {
+        threshold: args.threshold,
+        window: args.window.max(1),
+        min_history: args.min_history,
+        noise_floor_ms: args.noise_floor_ms,
+    };
+    let verdicts = gate::evaluate(&history, &current, &policy);
+    for v in &verdicts {
+        println!("{}", v.line());
+    }
+    let regressed = verdicts.iter().filter(|v| v.is_regression()).count();
+    if regressed > 0 {
+        eprintln!(
+            "{regressed} benchmark(s) regressed more than {:.0} % in CPU time",
+            policy.threshold * 100.0
+        );
+        // History is left alone: a regression must not become the next baseline.
+        std::process::exit(1);
+    }
+    if args.append {
+        gate::append_history(&args.history, &current)?;
+        println!(
+            "appended {} entr(ies) to {}",
+            current.len(),
+            args.history.display()
+        );
+    }
+    Ok(())
 }
