@@ -35,7 +35,16 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "AGPL-3.0-or-later"
 
+; Third-party notices (#689): the LGPL notice and the CC BY-SA database attribution that the
+; bundled lens-correction library requires us to show. Shown as the licence page, installed beside
+; the exe, and shown in the app (nicti-pelt embeds the same file).
+!define NOTICES_DIR "${__FILEDIR__}\..\..\assets\notices"
+
 !define MUI_ABORTWARNING
+!define MUI_LICENSEPAGE_TEXT_TOP "Nicti is free software (AGPL-3.0-or-later). It includes third-party components under the licences below."
+!define MUI_LICENSEPAGE_BUTTON "Next >"
+!define MUI_LICENSEPAGE_TEXT_BOTTOM "These notices are for your information; you do not need to accept them to install."
+!insertmacro MUI_PAGE_LICENSE "${NOTICES_DIR}\THIRD-PARTY-NOTICES.txt"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -126,6 +135,13 @@ FunctionEnd
 Section "Nicti" SecMain
   Call InstallExe
 
+  ; Licence texts and notices (#689), beside the exe.
+  SetOutPath "$INSTDIR\licenses"
+  File "${NOTICES_DIR}\THIRD-PARTY-NOTICES.txt"
+  File "${NOTICES_DIR}\LICENSE-LGPL-3.0.txt"
+  File "${NOTICES_DIR}\LICENSE-GPL-3.0.txt"
+  SetOutPath "$INSTDIR"
+
   WriteRegStr HKCU "Software\Nicti" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Nicti" "Version" "${VERSION}"
 
@@ -151,6 +167,10 @@ SectionEnd
 Section "Uninstall"
   Delete "$INSTDIR\nicti.exe"
   Delete "$INSTDIR\Uninstall.exe"
+  Delete "$INSTDIR\licenses\THIRD-PARTY-NOTICES.txt"
+  Delete "$INSTDIR\licenses\LICENSE-LGPL-3.0.txt"
+  Delete "$INSTDIR\licenses\LICENSE-GPL-3.0.txt"
+  RMDir "$INSTDIR\licenses"
   RMDir "$INSTDIR"
 
   Delete "$SMPROGRAMS\Nicti\Nicti.lnk"

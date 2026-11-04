@@ -1,0 +1,51 @@
+NICTI - THIRD-PARTY NOTICES
+===========================
+
+Nicti is free software, licensed AGPL-3.0-or-later. Its source code is available
+at https://github.com/jordanfelle/nicti (the release you installed is tagged
+there). This file lists notices that the licences of bundled third-party
+components require us to pass on.
+
+
+LENS CORRECTION: LensFun (lensfun-rs)  --  LGPL NOTICE
+------------------------------------------------------
+
+Nicti's lens-correction fallback uses the Rust crate "lensfun" (lensfun-rs,
+https://github.com/vdavid/lensfun-rs), a Rust port of LensFun, statically
+linked into Nicti. It is licensed under the GNU Lesser General Public License,
+version 3 or (at your option) any later version (LGPL-3.0-or-later).
+
+This is free software: you may redistribute it and/or modify it under the terms
+of that licence. It is distributed WITHOUT ANY WARRANTY, without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. The
+full licence texts are in LICENSE-LGPL-3.0.txt and LICENSE-GPL-3.0.txt (which
+the LGPL incorporates by reference), installed beside this file.
+
+Because Nicti is itself open source under AGPL-3.0-or-later, the complete
+corresponding source of the combined program, which lets you modify the
+library and rebuild Nicti, is the Nicti source at the URL above.
+
+Copyright notices of the LensFun contributors:
+
+  Copyright (C) 2007-2024 Andrew Zabolotny <zap@homelink.ru>
+  Copyright (C) 2014      Roman Lebedev
+  Copyright (C) 2010      Klaus Post (database, calibration data)
+  And many other contributors; see https://github.com/lensfun/lensfun
+
+The Rust port:
+
+  Copyright (C) 2026      David Veszelovszki <veszelovszki@gmail.com>
+
+
+LENS DATABASE: LensFun calibration data  --  CC BY-SA 3.0
+---------------------------------------------------------
+
+The lens calibration database bundled with the crate above is the work of the
+LensFun community (https://lensfun.github.io/), licensed under the Creative
+Commons Attribution-ShareAlike 3.0 Unported licence:
+
+  https://creativecommons.org/licenses/by-sa/3.0/
+
+Nicti uses the database unmodified and only reads it. Per-lens corrections that
+Nicti derives from it are computed at run time and are not stored or
+redistributed as a database.
