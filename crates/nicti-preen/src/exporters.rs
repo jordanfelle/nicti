@@ -533,8 +533,9 @@ fn bt601(r: f32, g: f32, b: f32, mid: f32, max: f32) -> (f32, f32, f32) {
 /// JPEG XL (#359) through `jixel` (pure Rust, BSD-3-Clause OR Apache-2.0): lossy VarDCT by quality,
 /// or lossless modular, 8- or 16-bit. The color space is *signalled* in the codestream header
 /// (sRGB, or Display P3 primaries with the sRGB curve), not embedded as an ICC profile; the encoder
-/// converts the pixels through those primaries, which is why Adobe RGB (no enumerated primaries)
-/// is refused by `ExportSpec::validate`. EXIF and XMP go into the container's `Exif` and `xml `
+/// only *labels* the samples it is given (`export_frame` has already produced them in the target
+/// space), which is why Adobe RGB (no enumerated primaries, it would be labelled sRGB) is refused
+/// by `ExportSpec::validate`. EXIF and XMP go into the container's `Exif` and `xml `
 /// boxes. The frame is already upright, so the orientation field stays `Normal`.
 pub struct JxlExporter;
 module_impl!(JxlExporter, JXL_ID);
@@ -957,6 +958,39 @@ mod tests {
     }
 
     #[test]
+    fn jxl_signals_the_color_space_in_the_codestream() {
+        let f = fixture(OutputSpace::Srgb, 16, 16);
+        let px = gradient8(16, 16);
+        let img = OutputImage {
+            width: 16,
+            height: 16,
+            pixels: &px,
+        };
+        let spec = FormatSpec::Jxl {
+            quality: 90,
+            depth: BitDepth::Eight,
+            lossless: true,
+        };
+        let primaries = |space| {
+            let mut e = embed(&f, 300);
+            e.color_space = space;
+            let out = JxlExporter.encode(&img, &spec, &e).unwrap();
+            let image = jxl_oxide::JxlImage::builder()
+                .read(Cursor::new(out))
+                .unwrap();
+            image.rendered_cicp().expect("enumerated colour encoding")
+        };
+        // jxl-oxide reports the JXL enum primaries as CICP: 1 = sRGB/BT.709, 11 = P3 (the JXL "P3"
+        // enum is paired with D65 by jixel's `display_p3()`); transfer 13 = sRGB curve for both.
+        let (srgb, p3) = (
+            primaries(ExportSpace::Srgb),
+            primaries(ExportSpace::DisplayP3),
+        );
+        assert_eq!((srgb[0], srgb[1]), (1, 13));
+        assert_eq!((p3[0], p3[1]), (11, 13));
+    }
+
+    #[test]
     fn jxl_16_bit_and_adobe_rgb_refusal() {
         let f = fixture(OutputSpace::Srgb, 32, 24);
         let img16 = gradient16_img();
@@ -966,8 +1000,14 @@ mod tests {
             lossless: true,
         };
         let out = JxlExporter.encode(&img16, &spec, &embed(&f, 300)).unwrap();
-        let (w, h, _) = decode_jxl(&out);
+        let (w, h, buf) = decode_jxl(&out);
         assert_eq!((w as u32, h as u32), (img16.width, img16.height));
+        let OutputPixels::Rgb16(want) = img16.pixels else {
+            unreachable!()
+        };
+        for (got, want) in buf.iter().zip(want) {
+            assert_eq!((got * 65535.0).round() as u16, *want);
+        }
         let mut adobe = embed(&f, 300);
         adobe.color_space = ExportSpace::AdobeRgb;
         assert!(JxlExporter.encode(&img16, &spec, &adobe).is_err());

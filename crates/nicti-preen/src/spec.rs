@@ -145,8 +145,8 @@ impl ExportSpec {
             if !(1..=100).contains(&quality) {
                 return Err(SpecError::JxlQuality(quality));
             }
-            // The encoder converts the pixels through the enumerated primaries it signals; Adobe
-            // RGB has no enumerated primaries, so it would be encoded as if it were sRGB.
+            // The encoder only labels the samples with the enumerated primaries it signals; Adobe
+            // RGB has none, so the file would be labelled sRGB and display with shifted colour.
             if self.color_space == ExportSpace::AdobeRgb {
                 return Err(SpecError::JxlColorSpace);
             }
