@@ -79,6 +79,12 @@ pub struct Stroke {
     /// passes, and a stroke crossing itself, darken the mask towards `flow`'s ceiling of 1 (#357).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub buildup: bool,
+    /// True: Auto Mask (#644). The stroke's own field is refined with a guided filter against the
+    /// photo's luminance, so the paint snaps to edges instead of spilling across them. Build-up
+    /// then accumulates within the stroke only; the stroke joins earlier ones with `max` (or
+    /// removes with the erase fold).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auto_mask: bool,
 }
 
 impl Default for Stroke {
@@ -91,6 +97,7 @@ impl Default for Stroke {
             erase: false,
             pressure: Vec::new(),
             buildup: false,
+            auto_mask: false,
         }
     }
 }
@@ -479,10 +486,14 @@ mod tests {
         // A stroke saved before #357 has neither field.
         let old: Stroke =
             serde_json::from_value(json!({"points": [[0.1, 0.2]], "radius": 0.02})).unwrap();
-        assert!(old.pressure.is_empty() && !old.buildup);
+        assert!(old.pressure.is_empty() && !old.buildup && !old.auto_mask);
         // Defaults are not written, so unpressured documents keep their bytes.
         let v = serde_json::to_value(Stroke::default()).unwrap();
-        assert!(v.get("pressure").is_none() && v.get("buildup").is_none());
+        assert!(
+            v.get("pressure").is_none()
+                && v.get("buildup").is_none()
+                && v.get("auto_mask").is_none()
+        );
     }
 
     fn brush(n: usize) -> MaskSource {

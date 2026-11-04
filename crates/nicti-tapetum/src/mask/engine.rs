@@ -27,7 +27,7 @@ use super::compose::{ai_bake_key, hash_group, stable_hash};
 use super::guided::{self, GuidedKernels};
 use super::kernels::{bin_stroke, FieldTexture, MaskKernels};
 use super::local::pack_active;
-use super::params::{LocalCorrection, MaskParams, MaskSource};
+use super::params::{LocalCorrection, MaskParams, MaskSource, Op};
 use super::raster;
 use super::Field;
 use crate::cache::Tier;
@@ -187,6 +187,8 @@ pub struct MaskStats {
     pub guide_builds: usize,
     /// Brush stroke GPU passes.
     pub brush_passes: usize,
+    /// Guided refines of an Auto Mask brush stroke (#644).
+    pub auto_mask_refines: usize,
     /// Range-mask GPU passes.
     pub range_passes: usize,
     /// Atlas repacks.
@@ -439,6 +441,11 @@ impl MaskEngine {
                         None => h.update(&[0u8; 32]),
                     };
                 }
+                // An Auto Mask stroke follows the photo's edges, so the guide is part of its key.
+                MaskSource::Brush { strokes } if strokes.iter().any(|s| s.auto_mask) => {
+                    h.update(b"auto-mask");
+                    h.update(cx.inputs.guide_key.as_bytes());
+                }
                 MaskSource::LuminanceRange { .. } | MaskSource::ColorRange { .. } => {
                     h.update(cx.inputs.guide_key.as_bytes());
                     for row in cx.inputs.range_matrix {
@@ -575,6 +582,11 @@ impl MaskEngine {
         chain.update(b"brush-prefix-1");
         chain.update(&mw.to_le_bytes());
         chain.update(&mh.to_le_bytes());
+        // Auto Mask strokes depend on the photo, so a new guide must not resume from their cache.
+        if strokes.iter().any(|s| s.auto_mask) {
+            chain.update(b"auto-mask");
+            chain.update(cx.inputs.guide_key.as_bytes());
+        }
         prefix.push(chain.finalize());
         for s in strokes {
             let mut h = blake3::Hasher::new();
@@ -605,6 +617,11 @@ impl MaskEngine {
             let used = state.dabs_used + dabs.len();
             let next_tex = match bin_stroke(&dabs, mw as usize, mh as usize) {
                 None => Arc::clone(&state.tex),
+                Some(_) if stroke.auto_mask => {
+                    self.stats.brush_passes += 1;
+                    self.stats.auto_mask_refines += 1;
+                    Arc::new(self.auto_mask_stroke(gpu, &state.tex, stroke, budget, cx))
+                }
                 Some(binned) => {
                     self.stats.brush_passes += 1;
                     let out = scratch
@@ -791,6 +808,62 @@ impl MaskEngine {
         };
         self.haze_cache.put(key, state.clone());
         state
+    }
+
+    /// An Auto Mask stroke (#644): paints the stroke alone *without its feather* (a hard-edged
+    /// field, like a model's alpha), refines that with the guided filter against the photo's
+    /// luminance (the same refine an AI alpha gets, at the mask's own extent) so the boundary
+    /// snaps to nearby image edges, then folds it into `prev`: `max` to add, `acc * (1 - w)` to
+    /// erase. The guided filter only carries structure the input already has, so a soft feather
+    /// would pass through nearly unchanged; the filter's own window supplies the softness.
+    fn auto_mask_stroke(
+        &mut self,
+        gpu: &GpuContext,
+        prev: &FieldTexture,
+        stroke: &super::params::Stroke,
+        budget: usize,
+        cx: &Cx,
+    ) -> FieldTexture {
+        let (mw, mh) = cx.mask;
+        let hard = super::params::Stroke {
+            feather: 0.0,
+            ..stroke.clone()
+        };
+        let dabs = raster::dabs_for_stroke(&hard, mw as usize, mh as usize, budget);
+        let guide = self.guide_luma(gpu, cx);
+        let empty = FieldTexture::new(gpu, mw, mh);
+        let painted = FieldTexture::new(gpu, mw, mh);
+        let refined = FieldTexture::new(gpu, mw, mh);
+        let out = FieldTexture::new(gpu, mw, mh);
+        let op = if stroke.erase { Op::Subtract } else { Op::Add };
+        let binned = bin_stroke(&dabs, mw as usize, mh as usize);
+        submit(gpu, |enc| {
+            if let Some(binned) = &binned {
+                // The stroke alone, from an empty field; an erase stroke is painted as a plain
+                // add and subtracted in the fold below.
+                self.kernels.brush_stroke(
+                    gpu,
+                    enc,
+                    &empty,
+                    &painted,
+                    binned,
+                    false,
+                    stroke.buildup,
+                );
+            }
+            self.guided.refine(
+                gpu,
+                enc,
+                &painted,
+                &guide,
+                &refined,
+                guided::radius_for(mw as usize, mh as usize),
+                guided::EPS,
+            );
+            self.kernels
+                .compose(gpu, enc, prev, &refined, &out, false, 1.0, op);
+        });
+        out
     }
 
     fn refined_alpha(&mut self, gpu: &GpuContext, alpha: &AiAlpha, cx: &Cx) -> Arc<FieldTexture> {
@@ -1295,6 +1368,84 @@ mod tests {
             &cpu_group(&c2.mask, W, H).data,
             3e-3,
         );
+    }
+
+    #[test]
+    fn an_auto_mask_stroke_stops_at_the_photos_edge_and_follows_the_guide() {
+        let Some(mut rig) = Rig::new() else { return };
+        // The guide has a hard luminance step at x = 0.5. The stroke's soft falloff straddles it:
+        // painted plainly the mask ramps across the step; Auto Mask snaps that ramp to the step.
+        let mut wide = stroke(&[[0.25, 0.5], [0.3, 0.5]], false);
+        wide.radius = 0.2;
+        wide.feather = 0.19;
+        let mut auto = wide.clone();
+        auto.auto_mask = true;
+        let plain_c = correction("a", brush(vec![wide]), 1.0);
+        let auto_c = correction("a", brush(vec![auto]), 1.0);
+        let plain_f = rig.prepare(vec![plain_c]).unwrap();
+        let plain = rig.atlas_channel(&plain_f, 0);
+        let before = rig.engine.stats();
+        let auto_f = rig.prepare(vec![auto_c]).unwrap();
+        let after = rig.engine.stats();
+        assert_eq!(after.auto_mask_refines - before.auto_mask_refines, 1);
+        let auto = rig.atlas_channel(&auto_f, 0);
+        let at = |f: &[f32], x: f32| f[(0.5 * H as f32) as usize * W + (x * W as f32) as usize];
+        // The plain stroke fades out well before the step; the auto one stays selected right up
+        // to it and is gone just past it: the boundary snapped to the photo's edge.
+        assert!(at(&auto, 0.44) > 0.9, "{}", at(&auto, 0.44));
+        assert!(at(&plain, 0.44) < 0.5, "{}", at(&plain, 0.44));
+        assert!(at(&auto, 0.47) > 0.8, "{}", at(&auto, 0.47));
+        assert!(at(&auto, 0.53) < 0.1, "{}", at(&auto, 0.53));
+        assert!(
+            at(&auto, 0.49) - at(&auto, 0.53) > 0.5,
+            "the drop sits at the edge"
+        );
+    }
+
+    #[test]
+    fn an_auto_mask_erase_stroke_removes_up_to_the_edge_and_leaves_the_rest() {
+        let Some(mut rig) = Rig::new() else { return };
+        let mut fill = stroke(&[[0.1, 0.5], [0.9, 0.5]], false);
+        fill.radius = 0.3;
+        let mut erase = stroke(&[[0.25, 0.5], [0.3, 0.5]], true);
+        erase.radius = 0.2;
+        erase.feather = 0.19;
+        erase.auto_mask = true;
+        let c = correction("a", brush(vec![fill, erase]), 1.0);
+        let f = rig.prepare(vec![c]).unwrap();
+        let got = rig.atlas_channel(&f, 0);
+        let at = |x: f32| got[(0.5 * H as f32) as usize * W + (x * W as f32) as usize];
+        assert!(at(0.4) < 0.1, "erased inside: {}", at(0.4));
+        assert!(at(0.6) > 0.9, "kept beyond the edge: {}", at(0.6));
+    }
+
+    #[test]
+    fn auto_mask_strokes_rebuild_on_a_new_guide_but_plain_brushes_do_not() {
+        let Some(mut rig) = Rig::new() else { return };
+        let mut auto = stroke(&[[0.3, 0.5], [0.45, 0.5]], false);
+        auto.auto_mask = true;
+        let plain = stroke(&[[0.3, 0.2], [0.45, 0.2]], false);
+        let corrections = vec![
+            correction("auto", brush(vec![auto]), 1.0),
+            correction("plain", brush(vec![plain]), 1.0),
+        ];
+        rig.prepare(corrections.clone()).unwrap();
+        let before = rig.engine.stats();
+        rig.guide = guide_frame(&rig.gpu, 0.2);
+        rig.guide_key = blake3::hash(b"guide-auto-2");
+        rig.prepare(corrections).unwrap();
+        let after = rig.engine.stats();
+        assert_eq!(
+            after.auto_mask_refines - before.auto_mask_refines,
+            1,
+            "the Auto Mask stroke follows the new photo"
+        );
+        assert_eq!(
+            after.brush_passes - before.brush_passes,
+            1,
+            "the plain brush stays cached"
+        );
+        assert_eq!(after.composites - before.composites, 1);
     }
 
     fn ai_source() -> MaskSource {

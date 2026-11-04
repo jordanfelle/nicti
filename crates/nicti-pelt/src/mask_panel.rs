@@ -791,6 +791,11 @@ fn show_selected(
         fraction_slider(ui, "Flow", &mut mask.brush.flow, 1.0);
         ui.checkbox(&mut mask.brush.buildup, "Build-up")
             .on_hover_text("Repeated passes over the same spot darken the mask, like an airbrush.");
+        ui.checkbox(&mut mask.brush.auto_mask, "Auto Mask")
+            .on_hover_text(
+            "Snap new strokes to the edges in the photo, so paint stops at the boundary of what \
+             you are brushing.",
+        );
     }
     ui.checkbox(&mut mask.show_overlay, "Show mask overlay");
 

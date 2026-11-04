@@ -134,6 +134,7 @@ pub fn hash_group(group: &MaskGroup) -> blake3::Hash {
                         erase,
                         pressure,
                         buildup,
+                        auto_mask,
                     } = stroke;
                     h.update(&(points.len() as u64).to_le_bytes());
                     for p in points {
@@ -143,7 +144,7 @@ pub fn hash_group(group: &MaskGroup) -> blake3::Hash {
                     for v in [radius, feather, flow] {
                         h.update(&v.to_bits().to_le_bytes());
                     }
-                    h.update(&[*erase as u8, *buildup as u8]);
+                    h.update(&[*erase as u8, *buildup as u8, *auto_mask as u8]);
                     h.update(&(pressure.len() as u64).to_le_bytes());
                     for v in pressure {
                         h.update(&v.to_bits().to_le_bytes());
@@ -295,6 +296,7 @@ mod tests {
             Box::new(|s| s.flow = 0.5),
             Box::new(|s| s.erase = true),
             Box::new(|s| s.buildup = true),
+            Box::new(|s| s.auto_mask = true),
             Box::new(|s| s.pressure = vec![0.5, 1.0, 1.0]),
             Box::new(|s| s.pressure = vec![0.25, 1.0, 1.0]),
         ];

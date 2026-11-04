@@ -261,6 +261,8 @@ pub struct BrushSettings {
     pub flow: f32,
     /// Airbrush build-up: repeated passes darken the mask (#357).
     pub buildup: bool,
+    /// Auto Mask: strokes snap to the photo's edges (#644).
+    pub auto_mask: bool,
 }
 
 impl Default for BrushSettings {
@@ -270,6 +272,7 @@ impl Default for BrushSettings {
             feather: 0.012,
             flow: 1.0,
             buildup: false,
+            auto_mask: false,
         }
     }
 }
@@ -355,6 +358,7 @@ pub fn begin_stroke_pressure(
             .map(|v| vec![v.clamp(0.0, 1.0)])
             .unwrap_or_default(),
         buildup: brush.buildup && !erase,
+        auto_mask: brush.auto_mask,
     });
     Some((comp, strokes.len() - 1))
 }
@@ -801,6 +805,28 @@ mod tests {
         assert!(!strokes[0].erase && strokes[1].erase);
         assert_eq!(strokes[1].points, vec![[0.6, 0.6]]);
         assert_eq!(strokes[0].radius, brush.radius);
+    }
+
+    #[test]
+    fn a_new_stroke_takes_the_brushs_auto_mask_setting_erase_strokes_included() {
+        let brush = BrushSettings {
+            auto_mask: true,
+            ..BrushSettings::default()
+        };
+        let mut c = new_correction(NewMask::Brush, "b".into());
+        begin_stroke(&mut c, &brush, false, [0.5, 0.5]).unwrap();
+        begin_stroke(&mut c, &brush, true, [0.6, 0.6]).unwrap();
+        let MaskSource::Brush { strokes } = &c.mask.components[0].source else {
+            panic!()
+        };
+        assert!(strokes.iter().all(|s| s.auto_mask));
+        let plain = BrushSettings::default();
+        let mut c = new_correction(NewMask::Brush, "b".into());
+        begin_stroke(&mut c, &plain, false, [0.5, 0.5]).unwrap();
+        let MaskSource::Brush { strokes } = &c.mask.components[0].source else {
+            panic!()
+        };
+        assert!(!strokes[0].auto_mask);
     }
 
     #[test]
