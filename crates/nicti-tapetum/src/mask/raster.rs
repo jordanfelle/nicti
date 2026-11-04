@@ -101,32 +101,37 @@ pub fn dabs_for_stroke(stroke: &Stroke, width: usize, height: usize, cap: usize)
     };
 
     let pts: Vec<(f32, f32)> = stroke.points.iter().copied().map(to_px).collect();
-    let nominal = (radius * SPACING_FRACTION).max(MIN_SPACING_PX);
-    // A build-up dab's flow is rescaled by the spacing actually used, so a widened spacing (very
-    // long strokes) deposits as much per unit length as the nominal one.
-    // (Erase strokes ignore build-up: they remove at full strength, like a max-blended stroke.)
-    let buildup = |mut dabs: Vec<Dab>, spacing: f32| {
+    // The dab radius a pressure draws at, and the walk step after a dab drawn at that pressure:
+    // a fraction of *that dab's* radius, so a dab shrunk by light pressure is followed closely
+    // enough to overlap its neighbour instead of scalloping (#644). `k` >= 1 widens every step
+    // when the stroke would exceed its dab budget.
+    let radius_at =
+        |pr: f32| (radius * (PRESSURE_MIN_SIZE + (1.0 - PRESSURE_MIN_SIZE) * pr)).max(min_radius);
+    let nominal_at = |pr: f32| (radius_at(pr) * SPACING_FRACTION).max(MIN_SPACING_PX);
+    let nominal = nominal_at(1.0);
+    // A build-up dab's flow is rescaled by the step actually taken after it relative to its own
+    // nominal one, so a widened step (very long strokes) deposits as much per unit length as the
+    // nominal one. (Erase strokes ignore build-up: they remove at full strength, like a
+    // max-blended stroke.)
+    let buildup = |mut dabs: Vec<Dab>, steps: &[(f32, f32)]| {
         if stroke.buildup && !stroke.erase {
             // A lone dab (a click, or a stroke shorter than one spacing) has no neighbours to
             // build on, so it deposits what a stroke's centre gets from the dabs overlapping it.
-            let n = if dabs.len() == 1 {
-                2.0 / SPACING_FRACTION
-            } else {
-                spacing / nominal
-            };
-            for d in &mut dabs {
+            let lone = dabs.len() == 1;
+            for (d, &(step, nom)) in dabs.iter_mut().zip(steps) {
+                let n = if lone {
+                    2.0 / SPACING_FRACTION
+                } else {
+                    step / nom
+                };
                 d.flow = 1.0 - (1.0 - d.flow * BUILDUP_GAIN).powf(n);
             }
         }
         dabs
     };
     if pts.len() == 1 {
-        return buildup(vec![make(pts[0], pressure_at(0))], nominal);
+        return buildup(vec![make(pts[0], pressure_at(0))], &[(nominal, nominal)]);
     }
-    let total: f32 = pts
-        .windows(2)
-        .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
-        .sum();
     // A dab's box spans at most this many tiles along an axis (and never more than the frame has).
     let axis_tiles = |extent: usize| {
         (((2.0 * radius + 2.0) / BRUSH_TILE as f32).ceil() as usize + 1)
@@ -136,40 +141,75 @@ pub fn dabs_for_stroke(stroke: &Stroke, width: usize, height: usize, cap: usize)
     let cap = cap
         .min(MAX_DABS_PER_STROKE)
         .min((MAX_TILE_ENTRIES_PER_STROKE / tiles_per_dab).max(1));
-    let mut spacing = nominal;
-    // Widen rather than truncate, so the whole path is still covered at a coarser spacing. The
-    // first dab is placed separately, so `cap - 1` more are available -- however many points the
-    // stroke has (a point is not a dab: points closer than `spacing` produce none).
+    // How many dabs the path wants at the nominal steps: the integral of 1/step along it, with the
+    // step linear in pressure along each segment (exact for that). Widen rather than truncate, so
+    // the whole path is still covered at a coarser spacing. The first dab is placed separately,
+    // so `cap - 1` more are available -- however many points the stroke has (a point is not a
+    // dab: points closer than the step produce none).
+    let wanted: f32 = pts
+        .windows(2)
+        .enumerate()
+        .map(|(k, w)| {
+            let seg = ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt();
+            let (s0, s1) = (nominal_at(pressure_at(k)), nominal_at(pressure_at(k + 1)));
+            if (s1 - s0).abs() <= s0 * 1e-4 {
+                seg / s0
+            } else {
+                seg * (s1 / s0).ln() / (s1 - s0)
+            }
+        })
+        .sum();
     let steps = cap.saturating_sub(1).max(1) as f32;
-    if total / spacing > steps {
-        spacing = total / steps;
-    }
-
-    let mut dabs = vec![make(pts[0], pressure_at(0))];
-    let mut carry = 0.0f32; // distance already walked since the last dab
-    for (k, w) in pts.windows(2).enumerate() {
-        let (x0, y0) = w[0];
-        let (x1, y1) = w[1];
-        let (p0, p1) = (pressure_at(k), pressure_at(k + 1));
-        let seg = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
-        if seg <= f32::EPSILON {
-            continue;
+    // One walk of the path at a widening factor, stopping after `limit` dabs. Each step is taken
+    // from the pressure of the dab just placed, so this (not the closed-form `wanted`) is what
+    // the budget has to be fitted against: a rising pressure grows the steps as it goes.
+    let run = |widen: f32, limit: usize| {
+        let step_at = |pr: f32| nominal_at(pr) * widen;
+        let mut dabs = vec![make(pts[0], pressure_at(0))];
+        let mut walk = vec![(step_at(pressure_at(0)), nominal_at(pressure_at(0)))];
+        // Distance from the current segment's start to the next dab.
+        let mut next = step_at(pressure_at(0));
+        for (k, w) in pts.windows(2).enumerate() {
+            let (x0, y0) = w[0];
+            let (x1, y1) = w[1];
+            let (p0, p1) = (pressure_at(k), pressure_at(k + 1));
+            let seg = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+            if seg <= f32::EPSILON {
+                continue;
+            }
+            let mut at = next;
+            // A hair of tolerance: with a widened step the float walk can land the last dab a
+            // rounding error past the end of the path and lose it.
+            while at <= seg + step_at(p1) * 1e-3 && dabs.len() < limit {
+                let t = (at / seg).min(1.0);
+                let pr = p0 + (p1 - p0) * t;
+                dabs.push(make((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t), pr));
+                walk.push((step_at(pr), nominal_at(pr)));
+                at += step_at(pr);
+            }
+            next = at - seg;
         }
-        let mut at = spacing - carry;
-        // A hair of tolerance: with a widened spacing the float walk can land the last dab a
-        // rounding error past the end of the path and lose it.
-        while at <= seg + spacing * 1e-3 && dabs.len() < cap {
-            let t = (at / seg).min(1.0);
-            dabs.push(make(
-                (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t),
-                p0 + (p1 - p0) * t,
-            ));
-            at += spacing;
+        (dabs, walk)
+    };
+    // Start from the closed-form estimate, then refine by counting what the walk really places:
+    // the count is roughly proportional to 1/widen, so rescale by it (up when over budget, down
+    // when well under it) until the walk fits and uses most of the budget. For a constant
+    // pressure the estimate is already exact and this loop exits at once.
+    let mut widen = (wanted / steps).max(1.0);
+    let (mut dabs, mut walk) = run(widen, cap.saturating_mul(8).saturating_add(1));
+    for _ in 0..8 {
+        let n = dabs.len();
+        let fits = n <= cap && (widen <= 1.0 || n as f32 >= 0.98 * cap as f32);
+        if fits {
+            break;
         }
-        carry = seg - (at - spacing);
+        widen = (widen * (n.saturating_sub(1).max(1)) as f32 / steps).max(1.0);
+        (dabs, walk) = run(widen, cap.saturating_mul(8).saturating_add(1));
     }
+    // Backstop for a budget the refinement did not settle (never silently longer than `cap`).
     dabs.truncate(cap);
-    buildup(dabs, spacing)
+    walk.truncate(dabs.len());
+    buildup(dabs, &walk)
 }
 
 /// Linear gradient weight at pixel-space `(x, y)`: 1 at `p0`, 0 at `p1`, constant across.
@@ -651,7 +691,16 @@ mod tests {
         let full = dabs_for_stroke(&s, 200, 100, 1000);
         s.pressure = vec![1.0, 0.0];
         let ramp = dabs_for_stroke(&s, 200, 100, 1000);
-        assert_eq!(full.len(), ramp.len());
+        // Light pressure shrinks the dabs, so the walk steps closer: more dabs, not gaps (#644).
+        assert!(ramp.len() > full.len(), "{} vs {}", ramp.len(), full.len());
+        for w in ramp.windows(2) {
+            let gap = ((w[1].cx - w[0].cx).powi(2) + (w[1].cy - w[0].cy).powi(2)).sqrt();
+            assert!(
+                gap <= w[0].radius * SPACING_FRACTION * 1.01 + 1e-3,
+                "scalloped: a {gap}px gap after a dab of radius {}",
+                w[0].radius
+            );
+        }
         assert_eq!(
             (ramp[0].radius, ramp[0].flow),
             (full[0].radius, full[0].flow)
@@ -667,6 +716,38 @@ mod tests {
         assert_eq!(dabs_for_stroke(&s, 200, 100, 1000), full);
         s.pressure = Vec::new();
         assert_eq!(dabs_for_stroke(&s, 200, 100, 1000), full);
+    }
+
+    #[test]
+    fn a_budgeted_stroke_with_changing_pressure_still_covers_its_whole_path() {
+        // The budget is fitted by walking the path, not by a closed-form estimate: with rising
+        // pressure the steps grow along the way, and a fit that ignored that ran out of dabs
+        // hundreds of pixels short of the end.
+        for (pressure, cap) in [
+            (vec![0.0, 1.0], 300),
+            (vec![0.0, 1.0], 50),
+            (vec![0.5, 1.0], 10),
+            (vec![1.0, 0.0], 10),
+            (vec![0.0, 1.0, 0.0], 40),
+        ] {
+            let mut s = stroke(&[[0.05, 0.5], [0.5, 0.5], [0.95, 0.5]], 0.002, 0.001, false);
+            s.pressure = pressure.clone();
+            let dabs = dabs_for_stroke(&s, 4000, 3000, cap);
+            assert!(
+                dabs.len() <= cap,
+                "{pressure:?} cap {cap}: {} dabs",
+                dabs.len()
+            );
+            let end = 0.95 * 4000.0;
+            let last = dabs.last().unwrap();
+            // The tail may fall short of the end by less than the step actually taken there.
+            let step = dabs[dabs.len() - 1].cx - dabs[dabs.len() - 2].cx;
+            assert!(
+                end - last.cx <= step * 1.5 + 1.0,
+                "{pressure:?} cap {cap}: stops at {} of {end}",
+                last.cx
+            );
+        }
     }
 
     #[test]
