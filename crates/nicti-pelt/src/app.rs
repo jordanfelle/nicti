@@ -149,6 +149,7 @@ pub struct PeltApp {
     /// Thumbnail-rotation repair / orientation backfill (#606).
     righting: crate::righting_ui::RightingUi,
     geotag_ui: crate::geotag_ui::GeotagUi,
+    backup_copy: crate::backup_copy_ui::BackupCopyUi,
     /// Copy from a camera card (#602).
     card_copy: crate::card_copy_ui::CardCopyUi,
     update: UpdateChecker,
@@ -411,6 +412,7 @@ impl PeltApp {
         // #606: once per catalog root, repair thumbnails ingested before the rotation tag existed and
         // read the orientation of rows older than schema v11. Skipped while a move is being
         // recovered (it holds the `Move` guards); the Library's "Repair thumbnails" runs it later.
+        let backup_copy = crate::backup_copy_ui::BackupCopyUi::new(&catalog_path);
         let mut righting = crate::righting_ui::RightingUi::default();
         if pending_recovery_result.is_none() {
             let dyn_store: Arc<dyn CatalogStore + Send + Sync> = catalog.clone();
@@ -485,6 +487,7 @@ impl PeltApp {
             import_status: None,
             righting,
             geotag_ui: crate::geotag_ui::GeotagUi::default(),
+            backup_copy,
             card_copy: crate::card_copy_ui::CardCopyUi::default(),
             update,
             nine_lives,
@@ -717,6 +720,15 @@ impl PeltApp {
     }
 
     fn job_active(&self, kinds: &[JobKind]) -> bool {
+        // A backup copy reads a folder's files for minutes; moving or deleting them meanwhile
+        // would fail files at random (#622).
+        if self.backup_copy.is_running()
+            && kinds
+                .iter()
+                .any(|k| matches!(k, JobKind::Move | JobKind::Delete))
+        {
+            return true;
+        }
         // A geotag/clear run writes catalog rows and sidecars for a captured list of assets
         // (#668); anything that moves, deletes, re-scans or re-hashes those files must wait for it.
         if self.geotag_ui.is_running()
@@ -1361,6 +1373,7 @@ impl eframe::App for PeltApp {
         // The pass runs under `JobKind::Sync`, so the grid's busy -> idle edge refreshes it.
         self.righting.poll(&self.catalog_path);
         self.geotag_ui.poll();
+        self.backup_copy.poll(&self.pounce);
         self.poll_cull();
         self.poll_eyeshine(ui.ctx());
         self.poll_prebake(ui.ctx());
@@ -2335,6 +2348,14 @@ impl PeltApp {
                         JobKind::Baseline,
                     ]);
                 self.card_copy.show(ui, &self.pounce, &store, other_running);
+
+                // #622: additive verified copy of the library folders to a backup drive.
+                {
+                    let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+                    let busy = self.pounce_job_active(&[JobKind::Move, JobKind::Delete])
+                        || self.card_copy.is_busy();
+                    self.backup_copy.show(ui, &dyn_store, &self.pounce, busy);
+                }
 
                 // #668: apply a GPX log to the selection; the Info section shows (and clears) the
                 // cursor photo's position.

@@ -11,6 +11,7 @@
 mod activity;
 mod app;
 mod archive_drives;
+mod backup_copy_ui;
 mod cache_settings;
 mod camera_profiles;
 mod card_copy_ui;
