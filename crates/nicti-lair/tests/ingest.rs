@@ -785,3 +785,129 @@ fn a_grid_sized_jpeg_over_the_byte_cap_is_reencoded_not_stored_verbatim() {
     assert!(t0.bytes.len() < 1024 * 1024);
     assert_eq!((t0.width, t0.height), (Some(64), Some(48)));
 }
+
+#[test]
+fn our_own_xmp_write_to_a_jpeg_does_not_make_the_next_scan_reprocess_or_orphan_it() {
+    use nicti_lair::scent_sync::{write_sidecar, SyncOutcome};
+    let (store, dir, jpg, id, _original) = rated_jpeg_fixture();
+    let before = store.get_asset(id).unwrap().unwrap();
+    let root_id = before.root_id;
+    assert!(matches!(
+        write_sidecar(&store, id, &jpg, 1).unwrap(),
+        SyncOutcome::WroteSidecar
+    ));
+    let after = store.get_asset(id).unwrap().unwrap();
+    assert!(after.size_bytes > before.size_bytes, "the splice grew it");
+    assert_ne!(after.fingerprint, before.fingerprint);
+
+    // The next scan treats the file as unchanged: no T0 re-decode.
+    let report = ingest_root(&store, root_id, dir.path()).unwrap();
+    assert_eq!((report.updated, report.added), (0, 0), "{report:?}");
+    assert_eq!(report.skipped_unchanged, 1);
+
+    // A rename after our own write, before any other scan, still relinks the same row.
+    std::fs::rename(&jpg, dir.path().join("renamed.jpg")).unwrap();
+    let report = ingest_root(&store, root_id, dir.path()).unwrap();
+    assert_eq!((report.moved, report.added), (1, 0), "{report:?}");
+    let moved = store
+        .find_asset_by_path(root_id, "renamed.jpg")
+        .unwrap()
+        .unwrap();
+    assert_eq!(moved.id, id);
+}
+
+#[test]
+fn a_jpeg_without_an_xmp_packet_is_skipped_by_stat_on_later_rescans() {
+    use nicti_lair::scent_sync::{import_sidecar, SyncOutcome};
+    let (store, _dir, jpg, id, _original) = rated_jpeg_fixture();
+    // Far-future clock so the file's mtime is outside the racy window and gets trusted.
+    let later = 4_000_000_000_000;
+    assert_eq!(
+        import_sidecar(&store, id, &jpg, later).unwrap(),
+        SyncOutcome::NoSidecar
+    );
+    let row = store.sidecar_state(id).unwrap().unwrap();
+    assert!(row.last_seen_mtime_ms.is_some());
+    assert!(row.last_seen_hash.is_none());
+    // Second look: answered from the stat alone.
+    assert_eq!(
+        import_sidecar(&store, id, &jpg, later).unwrap(),
+        SyncOutcome::InSync
+    );
+
+    // A packet appearing later changes the mtime, so it is still noticed -- and, the marker row
+    // not counting as a prior sync, the rated catalog is held for review exactly as with no row.
+    let packet = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:Rating=\"5\"/></rdf:RDF></x:xmpmeta>";
+    let bytes = std::fs::read(&jpg).unwrap();
+    std::fs::write(
+        &jpg,
+        nicti_scent::embedded::write_xmp(&bytes, packet).unwrap(),
+    )
+    .unwrap();
+    // Pin the mtime change rather than trusting the filesystem's timestamp granularity.
+    set_mtime(
+        &jpg,
+        std::time::SystemTime::now() + std::time::Duration::from_secs(10),
+    );
+    assert_eq!(
+        import_sidecar(&store, id, &jpg, later).unwrap(),
+        SyncOutcome::NeedsReview
+    );
+}
+
+fn set_mtime(path: &std::path::Path, t: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+}
+
+const RATING_5_PACKET: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:Rating=\"5\"/></rdf:RDF></x:xmpmeta>";
+
+#[test]
+fn a_packet_added_without_moving_the_mtime_is_seen_when_ingest_found_the_file_changed() {
+    use nicti_lair::scent_sync::{import_sidecar, import_sidecar_changed, SyncOutcome};
+    let (store, _dir, jpg, id, _original) = rated_jpeg_fixture();
+    let later = 4_000_000_000_000;
+    let mtime = std::fs::metadata(&jpg).unwrap().modified().unwrap();
+    assert_eq!(
+        import_sidecar(&store, id, &jpg, later).unwrap(),
+        SyncOutcome::NoSidecar
+    );
+    // `exiftool -P` style: the packet arrives, the mtime is put back.
+    let bytes = std::fs::read(&jpg).unwrap();
+    std::fs::write(
+        &jpg,
+        nicti_scent::embedded::write_xmp(&bytes, RATING_5_PACKET).unwrap(),
+    )
+    .unwrap();
+    set_mtime(&jpg, mtime);
+    // The plain call is fooled by the stat; the changed-file call (ingest's) is not.
+    assert_eq!(
+        import_sidecar(&store, id, &jpg, later).unwrap(),
+        SyncOutcome::InSync
+    );
+    assert_eq!(
+        import_sidecar_changed(&store, id, &jpg, later).unwrap(),
+        SyncOutcome::NeedsReview
+    );
+}
+
+#[test]
+fn our_xmp_write_does_not_bless_a_jpeg_another_program_re_saved_since_the_last_scan() {
+    use nicti_lair::scent_sync::write_sidecar;
+    let (store, dir, jpg, id, _original) = rated_jpeg_fixture();
+    let root_id = store.get_asset(id).unwrap().unwrap().root_id;
+    // Another program re-saves the pixels; no rescan yet.
+    std::fs::write(&jpg, encode_jpeg(80, 60)).unwrap();
+    set_mtime(
+        &jpg,
+        std::time::SystemTime::now() + std::time::Duration::from_secs(10),
+    );
+    write_sidecar(&store, id, &jpg, 1).unwrap();
+    // The row was not refreshed, so the next scan still re-ingests the changed file.
+    let report = ingest_root(&store, root_id, dir.path()).unwrap();
+    assert_eq!(report.updated, 1, "{report:?}");
+}

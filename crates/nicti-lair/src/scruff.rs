@@ -101,7 +101,7 @@ pub fn fold(rel_path: &str) -> String {
 /// file, if smaller), with the size folded into the hash input. Cheap enough to run on every file
 /// at import time, and the tier `spikes/homing` and this pipeline both use as the default identity
 /// proxy for move detection.
-fn partial_hash(path: &Path) -> std::io::Result<String> {
+pub(crate) fn partial_hash(path: &Path) -> std::io::Result<String> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     let mut hasher = blake3::Hasher::new();
@@ -120,6 +120,19 @@ fn partial_hash(path: &Path) -> std::io::Result<String> {
         hasher.update(&tail);
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// The `(size, mtime_unix, partial fingerprint)` ingest would record for `path` right now.
+/// `mtime_unix` is computed exactly as `ingest_one` does, so the next scan sees "unchanged".
+pub(crate) fn file_identity(path: &Path) -> std::io::Result<(u64, i64, String)> {
+    let metadata = std::fs::metadata(path)?;
+    let mtime_unix = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok((metadata.len(), mtime_unix, partial_hash(path)?))
 }
 
 fn field_string(exif: &exif::Exif, tag: exif::Tag) -> Option<String> {
@@ -633,9 +646,15 @@ fn sync_sidecar(
     store: &dyn CatalogStore,
     asset_id: i64,
     raw_path: &Path,
+    file_changed: bool,
     report: &mut IngestReport,
 ) {
-    match crate::scent_sync::import_sidecar(store, asset_id, raw_path, now_unix() * 1000) {
+    let import = if file_changed {
+        crate::scent_sync::import_sidecar_changed
+    } else {
+        crate::scent_sync::import_sidecar
+    };
+    match import(store, asset_id, raw_path, now_unix() * 1000) {
         Ok(crate::scent_sync::SyncOutcome::NeedsReview) => report.sidecar_review += 1,
         Ok(_) => {}
         Err(e) => report
@@ -669,7 +688,7 @@ fn ingest_one(
         if existing.size_bytes == size_bytes && existing.mtime_unix == mtime_unix {
             report.skipped_unchanged += 1;
             // The RAW is unchanged, but LRC may have rewritten its sidecar since the last scan.
-            sync_sidecar(store, existing.id, path, report);
+            sync_sidecar(store, existing.id, path, false, report);
             return Ok(());
         }
     }
@@ -706,7 +725,7 @@ fn ingest_one(
                 mtime_unix,
             )?;
             report.moved += 1;
-            sync_sidecar(store, matched.id, path, report);
+            sync_sidecar(store, matched.id, path, false, report);
             return Ok(());
         }
     }
@@ -755,7 +774,7 @@ fn ingest_one(
     if let Some((lens, iso)) = &extra {
         let _ = store.set_exif_extra(asset_id, lens.as_deref(), *iso);
     }
-    sync_sidecar(store, asset_id, path, report);
+    sync_sidecar(store, asset_id, path, true, report);
 
     if existing.is_some() {
         report.updated += 1;

@@ -422,6 +422,15 @@ fn load(path: &Path) -> Result<Option<Loaded>, ScentSyncError> {
     }))
 }
 
+/// The file's mtime in epoch milliseconds, `None` if it can't be stat'ed.
+fn mtime_ms_of(path: &Path) -> Option<u128> {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+}
+
 fn state_for(path: &Path, prior: Option<SidecarState>) -> SidecarState {
     let mut s = prior.unwrap_or_default();
     s.path = path.to_string_lossy().into_owned();
@@ -446,6 +455,14 @@ fn seen(s: &mut SidecarState, l: &Loaded, now_ms: i64) {
     s.last_seen_mtime_ms = trusted_mtime(l.mtime_ms, now_ms);
 }
 
+/// A row `import_sidecar` leaves for a JPEG with no XMP packet: an mtime and nothing else.
+fn is_blank_marker(p: &SidecarState) -> bool {
+    p.last_seen_hash.is_none()
+        && p.last_written_hash.is_none()
+        && p.catalog_dirty_since_ms.is_none()
+        && !p.needs_review
+}
+
 fn hash_is(stored: &Option<Vec<u8>>, h: &blake3::Hash) -> bool {
     stored.as_deref() == Some(h.as_bytes().as_slice())
 }
@@ -458,6 +475,28 @@ pub fn import_sidecar(
     raw_path: &Path,
     now_ms: i64,
 ) -> Result<SyncOutcome, ScentSyncError> {
+    import_sidecar_inner(store, asset_id, raw_path, now_ms, false)
+}
+
+/// [`import_sidecar`] for a file ingest just found changed (size or mtime moved): skips the
+/// mtime-only precheck, since a tool that preserves mtime (`exiftool -P`) can add an XMP packet
+/// without moving it.
+pub fn import_sidecar_changed(
+    store: &dyn CatalogStore,
+    asset_id: i64,
+    raw_path: &Path,
+    now_ms: i64,
+) -> Result<SyncOutcome, ScentSyncError> {
+    import_sidecar_inner(store, asset_id, raw_path, now_ms, true)
+}
+
+fn import_sidecar_inner(
+    store: &dyn CatalogStore,
+    asset_id: i64,
+    raw_path: &Path,
+    now_ms: i64,
+    file_changed: bool,
+) -> Result<SyncOutcome, ScentSyncError> {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let path = xmp_target(raw_path);
     let prior = store.sidecar_state(asset_id)?;
@@ -467,22 +506,38 @@ pub fn import_sidecar(
     // the newer-wins comparison below is what pushes its markers to the sidecar.
     if let Some(p) = prior
         .as_ref()
-        .filter(|p| p.catalog_dirty_since_ms.is_none())
+        .filter(|p| p.catalog_dirty_since_ms.is_none() && !file_changed)
     {
         if !p.needs_review {
-            let on_disk = fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .and_then(|d| i64::try_from(d.as_millis()).ok());
+            let on_disk = mtime_ms_of(&path).and_then(|ms| i64::try_from(ms).ok());
             if on_disk.is_some() && on_disk == p.last_seen_mtime_ms {
                 return Ok(SyncOutcome::InSync);
             }
         }
     }
+    // Stat before the read: if the file changes during it, the recorded mtime is already stale
+    // and the next import simply looks again.
+    let pre_read_mtime = mtime_ms_of(&path);
     let Some(loaded) = load(&path)? else {
+        // A JPEG that exists but carries no XMP packet (#665): remember that we looked, keyed by
+        // its mtime, so the stat-only precheck skips the whole-file read + hash on every rescan.
+        // The row holds no hashes, which `is_blank_marker` uses to keep it from reading as a
+        // prior sync. Only ever written over nothing or an older marker.
+        let mtime = pre_read_mtime.and_then(|ms| trusted_mtime(ms, now_ms));
+        if crate::scruff::is_jpeg(&path)
+            && prior.as_ref().is_none_or(is_blank_marker)
+            && mtime.is_some()
+            && prior.as_ref().and_then(|p| p.last_seen_mtime_ms) != mtime
+        {
+            let mut state = state_for(&path, prior.clone());
+            state.last_seen_mtime_ms = mtime;
+            store.record_sidecar(asset_id, &state)?;
+        }
         return Ok(SyncOutcome::NoSidecar);
     };
+    // A no-packet marker row is not a prior sync: the first packet to appear resolves exactly as
+    // it would have with no row at all.
+    let prior = prior.filter(|p| !is_blank_marker(p));
     if let Some(p) = prior
         .as_ref()
         .filter(|p| p.catalog_dirty_since_ms.is_none())
@@ -742,6 +797,27 @@ fn write_locked(
             }
         })?;
         replace_jpeg(&path, &rewritten, stamp).map_err(io_err)?;
+        // Our own splice moved the file's size, mtime and head-64KB fingerprint (#666). Re-record
+        // them, or the next scan re-decodes T0 for a pixel-identical file and a rename before
+        // that scan no longer matches by fingerprint. Best effort: a failure only costs that
+        // rescan.
+        // Only when the row still described the file as it was just before our splice: if another
+        // program had re-saved it since the last scan, the row's T0/dimensions/orientation are
+        // stale, and refreshing would hide that -- leave the change for the next scan to see.
+        let row_matches_pre_splice = match (store.get_asset(asset_id), stamp) {
+            (Ok(Some(a)), Some((len, mtime))) => {
+                a.size_bytes == len
+                    && mtime
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .is_ok_and(|d| i64::try_from(d.as_secs()).is_ok_and(|s| s == a.mtime_unix))
+            }
+            _ => false,
+        };
+        if row_matches_pre_splice {
+            if let Ok((size, mtime_unix, fp)) = crate::scruff::file_identity(&path) {
+                let _ = store.refresh_file_identity(asset_id, size, mtime_unix, &fp);
+            }
+        }
     } else {
         atomic_write(&path, patched.as_bytes()).map_err(io_err)?;
     }
