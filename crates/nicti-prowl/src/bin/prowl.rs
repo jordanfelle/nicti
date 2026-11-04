@@ -50,7 +50,7 @@ struct BenchGateArgs {
     #[arg(long, default_value_t = 3)]
     min_history: usize,
     /// Baselines under this many ms are too small to gate.
-    #[arg(long, default_value_t = 20.0)]
+    #[arg(long, default_value_t = 100.0)]
     noise_floor_ms: f64,
     /// Commit id to record with the new entries.
     #[arg(long)]
@@ -128,7 +128,16 @@ fn main() -> anyhow::Result<()> {
         Command::Verify(args) => run_verify(args),
         Command::Select(args) => run_select(args),
         Command::Materialize(args) => run_materialize(args),
-        Command::BenchGate(args) => run_bench_gate(args),
+        // Exit 1 is reserved for "regressed"; anything that stops the gate from judging at all
+        // (corrupt history, report without CPU time, unreadable file) exits 2, so a CI script can
+        // tell a slow build from a broken gate.
+        Command::BenchGate(args) => {
+            if let Err(e) = run_bench_gate(args) {
+                eprintln!("bench-gate: {e:#}");
+                std::process::exit(2);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -251,14 +260,21 @@ fn run_bench_gate(args: BenchGateArgs) -> anyhow::Result<()> {
         "--threshold must be a non-negative number"
     );
     let history = gate::read_history(&args.history)?;
-    let mut current = Vec::new();
+    let mut current: Vec<gate::Entry> = Vec::new();
     for path in &args.reports {
         let json = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        current.push(
-            gate::entry_from_report(&json, args.commit.as_deref())
-                .map_err(|e| anyhow::anyhow!("{}: {e:#}", path.display()))?,
+        let entry = gate::entry_from_report(&json, args.commit.as_deref())
+            .map_err(|e| anyhow::anyhow!("{}: {e:#}", path.display()))?;
+        // Two reports of one benchmark would be judged against the same history and both
+        // appended, double-weighting one run in every later median.
+        anyhow::ensure!(
+            !current.iter().any(|c| c.bench == entry.bench),
+            "{}: a second report for benchmark `{}`",
+            path.display(),
+            entry.bench
         );
+        current.push(entry);
     }
     let policy = Policy {
         threshold: args.threshold,

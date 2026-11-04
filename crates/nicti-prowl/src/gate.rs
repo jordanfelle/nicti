@@ -34,8 +34,9 @@ pub struct Policy {
     pub window: usize,
     /// Fewer history entries than this and the benchmark is not gated yet. Default 3.
     pub min_history: usize,
-    /// A baseline below this many milliseconds is too small to gate (CPU time ticks are 10 ms on
-    /// Linux): skipped rather than judged on noise. Default 20.
+    /// A baseline below this many milliseconds is too small to gate: CPU time comes in 10 ms ticks
+    /// on Linux, so one tick of jitter is 10 % at 100 ms but 50 % at 20 ms, which would trip a 20 %
+    /// threshold on noise. Skipped rather than judged. Default 100.
     pub noise_floor_ms: f64,
 }
 
@@ -45,7 +46,7 @@ impl Default for Policy {
             threshold: 0.20,
             window: 5,
             min_history: 3,
-            noise_floor_ms: 20.0,
+            noise_floor_ms: 100.0,
         }
     }
 }
@@ -198,6 +199,13 @@ fn median(mut v: Vec<f64>) -> f64 {
 
 /// Judges each of `current` against `history` under `policy`.
 pub fn evaluate(history: &[Entry], current: &[Entry], policy: &Policy) -> Vec<Verdict> {
+    // A window or minimum of 0 would ask for the median of nothing; one entry is the least that
+    // can be a baseline.
+    let policy = &Policy {
+        window: policy.window.max(1),
+        min_history: policy.min_history.max(1),
+        ..*policy
+    };
     current
         .iter()
         .map(|cur| {
@@ -309,12 +317,38 @@ mod tests {
         assert!(matches!(v[0], Verdict::NotGated { .. }), "{:?}", v[0]);
         let v = evaluate(&[], &[e("new", 5.0)], &p);
         assert!(matches!(v[0], Verdict::NotGated { .. }));
-        let v = evaluate(&hist("tiny", &[3.0; 5]), &[e("tiny", 30.0)], &p);
+        let v = evaluate(&hist("tiny", &[30.0; 5]), &[e("tiny", 45.0)], &p);
         assert!(
             matches!(&v[0], Verdict::NotGated { reason, .. } if reason.contains("noise floor")),
             "{:?}",
             v[0]
         );
+    }
+
+    #[test]
+    fn a_zero_window_or_minimum_cannot_panic_the_median() {
+        let p = Policy {
+            window: 0,
+            min_history: 0,
+            ..Policy::default()
+        };
+        // No history at all with min_history 0: still "not gated", not an index panic.
+        let v = evaluate(&[], &[e("x", 500.0)], &p);
+        assert!(matches!(v[0], Verdict::NotGated { .. }), "{:?}", v[0]);
+        // One entry is a baseline; the window clamps to 1 (the latest entry).
+        let v = evaluate(&hist("x", &[400.0, 200.0]), &[e("x", 500.0)], &p);
+        assert!(matches!(v[0], Verdict::Regression { baseline_ms, .. } if baseline_ms == 200.0));
+    }
+
+    #[test]
+    fn a_hundred_ms_baseline_survives_one_cpu_tick_of_jitter() {
+        // The 10 ms /proc tick: +10 ms on the smallest gated baseline stays under +20 %.
+        let v = evaluate(
+            &hist("b", &[100.0; 3]),
+            &[e("b", 110.0)],
+            &Policy::default(),
+        );
+        assert!(matches!(v[0], Verdict::Ok { .. }));
     }
 
     #[test]

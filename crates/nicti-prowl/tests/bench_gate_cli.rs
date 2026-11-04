@@ -89,7 +89,41 @@ fn a_custom_threshold_and_a_wall_time_only_report_are_handled() {
     let wall_only = dir.path().join("wall.json");
     fs::write(&wall_only, r#"{"name":"decode","stats":{"p50_ms":1.0}}"#).unwrap();
     let out = gate(&history, &wall_only, &[]);
-    assert!(!out.status.success());
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a broken gate is not a regression"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("never wall time"), "{err}");
+}
+
+#[test]
+fn errors_exit_two_and_a_zero_min_history_does_not_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let history = dir.path().join("history.jsonl");
+    let r = report(dir.path(), "decode", 500.0);
+
+    // --min-history 0 with no history: not gated, exit 0 (used to panic with exit 101).
+    let out = gate(&history, &r, &["--min-history", "0", "--window", "0"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+
+    // A corrupt history is an error (2), distinct from a regression (1).
+    fs::write(&history, "not json\n").unwrap();
+    let out = gate(&history, &r, &[]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+
+    // Two reports for one benchmark are refused.
+    let out = Command::new(env!("CARGO_BIN_EXE_prowl"))
+        .arg("bench-gate")
+        .arg("--history")
+        .arg(dir.path().join("none.jsonl"))
+        .arg("--report")
+        .arg(&r)
+        .arg("--report")
+        .arg(&r)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("second report"));
 }
