@@ -418,12 +418,14 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                 ExportFormat::Tiff => "TIFF",
                 ExportFormat::Webp => "WebP",
                 ExportFormat::Avif => "AVIF",
+                ExportFormat::Jxl => "JPEG XL",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut kind, ExportFormat::Jpeg, "JPEG");
                 ui.selectable_value(&mut kind, ExportFormat::Png, "PNG");
                 ui.selectable_value(&mut kind, ExportFormat::Tiff, "TIFF");
                 ui.selectable_value(&mut kind, ExportFormat::Webp, "WebP");
+                ui.selectable_value(&mut kind, ExportFormat::Jxl, "JPEG XL");
                 #[cfg(feature = "avif-export")]
                 ui.selectable_value(&mut kind, ExportFormat::Avif, "AVIF");
             });
@@ -438,6 +440,17 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                     compression: TiffCompression::Deflate,
                 },
                 ExportFormat::Webp => FormatSpec::WebpLossy { quality: 80 },
+                ExportFormat::Jxl => {
+                    // JPEG XL labels sRGB and Display P3 only (`ExportSpec::validate`).
+                    if spec.color_space == ExportSpace::AdobeRgb {
+                        spec.color_space = ExportSpace::Srgb;
+                    }
+                    FormatSpec::Jxl {
+                        quality: 90,
+                        depth: BitDepth::Eight,
+                        lossless: false,
+                    }
+                }
                 ExportFormat::Avif => {
                     // The AVIF encoder labels sRGB only (`ExportSpec::validate`).
                     spec.color_space = ExportSpace::Srgb;
@@ -474,6 +487,12 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                         FormatSpec::WebpLossy { quality: 80 }
                     };
                 }
+            }
+            FormatSpec::Jxl {
+                depth, lossless, ..
+            } => {
+                depth_picker(ui, depth);
+                ui.checkbox(lossless, "Lossless");
             }
             FormatSpec::Avif { depth, .. } => {
                 ui.selectable_value(depth, BitDepth::Eight, "8-bit");
@@ -512,6 +531,19 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
             *quality = q.round() as u8;
         }
     }
+    if let FormatSpec::Jxl {
+        quality, lossless, ..
+    } = &mut spec.format
+    {
+        if !*lossless {
+            const QUALITY: SliderSpec =
+                SliderSpec::new("export-jxl-quality", "Quality", 1.0, 100.0, 90.0).step(1.0, 0);
+            let mut q = f32::from(*quality);
+            if fur::slider(ui, &QUALITY, &mut q, true).changed {
+                *quality = q.round() as u8;
+            }
+        }
+    }
     if let FormatSpec::Avif { quality, .. } = &mut spec.format {
         const QUALITY: SliderSpec =
             SliderSpec::new("export-avif-quality", "Quality", 1.0, 100.0, 80.0).step(1.0, 0);
@@ -523,6 +555,11 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
     let srgb_only = matches!(spec.format, FormatSpec::Avif { .. });
     if srgb_only {
         // A loaded preset can pair AVIF with a wider gamut; the combo below is locked, so heal it.
+        spec.color_space = ExportSpace::Srgb;
+    }
+    let no_adobe = matches!(spec.format, FormatSpec::Jxl { .. });
+    if no_adobe && spec.color_space == ExportSpace::AdobeRgb {
+        // JPEG XL has no enumerated Adobe RGB primaries; heal a loaded preset.
         spec.color_space = ExportSpace::Srgb;
     }
     ui.add_enabled_ui(!srgb_only, |ui| {
@@ -541,11 +578,13 @@ fn format_section(ui: &mut egui::Ui, spec: &mut ExportSpec) {
                         ExportSpace::DisplayP3,
                         "Display P3",
                     );
-                    ui.selectable_value(
-                        &mut spec.color_space,
-                        ExportSpace::AdobeRgb,
-                        "Adobe RGB (1998)",
-                    );
+                    if !no_adobe {
+                        ui.selectable_value(
+                            &mut spec.color_space,
+                            ExportSpace::AdobeRgb,
+                            "Adobe RGB (1998)",
+                        );
+                    }
                 });
         });
     });
@@ -798,6 +837,7 @@ fn preview_names(spec: &ExportSpec, samples: &[AssetFacts]) -> Result<Vec<String
         ExportFormat::Tiff => "tif",
         ExportFormat::Webp => "webp",
         ExportFormat::Avif => "avif",
+        ExportFormat::Jxl => "jxl",
     };
     Ok(samples
         .iter()

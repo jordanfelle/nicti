@@ -111,6 +111,24 @@ fn every_format_passes_exiftool_validate_with_no_warnings() {
             FormatSpec::WebpLossy { quality: 80 },
             ExportSpace::Srgb,
         ),
+        (
+            "jxl-lossy",
+            FormatSpec::Jxl {
+                quality: 85,
+                depth: BitDepth::Eight,
+                lossless: false,
+            },
+            ExportSpace::DisplayP3,
+        ),
+        (
+            "jxl-lossless-16",
+            FormatSpec::Jxl {
+                quality: 90,
+                depth: BitDepth::Sixteen,
+                lossless: true,
+            },
+            ExportSpace::Srgb,
+        ),
     ];
     #[cfg(feature = "avif")]
     cases.push((

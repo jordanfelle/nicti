@@ -28,6 +28,7 @@ use crate::metadata::{
     embed_xmp_jpeg, exif_tiff_bytes, jfif_first, write_exif_jpeg, xmp_png_chunk,
 };
 use crate::spec::{BitDepth, ExportFormat, FormatSpec, Subsampling, TiffCompression};
+use crate::ExportSpace;
 use crate::{Embed, EmbedSupport, ExportError, Exporter, ExporterRegistry, OutputImage};
 
 pub const JPEG_ID: &str = "nicti.exporter.jpeg";
@@ -853,6 +854,7 @@ mod tests {
 
     fn embed<'a>(f: &'a Fixture, dpi: u32) -> Embed<'a> {
         Embed {
+            color_space: ExportSpace::Srgb,
             icc: &f.icc,
             dpi,
             exif: Some(&f.exif),
@@ -884,6 +886,93 @@ mod tests {
         panic!("no SOF marker");
     }
 
+    fn decode_jxl(bytes: &[u8]) -> (usize, usize, Vec<f32>) {
+        let image = jxl_oxide::JxlImage::builder()
+            .read(Cursor::new(bytes))
+            .expect("valid JPEG XL");
+        let render = image.render_frame(0).expect("render");
+        let fb = render.image_all_channels();
+        (fb.width(), fb.height(), fb.buf().to_vec())
+    }
+
+    #[test]
+    fn jxl_lossless_round_trips_exactly_with_exif_and_xmp_boxes() {
+        let f = fixture(OutputSpace::Srgb, 32, 24);
+        let px = gradient8(32, 24);
+        let img = OutputImage {
+            width: 32,
+            height: 24,
+            pixels: &px,
+        };
+        let spec = FormatSpec::Jxl {
+            quality: 90,
+            depth: BitDepth::Eight,
+            lossless: true,
+        };
+        let out = JxlExporter.encode(&img, &spec, &embed(&f, 300)).unwrap();
+        for boxed in [&b"Exif"[..], b"xml "] {
+            assert!(out.windows(4).any(|w| w == boxed), "{boxed:?}");
+        }
+        let (w, h, buf) = decode_jxl(&out);
+        assert_eq!((w, h), (32, 24));
+        let OutputPixels::Rgb8(want) = &px else {
+            unreachable!()
+        };
+        assert_eq!(buf.len(), want.len());
+        for (got, want) in buf.iter().zip(want) {
+            assert_eq!((got * 255.0).round() as u8, *want);
+        }
+    }
+
+    #[test]
+    fn jxl_lossy_quality_changes_size_and_stays_close() {
+        let f = fixture(OutputSpace::Srgb, 64, 48);
+        let px = gradient8(64, 48);
+        let img = OutputImage {
+            width: 64,
+            height: 48,
+            pixels: &px,
+        };
+        let enc = |q| {
+            let spec = FormatSpec::Jxl {
+                quality: q,
+                depth: BitDepth::Eight,
+                lossless: false,
+            };
+            JxlExporter.encode(&img, &spec, &embed(&f, 300)).unwrap()
+        };
+        let (lo, hi) = (enc(20), enc(95));
+        assert!(lo.len() < hi.len(), "{} !< {}", lo.len(), hi.len());
+        let (_, _, buf) = decode_jxl(&hi);
+        let OutputPixels::Rgb8(want) = &px else {
+            unreachable!()
+        };
+        let mean: f32 = buf
+            .iter()
+            .zip(want)
+            .map(|(g, w)| (g * 255.0 - f32::from(*w)).abs())
+            .sum::<f32>()
+            / want.len() as f32;
+        assert!(mean < 3.0, "mean abs error {mean}");
+    }
+
+    #[test]
+    fn jxl_16_bit_and_adobe_rgb_refusal() {
+        let f = fixture(OutputSpace::Srgb, 32, 24);
+        let img16 = gradient16_img();
+        let spec = FormatSpec::Jxl {
+            quality: 90,
+            depth: BitDepth::Sixteen,
+            lossless: true,
+        };
+        let out = JxlExporter.encode(&img16, &spec, &embed(&f, 300)).unwrap();
+        let (w, h, _) = decode_jxl(&out);
+        assert_eq!((w as u32, h as u32), (img16.width, img16.height));
+        let mut adobe = embed(&f, 300);
+        adobe.color_space = ExportSpace::AdobeRgb;
+        assert!(JxlExporter.encode(&img16, &spec, &adobe).is_err());
+    }
+
     #[test]
     fn builtin_registry_resolves_all_three_with_stable_ids() {
         let reg = builtin_registry();
@@ -892,6 +981,7 @@ mod tests {
             (ExportFormat::Png, "png"),
             (ExportFormat::Tiff, "tif"),
             (ExportFormat::Webp, "webp"),
+            (ExportFormat::Jxl, "jxl"),
         ] {
             let e = reg.get(builtin_id(fmt)).expect("registered");
             assert_eq!(e.format(), fmt);
@@ -977,6 +1067,7 @@ mod tests {
             pixels: &px,
         };
         let bare = Embed {
+            color_space: ExportSpace::Srgb,
             icc: &[],
             dpi: 72,
             exif: None,
@@ -1014,6 +1105,7 @@ mod tests {
             pixels: &px,
         };
         let bare = Embed {
+            color_space: ExportSpace::Srgb,
             icc: &[],
             dpi: 72,
             exif: None,
@@ -1292,6 +1384,7 @@ mod tests {
         assert!(tags.find_tag(Tag::Unknown(0xA002)).unwrap().is_none());
         // And no EXIF at all under MetadataPolicy::None (no payload).
         let bare = Embed {
+            color_space: ExportSpace::Srgb,
             exif: None,
             ..embed(&f, 300)
         };
@@ -1431,6 +1524,7 @@ mod tests {
             pixels: &px,
         };
         let bare = Embed {
+            color_space: ExportSpace::Srgb,
             icc: &[],
             dpi: 72,
             exif: None,

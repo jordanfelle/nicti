@@ -340,6 +340,15 @@ MIT/Apache-2.0 crate, already covered. Confirmed the whole crate (including `lib
 build) cross-compiles cleanly to `x86_64-pc-windows-gnu`, the CI-required target, before
 committing to this dependency.
 
+**Update (2026-11-04, [#359](https://github.com/jordanfelle/nicti/issues/359), JPEG XL export):** one
+new production dependency in `nicti-preen`, `jixel` v0.5.5 (`BSD-3-Clause OR Apache-2.0`, pure Rust, a
+libjxl-tiny port; both already on `deny.toml`'s allowlist, no new entry needed, and it adds no
+transitive crates). Built with `default-features = false`, which keeps the optional `extraslow`
+perceptual-metric crates out. The other JPEG XL encoders fail ADR-0018: `jxl-encoder`/`zenjxl` are
+`AGPL-3.0-only OR commercial` and `jpegxl-rs` is `GPL-3.0-or-later`; `zune-jpegxl` is lossless-only with no
+ICC/EXIF/XMP. `jxl-oxide` (`MIT OR Apache-2.0`, already in the lockfile via `rawler`) is a `nicti-preen`
+dev-dependency only, for the round-trip tests.
+
 **Update (2026-09-26, [#61](https://github.com/jordanfelle/nicti/issues/61)'s `shed` spike,
 `docs/adr/0061-lrc-catalog-import-mapping.md`):** new dependency `agprefs` v0.3.3 (MIT — already on
 `deny.toml`'s allowlist, no new entry needed) parses Lightroom Classic's `.lrcat` develop-settings
