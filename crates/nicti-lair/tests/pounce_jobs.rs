@@ -576,3 +576,64 @@ fn a_backup_copy_job_dropped_unrun_resolves_its_slot_as_stopped() {
         .expect("Drop resolves the slot");
     assert!(r.stopped && r.error.is_none());
 }
+
+/// A drive pulled or swapped mid-run must stop the run: the target is re-checked every
+/// `TARGET_RECHECK_FILES` files, so at most that many more files go to a path that no longer is
+/// the backup drive (on Unix an unmounted drive leaves an empty mount-point folder on the system
+/// disk that the copy would otherwise keep filling).
+#[test]
+fn a_backup_copy_stops_when_the_target_drive_stops_being_the_target_mid_run() {
+    use nicti_lair::pounce_jobs::TARGET_RECHECK_FILES;
+    use nicti_pounce::{ChunkedJob, Step};
+    let t = tempfile::tempdir().unwrap();
+    let (src, dst) = (t.path().join("lib"), t.path().join("backup"));
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+    let total = TARGET_RECHECK_FILES * 3;
+    for i in 0..total {
+        std::fs::write(src.join(format!("p{i:03}.NEF")), format!("photo {i}")).unwrap();
+    }
+    let target = nicti_lair::backup::init_target(&dst).unwrap();
+    let (mut job, slot) = BackupCopyJob::new(dst.clone(), target.id().to_string(), src);
+
+    // First step opens the target and copies one file.
+    assert_eq!(job.step().unwrap(), Step::Yield);
+    // The drive goes away: the marker is no longer there.
+    std::fs::remove_file(dst.join(nicti_lair::backup::MARKER_NAME)).unwrap();
+    let mut steps = 0;
+    while job.step().unwrap() == Step::Yield {
+        steps += 1;
+        assert!(steps <= TARGET_RECHECK_FILES + 2, "the run never noticed");
+    }
+    let r = slot.lock().unwrap().clone().expect("resolved");
+    assert!(r.target_problem, "{r:?}");
+    assert!(r.error.as_deref().unwrap().contains("went away"), "{r:?}");
+    assert!(
+        (r.report.copied as usize) <= TARGET_RECHECK_FILES + 1,
+        "{} files copied after the drive left",
+        r.report.copied
+    );
+    assert!(
+        (r.report.copied as usize) < total,
+        "it did not finish the whole folder"
+    );
+}
+
+#[test]
+fn a_backup_of_a_missing_folder_is_a_source_problem_not_a_target_problem() {
+    let t = tempfile::tempdir().unwrap();
+    let dst = t.path().join("backup");
+    std::fs::create_dir_all(&dst).unwrap();
+    let target = nicti_lair::backup::init_target(&dst).unwrap();
+    let pounce = Pounce::new(u64::MAX, 2, 2, || {});
+    let (job, slot) =
+        BackupCopyJob::new(dst, target.id().to_string(), t.path().join("offline-drive"));
+    pounce.submit(Box::new(job));
+    assert!(wait_until(
+        || slot.lock().unwrap().is_some(),
+        Duration::from_secs(5)
+    ));
+    let r = slot.lock().unwrap().clone().unwrap();
+    assert!(r.error.is_some() && !r.target_problem, "{r:?}");
+    pounce.shutdown();
+}

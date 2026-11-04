@@ -88,7 +88,9 @@ fn new_id() -> String {
     h.finalize().to_hex()[..32].to_string()
 }
 
-fn valid_id(id: &str) -> bool {
+/// Whether `id` is a marker id as [`init_target`] writes it (32 lowercase hex digits). Anything else
+/// in a saved setting is not one of ours.
+pub fn valid_id(id: &str) -> bool {
     id.len() == 32
         && id
             .bytes()
@@ -127,9 +129,8 @@ pub fn init_target(root: &Path) -> Result<BackupTarget, BackupError> {
     Ok(BackupTarget { root, id })
 }
 
-/// Opens `root` as the backup target whose saved id is `expected_id`. A missing marker, an
-/// unreadable one or a different id is an error, never a fallback to "back up here anyway".
-pub fn open_target(root: &Path, expected_id: &str) -> Result<BackupTarget, BackupError> {
+/// Reads and validates the marker of `root`: the canonical root and the id it carries.
+fn read_marker(root: &Path) -> Result<(PathBuf, String), BackupError> {
     let root = root.canonicalize().map_err(|e| io_err(root, e))?;
     let marker = root.join(MARKER_NAME);
     match fs::symlink_metadata(&marker) {
@@ -144,16 +145,28 @@ pub fn open_target(root: &Path, expected_id: &str) -> Result<BackupTarget, Backu
         .map_err(|_| BackupError::BadMarker(root.clone()))?;
     let mut lines = text.lines();
     let id = match (lines.next(), lines.next(), lines.next()) {
-        (Some(MARKER_HEADER), Some(id), None) if valid_id(id) => id,
+        (Some(MARKER_HEADER), Some(id), None) if valid_id(id) => id.to_owned(),
         _ => return Err(BackupError::BadMarker(root)),
     };
+    Ok((root, id))
+}
+
+/// Opens `root` as the backup target whose saved id is `expected_id`. A missing marker, an
+/// unreadable one or a different id is an error, never a fallback to "back up here anyway".
+pub fn open_target(root: &Path, expected_id: &str) -> Result<BackupTarget, BackupError> {
+    let (root, id) = read_marker(root)?;
     if id != expected_id {
         return Err(BackupError::WrongTarget(root));
     }
-    Ok(BackupTarget {
-        root,
-        id: id.to_owned(),
-    })
+    Ok(BackupTarget { root, id })
+}
+
+/// Re-adopts a folder that already carries a backup marker, taking its id (for when the saved
+/// settings were lost or the catalog moved but the drive is the same one). Unlike [`open_target`]
+/// it has no expected id: the user is explicitly choosing this folder.
+pub fn adopt_target(root: &Path) -> Result<BackupTarget, BackupError> {
+    let (root, id) = read_marker(root)?;
+    Ok(BackupTarget { root, id })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -752,5 +765,28 @@ mod tests {
         // A path that is not a folder is an error.
         assert!(assess_target_folder(&f.dst.join("old/photo.NEF"), &library).is_err());
         assert!(assess_target_folder(&f.dst.join("missing"), &library).is_err());
+    }
+
+    #[test]
+    fn adopting_takes_the_markers_id_and_refuses_what_is_not_a_target() {
+        let f = fx();
+        let made = init_target(&f.dst).unwrap();
+        let adopted = adopt_target(&f.dst).unwrap();
+        assert_eq!(adopted.id(), made.id());
+        assert_eq!(adopted.root(), made.root());
+        // The adopted target is the same drive for open_target too.
+        assert!(open_target(&f.dst, adopted.id()).is_ok());
+        // A folder with no marker, or a foreign one, is refused.
+        assert!(matches!(
+            adopt_target(&f.src),
+            Err(BackupError::NotATarget(_))
+        ));
+        fs::write(f.src.join(MARKER_NAME), "garbage").unwrap();
+        assert!(matches!(
+            adopt_target(&f.src),
+            Err(BackupError::BadMarker(_))
+        ));
+        assert!(valid_id(made.id()));
+        assert!(!valid_id("aaaaaaa\u{e9}") && !valid_id("") && !valid_id(&"A".repeat(32)));
     }
 }

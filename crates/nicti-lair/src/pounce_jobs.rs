@@ -1263,11 +1263,21 @@ pub struct BackupCopyReport {
     /// The folder that was backed up.
     pub source: PathBuf,
     pub report: backup::Report,
-    /// Why nothing could be backed up (target missing / wrong drive / folders overlap), if so.
+    /// Why the run stopped or could not start (target missing / wrong drive / folders overlap),
+    /// if so.
     pub error: Option<String>,
+    /// The `error` is about the *target* (missing, wrong drive, vanished mid-run), so it would hit
+    /// every folder: the caller should not go on to the next one. False for a problem with this
+    /// one source folder (offline, overlapping the target).
+    pub target_problem: bool,
     /// Cancelled (or dropped) before every file was handled.
     pub stopped: bool,
 }
+
+/// Files between re-checks that the target is still the drive that was opened. A drive pulled or
+/// swapped mid-run would otherwise leave the rest of the files going into an empty mount-point
+/// folder on the system disk, or onto a different drive.
+pub const TARGET_RECHECK_FILES: usize = 25;
 
 /// Additive verified copy of one library folder to a backup target (#622): opens the target by its
 /// saved id on the first step (so a wrong or missing drive is an `error`, never a backup to the
@@ -1278,6 +1288,7 @@ pub struct BackupCopyJob {
     source: PathBuf,
     run: Option<BackupRun>,
     started: bool,
+    since_check: usize,
     progress: Progress,
     result: ReportSlot<BackupCopyReport>,
 }
@@ -1295,17 +1306,25 @@ impl BackupCopyJob {
             source,
             run: None,
             started: false,
+            since_check: 0,
             progress: Progress::default(),
             result: result.clone(),
         };
         (job, result)
     }
 
-    fn resolve(&self, error: Option<String>, run: Option<BackupRun>, stopped: bool) {
+    fn resolve(
+        &self,
+        error: Option<String>,
+        target_problem: bool,
+        run: Option<BackupRun>,
+        stopped: bool,
+    ) {
         *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(BackupCopyReport {
             source: self.source.clone(),
             report: run.map(BackupRun::into_report).unwrap_or_default(),
             error,
+            target_problem,
             stopped,
         });
     }
@@ -1333,9 +1352,14 @@ impl ChunkedJob for BackupCopyJob {
     fn step(&mut self) -> Result<Step, JobError> {
         if !self.started {
             self.started = true;
-            let opened = backup::open_target(&self.target_root, &self.target_id)
-                .and_then(|t| BackupRun::new(&t, &self.source));
-            match opened {
+            let target = match backup::open_target(&self.target_root, &self.target_id) {
+                Ok(t) => t,
+                Err(e) => {
+                    self.resolve(Some(e.to_string()), true, None, false);
+                    return Ok(Step::Done);
+                }
+            };
+            match BackupRun::new(&target, &self.source) {
                 Ok(run) => {
                     let (done, total) = run.progress();
                     self.progress = Progress {
@@ -1345,15 +1369,30 @@ impl ChunkedJob for BackupCopyJob {
                     self.run = Some(run);
                 }
                 Err(e) => {
-                    self.resolve(Some(e.to_string()), None, false);
+                    self.resolve(Some(e.to_string()), false, None, false);
                     return Ok(Step::Done);
                 }
+            }
+        }
+        // Still the same drive? (see `TARGET_RECHECK_FILES`)
+        if self.since_check >= TARGET_RECHECK_FILES {
+            self.since_check = 0;
+            if let Err(e) = backup::open_target(&self.target_root, &self.target_id) {
+                let run = self.run.take();
+                self.resolve(
+                    Some(format!("the backup target went away during the run: {e}")),
+                    true,
+                    run,
+                    false,
+                );
+                return Ok(Step::Done);
             }
         }
         let Some(run) = self.run.as_mut() else {
             return Ok(Step::Done);
         };
         let more = run.step(&|| false);
+        self.since_check += 1;
         let (done, total) = run.progress();
         self.progress = Progress {
             done: done as u64,
@@ -1363,7 +1402,7 @@ impl ChunkedJob for BackupCopyJob {
             return Ok(Step::Yield);
         }
         let run = self.run.take();
-        self.resolve(None, run, false);
+        self.resolve(None, false, run, false);
         Ok(Step::Done)
     }
 }
@@ -1377,7 +1416,7 @@ impl Drop for BackupCopyJob {
             .is_none();
         if unresolved {
             let run = self.run.take();
-            self.resolve(None, run, true);
+            self.resolve(None, false, run, true);
         }
     }
 }

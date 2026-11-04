@@ -54,7 +54,9 @@ pub fn load_settings(catalog_path: &Path) -> Option<TargetSettings> {
     let s: TargetSettings =
         serde_json::from_str(&std::fs::read_to_string(settings_file_for(catalog_path)).ok()?)
             .ok()?;
-    (!s.path.is_empty() && !s.id.is_empty()).then_some(s)
+    // The id must be one a marker can carry (32 lowercase hex): a hand-edited or damaged file is
+    // not a target, and nothing downstream slices a string it cannot trust.
+    (!s.path.is_empty() && backup::valid_id(&s.id)).then_some(s)
 }
 
 /// Temp file + rename, so a crash never leaves a half-written file.
@@ -110,6 +112,9 @@ pub fn summarize(r: &BackupCopyReport) -> String {
 struct PendingSetup {
     path: PathBuf,
     assessment: TargetAssessment,
+    /// The folder already carries a marker: the choice is to re-adopt its drive id (the saved
+    /// settings were lost, or the catalog moved), not to set it up.
+    adopt: bool,
 }
 
 pub struct BackupCopyUi {
@@ -154,6 +159,12 @@ impl BackupCopyUi {
         if let Some(slot) = self.pending.clone() {
             if let Some(report) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 self.pending = None;
+                // A target problem would fail every queued folder the same way, and a cancelled
+                // run means the user wants the backup to stop: drop the rest in both cases. A
+                // problem with just this one folder (offline, overlapping) does not stop the rest.
+                if report.target_problem || report.stopped || report.report.cancelled {
+                    self.queue.clear();
+                }
                 self.status = Some(summarize(&report));
                 self.reports.insert(0, report);
                 self.reports.truncate(KEPT_REPORTS);
@@ -171,11 +182,6 @@ impl BackupCopyUi {
             self.queue.clear();
             return;
         };
-        // A run that found the target wrong or missing would fail every queued folder the same
-        // way: drop the rest rather than report the same error N times.
-        if self.reports.first().is_some_and(|r| r.error.is_some()) && self.pending.is_none() {
-            self.queue.clear();
-        }
         if let Some(source) = self.queue.pop_front() {
             let (job, slot) = BackupCopyJob::new(PathBuf::from(&saved.path), saved.id, source);
             pounce.submit(Box::new(job));
@@ -204,27 +210,35 @@ impl BackupCopyUi {
             return;
         }
         match assess_target_folder(&path, library_roots) {
+            // Already a backup target (its settings were lost, or the catalog moved): offer to
+            // take the marker's id back rather than leave the drive stranded.
             Ok(a) if a.already_a_target => {
-                self.status = Some(
-                    "That folder already carries a backup marker. Pick another folder, or use \
-                     \"Forget\" and set it up fresh from a new folder."
-                        .into(),
-                );
+                self.setup = Some(PendingSetup {
+                    path,
+                    assessment: a,
+                    adopt: true,
+                });
             }
             Ok(a) if a.needs_confirmation() => {
                 self.setup = Some(PendingSetup {
                     path,
                     assessment: a,
+                    adopt: false,
                 });
             }
-            Ok(_) => self.finish_setup(path),
+            Ok(_) => self.finish_setup(path, false),
             Err(e) => self.status = Some(format!("Cannot use that folder: {e}")),
         }
     }
 
-    fn finish_setup(&mut self, path: PathBuf) {
+    fn finish_setup(&mut self, path: PathBuf, adopt: bool) {
         self.setup = None;
-        match backup::init_target(&path) {
+        let result = if adopt {
+            backup::adopt_target(&path)
+        } else {
+            backup::init_target(&path)
+        };
+        match result {
             Ok(target) => {
                 let settings = TargetSettings {
                     path: target.root().to_string_lossy().into_owned(),
@@ -235,14 +249,20 @@ impl BackupCopyUi {
                 self.status = Some(match save_settings(&self.catalog_path, &settings) {
                     Ok(()) => format!("Backup target ready: {}", target.root().display()),
                     Err(e) => format!(
-                        "Backup target set up at {}, but its id could not be saved ({e}); it \
-                         will be forgotten when Nicti closes.",
+                        "Backup target ready at {}, but its id could not be saved ({e}), so it \
+                         will be forgotten when Nicti closes. The folder keeps its marker: pick \
+                         it again and choose \"Use this target\" to re-adopt it.",
                         target.root().display()
                     ),
                 });
                 self.saved = Some(settings);
             }
-            Err(e) => self.status = Some(format!("Could not set up the target: {e}")),
+            Err(e) => {
+                self.status = Some(format!(
+                    "Could not {} the target: {e}",
+                    if adopt { "adopt" } else { "set up" }
+                ));
+            }
         }
     }
 
@@ -260,8 +280,11 @@ impl BackupCopyUi {
         #[cfg(test)]
         let header = header.open(self.force_open.then_some(true));
         header.show(ui, |ui| {
-            let roots: Vec<PathBuf> = match store.list_roots() {
-                Ok(r) => r.into_iter().map(|r| PathBuf::from(r.path)).collect(),
+            let roots: Vec<(PathBuf, bool)> = match store.list_roots() {
+                Ok(r) => r
+                    .into_iter()
+                    .map(|r| (PathBuf::from(r.path), r.archived))
+                    .collect(),
                 Err(e) => {
                     ui.colored_label(egui::Color32::RED, format!("Cannot list folders: {e}"));
                     return;
@@ -278,7 +301,7 @@ impl BackupCopyUi {
                         ui.label(format!(
                             "Target: {} (drive id {}\u{2026})",
                             saved.path,
-                            &saved.id[..saved.id.len().min(8)]
+                            saved.id.chars().take(8).collect::<String>()
                         ));
                         if ui
                             .add_enabled(!self.is_running(), egui::Button::new("Forget"))
@@ -317,28 +340,35 @@ impl BackupCopyUi {
                             )
                             .clicked()
                         {
-                            self.begin_setup(&roots);
+                            let library: Vec<PathBuf> =
+                                roots.iter().map(|(p, _)| p.clone()).collect();
+                            self.begin_setup(&library);
                         }
                     });
                 }
             }
-            let mut confirmed: Option<PathBuf> = None;
+            let mut confirmed: Option<(PathBuf, bool)> = None;
             let mut cancelled = false;
             if let Some(setup) = &self.setup {
                 for w in setup.assessment.warnings() {
                     ui.colored_label(egui::Color32::from_rgb(230, 160, 40), w);
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Set up anyway").clicked() {
-                        confirmed = Some(setup.path.clone());
+                    let label = if setup.adopt {
+                        "Use this target"
+                    } else {
+                        "Set up anyway"
+                    };
+                    if ui.button(label).clicked() {
+                        confirmed = Some((setup.path.clone(), setup.adopt));
                     }
                     if ui.button("Cancel").clicked() {
                         cancelled = true;
                     }
                 });
             }
-            if let Some(path) = confirmed {
-                self.finish_setup(path);
+            if let Some((path, adopt)) = confirmed {
+                self.finish_setup(path, adopt);
             }
             if cancelled {
                 self.setup = None;
@@ -348,17 +378,27 @@ impl BackupCopyUi {
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
-                            can_run && !roots.is_empty() && !self.is_running(),
+                            can_run && roots.iter().any(|(_, a)| !a) && !self.is_running(),
                             egui::Button::new("Back up all folders"),
                         )
+                        .on_hover_text("Every folder that is not on an archived drive.")
                         .clicked()
                     {
-                        self.enqueue(pounce, roots.clone());
+                        // Archived roots live on drives that are usually unplugged; they are
+                        // backed up by their own button, not as part of "all".
+                        self.enqueue(
+                            pounce,
+                            roots.iter().filter(|(_, a)| !a).map(|(p, _)| p.clone()),
+                        );
                     }
                 });
-                for root in &roots {
+                for (root, archived) in &roots {
                     ui.horizontal(|ui| {
-                        ui.label(root.display().to_string());
+                        ui.label(format!(
+                            "{}{}",
+                            root.display(),
+                            if *archived { " (archived)" } else { "" }
+                        ));
                         if ui
                             .add_enabled(
                                 can_run && !self.is_running(),
@@ -522,7 +562,7 @@ mod tests {
         assert!(ui.setup.is_some() && ui.saved.is_none());
         assert!(!full.join(nicti_lair::backup::MARKER_NAME).exists());
         let path = ui.setup.as_ref().unwrap().path.clone();
-        ui.finish_setup(path);
+        ui.finish_setup(path, false);
         assert!(full.join(nicti_lair::backup::MARKER_NAME).exists());
         assert!(ui.saved.is_some());
 
@@ -548,7 +588,21 @@ mod tests {
         let mut ui = BackupCopyUi::new(&cat);
         ui.path_input = empty.display().to_string();
         ui.begin_setup(&[]);
-        assert!(ui.status.as_deref().unwrap().contains("already carries"));
+        let pending = ui
+            .setup
+            .as_ref()
+            .expect("an existing marker is offered for adoption");
+        assert!(pending.adopt && pending.assessment.already_a_target);
+        assert!(ui.saved.is_none());
+        // Adopting takes the marker's own id back (settings had been lost).
+        let original = backup::adopt_target(&empty).unwrap();
+        let path = pending.path.clone();
+        ui.finish_setup(path, true);
+        assert_eq!(
+            ui.saved.as_ref().map(|s| s.id.as_str()),
+            Some(original.id())
+        );
+        assert_eq!(BackupCopyUi::new(&cat).saved, ui.saved, "and it was saved");
     }
 
     #[test]
@@ -635,6 +689,94 @@ mod tests {
         ui_state.status = Some("done".into());
         frame(&mut ui_state, false);
         frame(&mut ui_state, true);
+        pounce.shutdown();
+    }
+
+    #[test]
+    fn a_hand_edited_settings_file_with_a_bad_id_is_not_a_target_and_cannot_panic_the_ui() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = dir.path().join("cat.db");
+        // A multibyte character across byte 8 used to panic the id-prefix slice every frame.
+        for id in [
+            "aaaaaaa\u{e9}b",
+            "\u{e9}\u{e9}\u{e9}\u{e9}",
+            "short",
+            &"G".repeat(32),
+            &"A".repeat(32),
+        ] {
+            std::fs::write(
+                settings_file_for(&cat),
+                serde_json::json!({"path": "/x", "id": id}).to_string(),
+            )
+            .unwrap();
+            assert!(load_settings(&cat).is_none(), "{id:?}");
+            let mut ui = BackupCopyUi::new(&cat);
+            assert!(ui.saved.is_none());
+            // And even a UI holding such a value in memory draws without slicing it.
+            ui.saved = Some(TargetSettings {
+                path: "/x".into(),
+                id: id.to_string(),
+            });
+            ui.force_open = true;
+            let store: Arc<dyn CatalogStore + Send + Sync> =
+                Arc::new(SqliteCatalog::open_in_memory().unwrap());
+            let pounce = Pounce::new(u64::MAX, 2, 1, || {});
+            let ctx = egui::Context::default();
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui_| {
+                ui.show(ui_, &store, &pounce, false);
+            });
+            out.textures_delta.clear();
+            pounce.shutdown();
+        }
+    }
+
+    #[test]
+    fn a_cancelled_run_stops_the_queue_and_a_folder_problem_does_not() {
+        let t = tempfile::tempdir().unwrap();
+        let cat = t.path().join("cat.db");
+        let dst = t.path().join("backup");
+        let (good, missing) = (t.path().join("good"), t.path().join("offline"));
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::write(good.join("1.NEF"), b"1").unwrap();
+        let target = backup::init_target(&dst).unwrap();
+        let pounce = Pounce::new(u64::MAX, 2, 2, || {});
+        let mut ui = BackupCopyUi::new(&cat);
+        ui.saved = Some(TargetSettings {
+            path: dst.display().to_string(),
+            id: target.id().to_owned(),
+        });
+
+        // Cancelled (the job was dropped by the activity panel's Cancel): the rest does not start.
+        let slot: ReportSlot<BackupCopyReport> =
+            Arc::new(std::sync::Mutex::new(Some(BackupCopyReport {
+                stopped: true,
+                ..report("/lib/a")
+            })));
+        ui.pending = Some(slot);
+        ui.queue.push_back(good.clone());
+        assert!(ui.poll(&pounce));
+        assert!(ui.queue.is_empty() && !ui.is_running(), "cancel means stop");
+
+        // An offline folder first: it reports its own problem, the next folder still runs.
+        ui.reports.clear();
+        ui.enqueue(&pounce, [missing, good.clone()]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while ui.is_running() && std::time::Instant::now() < deadline {
+            ui.poll(&pounce);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(ui.reports.len(), 2, "{:?}", ui.reports);
+        let ok = ui
+            .reports
+            .iter()
+            .find(|r| r.error.is_none())
+            .expect("the good folder ran");
+        assert_eq!(ok.report.copied, 1);
+        assert!(ui
+            .reports
+            .iter()
+            .any(|r| r.error.is_some() && !r.target_problem));
         pounce.shutdown();
     }
 }
