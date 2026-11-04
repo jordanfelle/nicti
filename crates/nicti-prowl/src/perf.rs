@@ -34,6 +34,11 @@ pub struct Stats {
     pub p95_ms: f64,
     pub max_ms: f64,
     pub samples_ms: Vec<f64>,
+    /// Median process CPU time (user + system, every thread) per measured run, where the platform
+    /// exposes it ([`process_cpu_time`]); `None` elsewhere. The regression gate (#538,
+    /// [`crate::gate`]) compares this, not wall time, which moves with machine load.
+    pub cpu_p50_ms: Option<f64>,
+    pub cpu_samples_ms: Vec<f64>,
 }
 
 impl Stats {
@@ -45,8 +50,52 @@ impl Stats {
             p95_ms: percentile(&ms, 0.95),
             max_ms: ms.last().copied().unwrap_or(0.0),
             samples_ms: ms,
+            cpu_p50_ms: None,
+            cpu_samples_ms: Vec::new(),
         }
     }
+
+    /// Adds the per-run CPU times (one per measured run). Ignored unless every run has one.
+    fn with_cpu(mut self, cpu: Vec<Option<Duration>>) -> Self {
+        if cpu.is_empty() || cpu.iter().any(Option::is_none) {
+            return self;
+        }
+        let mut ms: Vec<f64> = cpu
+            .into_iter()
+            .flatten()
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        self.cpu_p50_ms = Some(percentile(&ms, 0.50));
+        self.cpu_samples_ms = ms;
+        self
+    }
+}
+
+/// Process CPU time (user + system, all threads) so far, or `None` where it can't be read without
+/// a platform dependency. Linux only today (`/proc/self/stat`); a Windows producer can put the
+/// number in its report itself (the gate only reads `stats.cpu_p50_ms`).
+pub fn process_cpu_time() -> Option<Duration> {
+    #[cfg(target_os = "linux")]
+    {
+        parse_proc_stat_cpu(&fs::read_to_string("/proc/self/stat").ok()?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// `utime + stime` out of a `/proc/<pid>/stat` line, in `USER_HZ` ticks (100/s on every Linux
+/// that matters). The command name (field 2) may contain spaces and parentheses, so the fields are
+/// counted from the *last* `)`.
+fn parse_proc_stat_cpu(stat: &str) -> Option<Duration> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    // After the ")" the fields restart at 3 (state); utime and stime are fields 14 and 15.
+    let mut fields = rest.split_whitespace().skip(11);
+    let utime: u64 = fields.next()?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+    Some(Duration::from_millis((utime + stime) * 10))
 }
 
 /// Nearest-rank percentile over an already-sorted slice.
@@ -112,12 +161,15 @@ impl Protocol {
             f();
         }
         let mut samples = Vec::with_capacity(self.measured);
+        let mut cpu = Vec::with_capacity(self.measured);
         for _ in 0..self.measured {
+            let cpu_before = process_cpu_time();
             let start = Instant::now();
             f();
             samples.push(start.elapsed());
+            cpu.push(cpu_delta(cpu_before));
         }
-        Stats::from_samples(samples)
+        Stats::from_samples(samples).with_cpu(cpu)
     }
 
     /// Like [`Protocol::run`], but stops and propagates the first error from `f` instead of
@@ -129,12 +181,15 @@ impl Protocol {
             f()?;
         }
         let mut samples = Vec::with_capacity(self.measured);
+        let mut cpu = Vec::with_capacity(self.measured);
         for _ in 0..self.measured {
+            let cpu_before = process_cpu_time();
             let start = Instant::now();
             f()?;
             samples.push(start.elapsed());
+            cpu.push(cpu_delta(cpu_before));
         }
-        Ok(Stats::from_samples(samples))
+        Ok(Stats::from_samples(samples).with_cpu(cpu))
     }
 
     /// Refuses to run `f` unless `verify_report` is clean -- the enforcement point for
@@ -154,6 +209,10 @@ impl Protocol {
         }
         Ok(self.run(f))
     }
+}
+
+fn cpu_delta(before: Option<Duration>) -> Option<Duration> {
+    Some(process_cpu_time()?.saturating_sub(before?))
 }
 
 /// Writes `report` as JSON under `bench-results/<name>-<unix_time>.json` (gitignored, per
@@ -238,6 +297,40 @@ mod tests {
         assert!((stats.p50_ms - 30.0).abs() < 0.01);
         assert!((stats.p95_ms - 50.0).abs() < 0.01);
         assert!((stats.max_ms - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn proc_stat_cpu_counts_utime_and_stime_even_with_a_hostile_command_name() {
+        // pid (comm) state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime ...
+        let line =
+            "42 (we ird) (name) S 1 42 42 0 -1 4194560 100 0 0 0 150 25 0 0 20 0 1 0 100 1000 100";
+        assert_eq!(
+            parse_proc_stat_cpu(line),
+            Some(Duration::from_millis(1750)),
+            "150 + 25 ticks at 100 Hz"
+        );
+        assert_eq!(parse_proc_stat_cpu("garbage"), None);
+        assert_eq!(parse_proc_stat_cpu("1 (x) S 1"), None, "too few fields");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_cpu_bound_run_reports_cpu_time_on_linux() {
+        let protocol = Protocol {
+            warmup: 0,
+            measured: 3,
+        };
+        let stats = protocol.run(|| {
+            // ~60 ms of busy work: well above the 10 ms tick of /proc.
+            let end = Instant::now() + Duration::from_millis(60);
+            let mut x = 0u64;
+            while Instant::now() < end {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+        });
+        let cpu = stats.cpu_p50_ms.expect("linux exposes CPU time");
+        assert!(cpu >= 30.0, "cpu p50 {cpu} ms for a 60 ms busy loop");
+        assert_eq!(stats.cpu_samples_ms.len(), 3);
     }
 
     #[test]

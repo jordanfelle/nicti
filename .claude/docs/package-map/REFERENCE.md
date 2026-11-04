@@ -11,7 +11,7 @@ terse index: crate/spike → purpose → owning topic.
 
 - **`crates/nicti-claw`**, **`crates/dewclaw`** — Claw registry + its dylib test fixture →
   [`language-and-architecture`](.claude/rules/language-and-architecture/REFERENCE.md)
-- **`crates/nicti-prowl`** — benchmark + golden-image harness (#17); see the Performance targets
+- **`crates/nicti-prowl`** — benchmark + golden-image harness (#17); see the Performance targets `gate.rs` + `prowl bench-gate` (#538): CPU-time regression gate against a `history.jsonl` (docs/benchmarks.md).
   and benchmarking section above
 - **`crates/nicti-haw`** (#229; #345 adds `session_builder`/`ExecutionProvider`: GPU-provider selection with a logged CPU fallback, `NICTI_ORT_EP`) — shared, process-wide `ort`/`load-dynamic` environment init,
   replacing the six duplicated crate-local copies in `groom` (now `nicti-groom`)/`siamese`/`crouch`/`rods`/

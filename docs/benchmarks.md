@@ -55,6 +55,18 @@ reported alongside the hardware/dataset identity — never compared across diffe
   any future Library-area benchmark at the same scale.
 - **Result format:** each run's raw data lands as CSV/JSON under `bench-results/` (gitignored, local
   only). Only summarized numbers go into ADRs or ticket updates.
+- **Regression gate (#538):** `prowl bench-gate --report bench-results/<name>-<t>.json --history
+  bench-results/history.jsonl [--append] [--commit <sha>]` compares the run's **process CPU time**
+  (`stats.cpu_p50_ms`, user + system over every thread, recorded by `perf::Protocol::run` on Linux;
+  never wall time, which moves with machine load) against the **median of that benchmark's last 5
+  history entries** and exits 1 when it is more than 20 % over (`--threshold`, `--window`). A
+  benchmark with fewer than 3 history entries, or a baseline under 20 ms (the `/proc` tick is 10 ms),
+  is recorded but not gated. A regressed run is never appended, so it cannot become the next
+  baseline. `history.jsonl` is one JSON object per line (`bench`, `cpu_ms`, `unix_time`, optional
+  `commit`); a corrupt line is an error, not a shorter baseline. Reports without `cpu_p50_ms` (any
+  non-Linux run today) are refused rather than compared on wall time; a Windows producer can write
+  the field itself. Not wired into CI: GitHub runners are too noisy to gate a 20 % band, so it runs
+  where the reference-machine numbers are produced.
 
 ## Reference dataset: `ref-10k`
 
