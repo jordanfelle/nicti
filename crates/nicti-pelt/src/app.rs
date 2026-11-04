@@ -150,6 +150,8 @@ pub struct PeltApp {
     righting: crate::righting_ui::RightingUi,
     geotag_ui: crate::geotag_ui::GeotagUi,
     backup_copy: crate::backup_copy_ui::BackupCopyUi,
+    /// `--control-export-dir`: where the control channel's `export.run` may write (#647).
+    control_export_dir: Option<PathBuf>,
     /// Copy from a camera card (#602).
     card_copy: crate::card_copy_ui::CardCopyUi,
     update: UpdateChecker,
@@ -488,6 +490,7 @@ impl PeltApp {
             righting,
             geotag_ui: crate::geotag_ui::GeotagUi::default(),
             backup_copy,
+            control_export_dir: None,
             card_copy: crate::card_copy_ui::CardCopyUi::default(),
             update,
             nine_lives,
@@ -3000,6 +3003,20 @@ impl PeltApp {
         self.export.show_dialog(ctx, &env);
     }
 
+    /// The environment an export run needs, from live app state (the control channel's
+    /// `export.run` builds it the way the dialog's Start button does).
+    fn export_env(&self) -> ExportEnv {
+        ExportEnv {
+            submitter: self.pounce.submitter(),
+            store: self.catalog.clone(),
+            decoder: self.decoder.clone(),
+            gpu: self.gpu.clone(),
+            registry: self.export_registry.clone(),
+            software: format!("Nicti {}", self.version),
+            larder: self.larder.clone(),
+        }
+    }
+
     /// Persists Develop's edits for the photo it has loaded (#57) if they differ from what the
     /// catalog holds. `Ok`/nothing-to-do -> `true`; a failed save -> `false` (the message is kept
     /// in `edit_save_failed`). Unless `force`, a document that already failed to save isn't
@@ -3797,7 +3814,7 @@ impl PeltApp {
         let started = crate::control::token_dir().and_then(|dir| {
             let waker = ctx.clone();
             crate::control::start(
-                opts,
+                opts.clone(),
                 &dir,
                 &self.commands,
                 Arc::new(move || waker.request_repaint()),
@@ -3811,6 +3828,7 @@ impl PeltApp {
                     control.token_path().display()
                 );
                 self.command_policy = opts.policy();
+                self.control_export_dir = opts.export_dir.clone();
                 // A hidden window runs `logic` but no `ui`; frame-dependent work still needs a
                 // paint (ADR-0434 section 2).
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
@@ -3947,6 +3965,96 @@ impl crate::cmd::CommandHost for PeltApp {
         self.develop_ready()?;
         let dev = self.develop.as_mut().ok_or("Develop is not available")?;
         crate::cmd::develop_stage_set(dev, stage, patch)
+    }
+
+    fn develop_asset(&self) -> Option<i64> {
+        self.loupe_loaded_asset.map(|(id, _)| id)
+    }
+
+    fn export_dir(&self) -> Option<PathBuf> {
+        self.control_export_dir.clone()
+    }
+
+    fn export_status(&self) -> serde_json::Value {
+        self.export.status_json()
+    }
+
+    fn export_run(&mut self, req: &crate::cmd::ExportRequest) -> Result<serde_json::Value, String> {
+        use nicti_preen::spec::{CollisionPolicy, DestinationBase, DestinationSpec};
+        if self.export.is_running() {
+            return Err("an export is already running".into());
+        }
+        if self.job_active(&[
+            JobKind::Import,
+            JobKind::Sync,
+            JobKind::Move,
+            JobKind::Delete,
+            JobKind::Export,
+        ]) || self.delete.is_confirming()
+        {
+            return Err(
+                "wait for the running import, sync, move, delete or export to finish".into(),
+            );
+        }
+        let ids = match &req.assets {
+            Some(ids) => ids.clone(),
+            None => self.export_targets(),
+        };
+        if ids.is_empty() {
+            return Err("no photos to export (select some, or pass `assets`)".into());
+        }
+        let mut spec = match &req.preset {
+            Some(name) => self.export.preset_spec(name).ok_or_else(|| {
+                format!(
+                    "no preset named `{name}` (have: {})",
+                    self.export.preset_names().join(", ")
+                )
+            })?,
+            None => self.export.last_spec(),
+        };
+        // The destination is the operator's folder, or -- only reachable with
+        // --control-allow-destructive -- one the caller named. Either must be an existing real
+        // folder, resolved now.
+        let base = match &req.destination {
+            Some(path) => path
+                .canonicalize()
+                .map_err(|e| format!("destination {}: {e}", path.display()))?,
+            None => self
+                .control_export_dir
+                .clone()
+                .ok_or("no export folder (--control-export-dir)")?,
+        };
+        if !base.is_dir() {
+            return Err(format!("{} is not a folder", base.display()));
+        }
+        if let Some(sub) = &req.subfolder {
+            crate::cmd::check_subfolder_unlinked(&base, sub)?;
+        }
+        spec.destination = DestinationSpec {
+            base: DestinationBase::Folder(base.clone()),
+            subfolder: req.subfolder.clone(),
+        };
+        // A preset may carry "overwrite"; the channel decides this itself. GPS is never published
+        // from here (the dialog's per-export opt-in has no equivalent).
+        spec.collision = if req.overwrite {
+            CollisionPolicy::Overwrite
+        } else {
+            CollisionPolicy::UniqueSuffix
+        };
+        spec.metadata.include_location = false;
+        // Export renders what the catalog holds: put Develop's pending edits there first.
+        if !self.save_develop_edits(true) {
+            return Err("couldn't save Develop's edits, so nothing was exported".into());
+        }
+        let env = self.export_env();
+        self.export.start_headless(env, &ids, spec)?;
+        Ok(serde_json::json!({
+            "started": true,
+            "photos": ids.len(),
+            "destination": base.display().to_string(),
+            "subfolder": req.subfolder,
+            "overwrite": req.overwrite,
+        }))
     }
 
     fn export_open(&mut self) -> Result<(), String> {

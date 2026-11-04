@@ -186,7 +186,7 @@ impl Launcher {
             path,
             store,
         );
-        if let Some(opts) = self.control {
+        if let Some(opts) = self.control.clone() {
             app.enable_control(opts, &self.ctx);
         }
         app

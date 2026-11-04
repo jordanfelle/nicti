@@ -263,3 +263,34 @@ decision; it gets its own ticket if wanted. The control channel does not depend 
   tests, each guard broken in turn to see a test fail (the peer-address check is belt and braces and
   unobservable on loopback). Not verified: Windows ACL behaviour of `%LOCALAPPDATA%`, the
   `SO_EXCLUSIVEADDRUSE`-free bind on Windows beyond the protocol argument, and a real GUI session.
+
+## `export.run` and the slice-1 leftovers as built (#647)
+
+- **`export.run`** starts an export without the dialog and returns at once; **`export.status`**
+  (Read) reports progress (`done`/`total`, the planning phase) and the last finished report (counts,
+  up to 50 output files, failures, warnings). The run is the dialog's own `ExportRun::start` through
+  `ExportUi::start_headless` (same validation, same Pounce pipeline, Cancel in the status line); the
+  remembered "last settings" are left alone so a script's one-off does not become the user's next
+  default. Params: `assets` (default: the selection or cursor, at most 1000, each must be in the
+  catalog), `preset` (a built-in or saved name; default the dialog's last settings), `subfolder`,
+  `destination`, `overwrite`.
+- **Risk is per parameters** (`Command::risk_for`; the listed `risk` is the base): with neither
+  `destination` nor `overwrite` the run writes new files into the operator's
+  `--control-export-dir DIR` and is `Mutate`; naming a `destination` folder or `overwrite: true` makes it
+  `Destructive` (needs `--control-allow-destructive`). `--control-export-dir` is parsed with the other
+  `--control-*` flags (a value or `=VALUE`; must exist and be a directory, stored canonical; needs
+  `--control`; naming a folder does not lift the destructive gate). Without it and without a
+  destination `export.run` says what to start Nicti with.
+- **What the channel cannot choose:** the collision policy is forced to the `-2` suffix (a preset's
+  "overwrite" is replaced), GPS is never included, and a `subfolder` is plain relative folders only
+  (no `..`, empty or hidden parts, backslashes, drive letters, wildcards or `{templates}`), checked
+  again against the real filesystem: an existing part that is a link or not a folder is refused.
+- **`develop.set` names its photo.** Develop edits the photo it has loaded, which is not necessarily
+  the one the grid cursor or loupe shows. Decision: `develop.set` requires `asset` and is refused
+  when it is not the loaded photo; `develop.get` takes it optionally with the same check; both
+  results report the `asset` they acted on. `ui.inspect` already shows `develop_asset`.
+- **`export.open` stays `Mutate`:** it takes no path and only opens the dialog; the dialog's own Start
+  is not reachable from the channel until widget injection (slice 2b) exists, and `export.run` is
+  where the gate lives.
+- Already done in slice 2a (#543) and not touched here: the 1 MiB request cap before parsing
+  (`MAX_LINE`) and waking an idle window when a request is queued.
