@@ -78,6 +78,7 @@ pub(crate) fn synthetic_linear_frame() -> LinearFrame {
         pixels,
         dng_opcode_list3: None,
         nikon_lens_info: None,
+        lens_exif: Default::default(),
         orientation: 0,
     }
 }
@@ -440,7 +441,8 @@ impl DevelopDoc {
         let l = self.lens_params();
         let bits = u64::from(l.remove_ca)
             | u64::from(l.embedded_profile) << 1
-            | u64::from(l.nikon_profile) << 2;
+            | u64::from(l.nikon_profile) << 2
+            | u64::from(l.lensfun_profile) << 3;
         self.frame_key() ^ (bits << 56)
     }
 
@@ -803,6 +805,12 @@ impl DevelopDoc {
     /// Lens Corrections section only offers the opt-in "Nikon lens profile" switch then.
     pub fn has_nikon_lens_profile(&self) -> bool {
         nicti_tapetum::slit::has_nikon_profile(&self.frame)
+    }
+
+    /// Whether the lensfun database knows the loaded photo's body and lens (#462): the Lens
+    /// Corrections section only offers the opt-in "lensfun database profile" switch then.
+    pub fn has_lensfun_lens_profile(&self) -> bool {
+        nicti_tapetum::slit::has_lensfun_profile(&self.frame)
     }
 
     /// The loaded photo's identity (`loupe::asset_cache_key`), as given to `load_real_frame`.

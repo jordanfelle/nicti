@@ -88,8 +88,9 @@ allow = [
 # (verified: r-efi passes today via its MIT/Apache-2.0 arms with no LGPL entry in `allow` at all),
 # so adding an LGPL SPDX string here would have no upside and a real downside: cargo-deny can't
 # express "only as an OR-arm" -- it would also pass a future crate whose *sole* license is that
-# exact LGPL string. For `lensfun-rs` specifically, its confirmed or-later dual license needed no
-# special sign-off once Nicti's own license was already copyleft (ADR-0018's amendment). `rawler`
+# exact LGPL string. `lensfun-rs`'s or-later grant needed no special sign-off once Nicti's own
+# license was already copyleft (ADR-0018's amendment); its sole `LGPL-3.0-or-later` licence is the per-crate
+# exception below (#462). `rawler`
 # (and LibRaw, vendored outside Cargo's graph entirely) turned out to need no "or-later" grant
 # either, once #37 checked LGPL-2.1's actual §§5-6 text (docs/licensing.md's Flags §2) -- but the
 # general principle (don't widen an allowlist just because cargo-deny's OR-arm matching makes it
@@ -113,6 +114,17 @@ confidence-threshold = 0.9
 [[licenses.exceptions]]
 allow = ["LGPL-2.1"]
 name = "rawler"
+
+# Exception (#462): `lensfun` (crates.io name of lensfun-rs, the pure-Rust lensfun port) declares the
+# single licence "LGPL-3.0-or-later" -- not the dual "... OR GPL-3.0" an earlier survey recorded, which
+# passed through the GPL-3.0 arm. The or-later grant is exactly what Nicti's own AGPL-3.0-or-later
+# needs (docs/licensing.md's 2026-11-04 #462 update has the check and the shipping checklist: LGPL text
+# + notice, CC BY-SA 3.0 attribution for its bundled, unmodified database). Per-crate for the same
+# reason as `rawler` above: cargo-deny cannot verify the packaging obligations a blanket LGPL entry
+# would wave through. Matches by crate name across the whole graph.
+[[licenses.exceptions]]
+allow = ["LGPL-3.0-or-later"]
+name = "lensfun"
 
 # CDLA-Permissive-2.0: `webpki-root-certs` (a root-CA-bundle *data* crate, not code), reachable
 # only via `ureq`'s own `native-tls-webpki-roots` feature -- which `cargo deny check

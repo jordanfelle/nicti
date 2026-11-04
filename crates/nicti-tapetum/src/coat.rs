@@ -657,6 +657,13 @@ pub struct LensParams {
     /// documents keep their lens hash.
     #[serde(skip_serializing_if = "is_false")]
     pub nikon_profile: bool,
+    /// Fall back to the lensfun database (#462) for lenses the file's own data does not cover:
+    /// adapted F-mount glass, third-party lenses, other bodies. Matched on the EXIF lens model, so a
+    /// no-op for files that name none or that lensfun does not know. **Off by default** (opt-in
+    /// like `nikon_profile`: the database's calibrations are community-made); off serialises to
+    /// nothing, so existing documents keep their lens hash.
+    #[serde(skip_serializing_if = "is_false")]
+    pub lensfun_profile: bool,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -673,6 +680,7 @@ impl Default for LensParams {
             remove_ca: false,
             embedded_profile: true,
             nikon_profile: false,
+            lensfun_profile: false,
         }
     }
 }
@@ -681,7 +689,7 @@ impl LensParams {
     /// True when the stage can do nothing *for any file*: used only to pick the cheap texture copy
     /// when the frame has no profile either (see `slit::LensExec`).
     pub fn is_noop(&self) -> bool {
-        !self.remove_ca && !self.embedded_profile && !self.nikon_profile
+        !self.remove_ca && !self.embedded_profile && !self.nikon_profile && !self.lensfun_profile
     }
 }
 
@@ -1301,6 +1309,10 @@ mod tests {
             },
             LensParams {
                 nikon_profile: true,
+                ..Default::default()
+            },
+            LensParams {
+                lensfun_profile: true,
                 ..Default::default()
             },
         ] {

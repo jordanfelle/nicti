@@ -340,6 +340,27 @@ MIT/Apache-2.0 crate, already covered. Confirmed the whole crate (including `lib
 build) cross-compiles cleanly to `x86_64-pc-windows-gnu`, the CI-required target, before
 committing to this dependency.
 
+**Update (2026-11-04, [#462](https://github.com/jordanfelle/nicti/issues/462), lensfun lens-correction
+fallback):** the operator approved the lensfun fallback and its new dependency; the licence check came out
+**satisfiable, so it ships**. New production dependency `lensfun` v0.7.0 in `nicti-iris` (crates.io name of
+[lensfun-rs](https://github.com/vdavid/lensfun-rs), a pure-Rust port, no C library): its manifest declares
+**`LGPL-3.0-or-later`** (a single licence, not the dual `... OR GPL-3.0` the row below recorded; the
+or-later grant is what Nicti's AGPL-3.0-or-later needs, so the 2026-09-24 conclusion stands, verified
+against the published 0.7.0 manifest and `NOTICE`). Its four dependencies (`flate2`, `regex`, `roxmltree`, `thiserror`, all `MIT OR Apache-2.0`) were already
+in the lockfile and allowlisted, so only `lensfun` itself is new. Because its sole licence is
+`LGPL-3.0-or-later` (no GPL arm to pass through), `deny.toml` gains a per-crate
+`[[licenses.exceptions]]` entry for it, the same shape as `rawler`; `cargo deny check licenses` then passes. **Database:** the crate bundles the upstream lensfun XML calibration database
+(~574 KB gzipped) **unmodified**, under **CC BY-SA 3.0**; share-alike only binds a modified database, and
+Nicti only reads it (it never edits or re-exports the XML; the per-lens fits it derives are computed at run
+time and stored nowhere). Obligations to carry into the release notice (a distribution-mechanics checklist,
+not a compatibility question): (1) the crate's LGPL-3.0 text, its copyright line for the LensFun
+contributors (Zabolotny, Post and others, see its `NOTICE`) and a prominent LGPL notice; (2) CC BY-SA 3.0
+attribution for the lens database with a link to the licence; (3) the corresponding source stays available
+alongside the binary, which GitHub Releases already provides. **Not shipped yet: the notices themselves are tracked in [#689](https://github.com/jordanfelle/nicti/issues/689) and must land before a release that includes this feature.** The database is data inside a Cargo
+dependency, not a file tracked in this repository, so `assets/ATTRIBUTION.md` (tracked fonts/images/models
+only) takes no row. `lensfun`'s `apps/` (GPL-3.0 tools) are not ported or linked. Outcome of the check
+"can the licence be satisfied for shipping": yes.
+
 **Update (2026-11-04, [#359](https://github.com/jordanfelle/nicti/issues/359), JPEG XL export):** one
 new production dependency in `nicti-preen`, `jixel` v0.5.5 (`BSD-3-Clause OR Apache-2.0`, pure Rust, a
 libjxl-tiny port; both already on `deny.toml`'s allowlist, no new entry needed, and it adds no
