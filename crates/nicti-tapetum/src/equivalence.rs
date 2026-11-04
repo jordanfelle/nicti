@@ -5,7 +5,7 @@
 //! 1. [`the_live_suffix_matches_its_cpu_twin_for_every_edit`]: a table of edit closures over
 //!    [`LiveParams`] (each slider of each CPU-twinned stage, both directions, plus combinations and
 //!    a white-balance variant). Every case renders one fixed test image through the real GPU live
-//!    suffix and through the `color::` CPU twins, compares in 8-bit display space (clamped to
+//!    suffix and through the `color::` CPU twins, compares in linear working space (not sRGB-encoded; clamped to
 //!    0..1, x255) and bounds mean |d| < 0.5 LSB and max |d| <= 3 LSB.
 //! 2. [`every_render_stage_is_classified`]: every id in the production spine (baked, live,
 //!    geometry) must appear in [`COVERAGE`] as parity-tested (naming a test that must exist in the
@@ -37,7 +37,7 @@ const MAX_LSB: f32 = 3.0;
 /// [0.52, 0.76, 0.76] -> output [1.0, ~0, 0.95]) differs by 3.6 LSB on the blue channel (GPU
 /// 0.953, CPU 0.939); the mean over the image is 0.03 LSB. Tracked in #701; delete the
 /// entry when it is fixed, and the test then holds the case to [`MAX_LSB`] again.
-const KNOWN_DIVERGENCES: &[(&str, f32)] = &[("tone shadows -1", 4.0)];
+const KNOWN_DIVERGENCES: &[(&str, f32)] = &[("tone shadows -1 [camera]", 4.5)];
 
 const W: u32 = 32;
 const H: u32 = 16;
@@ -154,6 +154,11 @@ fn cases() -> Vec<(String, Edit)> {
             ("lights", |t, x| t.lights = x),
             ("highlights", |t, x| t.highlights = x),
         ] {
+            // `build_tone_curve_lut` clamps its control points to 0..1, so pushing the shadows down
+            // or the highlights up changes nothing; those directions would be silent no-ops.
+            if (field == "shadows" && sign < 0.0) || (field == "highlights" && sign > 0.0) {
+                continue;
+            }
             add(
                 format!("tone curve {field} {:+}", mag * sign),
                 Box::new(move |p| set(&mut p.tone_curve, mag * sign)),
@@ -243,7 +248,8 @@ fn cases() -> Vec<(String, Edit)> {
     v
 }
 
-/// Display-space error of `gpu` against `cpu` in 8-bit LSB: `(mean, max)` over every channel.
+/// Error of `gpu` against `cpu`, linear values clamped to 0..1 and scaled x255 (an "LSB" here is
+/// 1/255 of linear, which under-weights shadows next to an sRGB-encoded 8-bit image): `(mean, max)` over every channel.
 fn lsb_error(gpu: &[[f32; 4]], cpu: &[[f32; 3]]) -> (f32, f32) {
     let (mut sum, mut max, mut n) = (0.0f32, 0.0f32, 0usize);
     for (g, c) in gpu.iter().zip(cpu) {
@@ -279,40 +285,75 @@ fn the_live_suffix_matches_its_cpu_twin_for_every_edit() {
     );
     let mut failures = Vec::new();
     let mut worst = (0.0f32, String::new());
-    for (name, edit) in &table {
-        let mut params = LiveParams {
-            working_space_matrix: base_matrix(&WbParams::default()),
+    let mut ran = 0usize;
+    // Two bases: the camera matrix (negative channels, nothing neutral after it) and the identity
+    // matrix (the grey ramp stays achromatic, which reaches the near-grey branches of HSL and
+    // vibrance). White-balance cases replace the matrix, so they only make sense on the first.
+    for (base_name, base) in [
+        ("camera", base_matrix(&WbParams::default())),
+        ("identity", color::mat3_identity()),
+    ] {
+        let render = |params: &LiveParams| {
+            kernel.set_params(&gpu, params);
+            let mut enc = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            kernel.encode(&gpu, &mut enc, &input, &output);
+            gpu.queue.submit(Some(enc.finish()));
+            read_frame(&gpu, &output)
+        };
+        let identity_params = LiveParams {
+            working_space_matrix: base,
             ..Default::default()
         };
-        edit(&mut params);
-        kernel.set_params(&gpu, &params);
-        let mut enc = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        kernel.encode(&gpu, &mut enc, &input, &output);
-        gpu.queue.submit(Some(enc.finish()));
-        let actual = read_frame(&gpu, &output);
-        let expected: Vec<[f32; 3]> = data
-            .iter()
-            .map(|px| cpu_chain([px[0], px[1], px[2]], &params))
-            .collect();
-        let (mean, max) = lsb_error(&actual, &expected);
-        if max > worst.0 {
-            worst = (max, name.clone());
-        }
-        let max_bound = KNOWN_DIVERGENCES
-            .iter()
-            .find(|(n, _)| n == name)
-            .map_or(MAX_LSB, |(_, bound)| *bound);
-        if mean >= MEAN_LSB || max > max_bound {
-            failures.push(format!("{name}: mean {mean:.3} LSB, max {max:.3} LSB"));
+        let identity_out = render(&identity_params);
+        for (name, edit) in &table {
+            if base_name == "identity" && name.starts_with("wb ") {
+                continue;
+            }
+            let label = format!("{name} [{base_name}]");
+            let mut params = LiveParams {
+                working_space_matrix: base,
+                ..Default::default()
+            };
+            edit(&mut params);
+            let actual = render(&params);
+            ran += 1;
+            // A case that changes nothing proves nothing: it must move the GPU image off the
+            // identity render (the one deliberate identity case aside).
+            if name != "identity" {
+                let moved = actual
+                    .iter()
+                    .zip(&identity_out)
+                    .flat_map(|(a, b)| (0..3).map(move |c| (a[c] - b[c]).abs() * 255.0))
+                    .fold(0.0f32, f32::max);
+                if moved < 0.25 {
+                    failures.push(format!("{label}: a silent no-op (moved {moved:.3} LSB)"));
+                }
+            }
+            let expected: Vec<[f32; 3]> = data
+                .iter()
+                .map(|px| cpu_chain([px[0], px[1], px[2]], &params))
+                .collect();
+            let (mean, max) = lsb_error(&actual, &expected);
+            if max > worst.0 {
+                worst = (max, label.clone());
+            }
+            let allowance = KNOWN_DIVERGENCES.iter().find(|(n, _)| *n == label);
+            let max_bound = allowance.map_or(MAX_LSB, |(_, bound)| *bound);
+            if mean >= MEAN_LSB || max > max_bound {
+                failures.push(format!("{label}: mean {mean:.3} LSB, max {max:.3} LSB"));
+            }
+            if allowance.is_some() && max <= MAX_LSB {
+                failures.push(format!(
+                    "{label}: now within {MAX_LSB} LSB (max {max:.3}); delete its KNOWN_DIVERGENCES entry"
+                ));
+            }
         }
     }
     eprintln!(
-        "{} cases, worst max error {:.3} LSB ({})",
-        table.len(),
-        worst.0,
-        worst.1
+        "{ran} cases, worst max error {:.3} LSB ({})",
+        worst.0, worst.1
     );
     assert!(
         failures.is_empty(),
@@ -323,7 +364,10 @@ fn the_live_suffix_matches_its_cpu_twin_for_every_edit() {
 
 /// How a stage is held against its CPU twin.
 enum Coverage {
-    /// Checked by the table in this file.
+    /// Checked by the table in this file. For `WB`/`WORKING_SPACE` that means the shader applies
+    /// the 3x3 the way `color::mat3_apply` does; the matrix itself is built by the CPU for both
+    /// sides, so the gain derivation is covered by `color::`'s own tests, not here. The same
+    /// goes for the tone-curve LUT and the exposure multiplier, which both sides share.
     Table,
     /// Checked by a named test in a named source file (the test must exist there).
     Parity {
@@ -490,10 +534,14 @@ fn every_render_stage_is_classified() {
         match cov {
             Coverage::Table => {}
             Coverage::Parity { source, test } => {
-                let needle = format!("fn {test}(");
+                // `#[test]` directly above the exact name: not a longer name sharing the prefix, not
+                // a comment or string mentioning it, and (with nothing between the two lines) not
+                // an `#[ignore]`d one.
+                let needle = format!("#[test]\n    fn {test}(");
                 assert!(
                     source_of(source).contains(&needle),
-                    "{id}: parity test `{test}` no longer exists in {source}"
+                    "{id}: parity test `{test}` is gone from {source}, renamed, or no longer a \
+                     plain #[test]"
                 );
             }
             Coverage::Exempt(reason) => assert!(!reason.is_empty(), "{id}: empty reason"),
