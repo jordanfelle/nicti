@@ -2848,6 +2848,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jixel"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09bb99406ad6b7ebac3bbdd8c3734cabbb157c31deac3d5c59c0dd2d68565214"
+
+[[package]]
 name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3942,7 +3948,9 @@ dependencies = [
  "image",
  "image-webp",
  "img-parts",
+ "jixel",
  "jpeg-encoder 0.7.1",
+ "jxl-oxide",
  "kamadak-exif",
  "little_exif",
  "nicti-calico",

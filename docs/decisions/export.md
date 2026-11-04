@@ -88,3 +88,15 @@ made while building it:
 
 - **WebP and AVIF are in the exiftool validation matrix (#360/#361)** — `tests/exiftool_validate.rs` now runs `-validate -warning -a` over a real `export_frame` of WebP (always) and AVIF (under `--features avif`) with All metadata, keywords, Artist/Copyright, EXIF, XMP and the sRGB ICC; both report `Validate: OK` (zero warnings, unlike TIFF's two known quirks). The encoders themselves landed in #429 (lossless WebP via `image-webp`, 10-bit-capable AVIF via `ravif`, opt-in cargo feature because rav1e is slow to compile, #286); the dialog already lists both. Lossy WebP landed in #639 (below); open: AVIF in the default build.
 - **Lossy WebP export (#639)** — `FormatSpec::WebpLossy { quality }` (default 80, validated 1..=100, serde kind `webp_lossy`); the unit `Webp` variant still means lossless and still deserialises. Encoded by libwebp through the `webp` crate (`default-features = false`; licence-clear, BSD-3 + `libwebp-sys` MIT, see `docs/licensing.md`). ADR-0143's rejection was for the *preview cache* (worse SSIM/latency than AVIF), not for delivery files, and the cache path is untouched. libwebp's simple encoder writes no metadata, so ICC/EXIF/XMP are added with `img-parts` (XMP chunk pushed first, `set_exif` last, so img-parts rewrites the VP8X flag byte to match); with no metadata the file stays a plain simple-format WebP. 8-bit only; the pre-resize size check is 16383 px per side for lossy (libwebp's `BAD_DIMENSION`) and 16384 for lossless. `webp-lossy` is in the exiftool validate matrix (`Validate: OK`). The dialog's WebP entry has a Lossless checkbox plus a Quality slider when lossy. Not tuned: libwebp method/sharp-YUV/preprocessing use defaults. AVIF in the default build is deliberately not changed (rav1e compile time, #286): follow-up.
+
+## JPEG XL export (#359)
+
+`FormatSpec::Jxl { quality, depth, lossless }` is encoded by `jixel` 0.5.x (`BSD-3-Clause OR Apache-2.0`,
+pure Rust, libjxl-tiny port). Every other encoder surveyed failed ADR-0018 (`jxl-encoder`/`zenjxl` AGPL,
+`jpegxl-rs` GPL) or was lossless-only (`zune-jpegxl`). jixel writes EXIF (`Exif` box) and XMP (`xml `
+box) and signals sRGB or Display P3 in the codestream, but does not embed an ICC profile, so
+`embeds().icc` is false. Adobe RGB has no enumerated JPEG XL primaries and would be mislabelled sRGB, so
+`ExportSpec::validate` refuses it (the dialog hides the option and heals a loaded preset), the same shape as
+AVIF's sRGB-only rule. Tests decode with `jxl-oxide` (lossless is bit-exact at 8-bit; lossy mean error < 3/255 at
+quality 95) and `tests/exiftool_validate.rs` covers lossy P3 and lossless 16-bit. Not measured: encode speed on
+full-size frames (libjxl-tiny is a speed-oriented port, so compression is below libjxl at the same quality).

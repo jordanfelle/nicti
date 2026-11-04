@@ -29,6 +29,10 @@ pub enum SpecError {
     WebpQuality(u8),
     #[error("AVIF export supports the sRGB color space only")]
     AvifColorSpace,
+    #[error("JPEG XL export supports the sRGB and Display P3 color spaces only")]
+    JxlColorSpace,
+    #[error("JPEG XL quality must be 1..=100, got {0}")]
+    JxlQuality(u8),
     #[error("DPI must be 1..=10000, got {0}")]
     Dpi(u32),
     #[error("resize dimension must be 1..={MAX_DIMENSION_PX} px, got {0}")]
@@ -137,6 +141,16 @@ impl ExportSpec {
                 return Err(SpecError::AvifColorSpace);
             }
         }
+        if let FormatSpec::Jxl { quality, .. } = self.format {
+            if !(1..=100).contains(&quality) {
+                return Err(SpecError::JxlQuality(quality));
+            }
+            // The encoder only labels the samples with the enumerated primaries it signals; Adobe
+            // RGB has none, so the file would be labelled sRGB and display with shifted colour.
+            if self.color_space == ExportSpace::AdobeRgb {
+                return Err(SpecError::JxlColorSpace);
+            }
+        }
         if !(1..=10_000).contains(&self.dpi) {
             return Err(SpecError::Dpi(self.dpi));
         }
@@ -192,6 +206,7 @@ pub enum ExportFormat {
     Tiff,
     Avif,
     Webp,
+    Jxl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +268,20 @@ pub enum FormatSpec {
         #[serde(default = "default_webp_quality")]
         quality: u8,
     },
+    /// JPEG XL (#359): lossy VarDCT by `quality` (the libjpeg-like 1-100 scale), or lossless
+    /// modular. sRGB and Display P3 only (see [`SpecError::JxlColorSpace`]).
+    Jxl {
+        #[serde(default = "default_jxl_quality")]
+        quality: u8,
+        #[serde(default = "default_depth")]
+        depth: BitDepth,
+        #[serde(default)]
+        lossless: bool,
+    },
+}
+
+fn default_jxl_quality() -> u8 {
+    90
 }
 
 fn default_quality() -> u8 {
@@ -288,6 +317,7 @@ impl FormatSpec {
             FormatSpec::Tiff { .. } => ExportFormat::Tiff,
             FormatSpec::Avif { .. } => ExportFormat::Avif,
             FormatSpec::Webp | FormatSpec::WebpLossy { .. } => ExportFormat::Webp,
+            FormatSpec::Jxl { .. } => ExportFormat::Jxl,
         }
     }
 
@@ -298,7 +328,8 @@ impl FormatSpec {
             }
             FormatSpec::Png { depth }
             | FormatSpec::Tiff { depth, .. }
-            | FormatSpec::Avif { depth, .. } => *depth,
+            | FormatSpec::Avif { depth, .. }
+            | FormatSpec::Jxl { depth, .. } => *depth,
         }
     }
 }
