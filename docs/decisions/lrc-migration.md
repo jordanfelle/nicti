@@ -133,3 +133,5 @@ lives outside `EditDocument`; slice 1 must decide both.
 Luminar's mapping is unverifiable black-box guesswork and mostly AI/LUT features, so it is declined until
 someone asks. Photo-sourced XMP drops crop, geometry and absolute white balance. PV2003/2010 presets are
 reported, not guessed. Fixtures must be hand-written; no third-party preset packs are committed.
+
+**Lens profile import (#382).** `LensProfileEnable` (a lens profile was applied in LRC) maps onto `LensParams.lensfun_profile` (#462): the lensfun database is the closest equivalent of Adobe's lens profiles, applied where lensfun knows the lens and a no-op otherwise. It is an approximation of Adobe's calibration, not a copy. The profile identity and scale keys, the manual distortion/vignette keys, `Upright*`/`Perspective*` and the Super Resolution/People Removal `FilterList` entries stay untranslated and kept verbatim: #692.

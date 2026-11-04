@@ -6,10 +6,15 @@
 //! channel's hue sliders only count when its *amount* is non-zero (else an untouched image would
 //! import as "edited"), and `EnableLensCorrections = false` turns the whole panel off.
 //!
-//! Ranges are LRC's (PV2012): amounts 0..20, hue sliders 0..100. Left untranslated on purpose:
-//! `LensProfileEnable`/`LensProfileSetup` and the other profile and manual-distortion keys (#382:
-//! nicti has no lens database yet; a DNG's own embedded profile is applied regardless), and
-//! `Perspective*`/`Upright*` (#427).
+//! `LensProfileEnable` (a lens profile applied in LRC) maps onto `LensParams::lensfun_profile` (#382,
+//! #462): the lensfun database is nicti's closest equivalent of Adobe's lens profiles, so the profile
+//! is applied where lensfun knows the lens (a no-op where it does not; a DNG's own embedded profile
+//! is applied regardless). It is an approximation, not Adobe's calibration.
+//!
+//! Ranges are LRC's (PV2012): amounts 0..20, hue sliders 0..100. Left untranslated on purpose: the
+//! profile identity and scale keys (`LensProfileName`/`Filename`/`Digest`, the `LensProfile*Scale`
+//! sliders) and the manual distortion/vignette keys (#382 follow-up), and `Perspective*`/`Upright*`
+//! (#427, needs LRC reference renders).
 
 use nicti_tapetum::coat::{DefringeParams, LensParams};
 use nicti_tapetum::stages::{DEFRINGE, LENS};
@@ -32,6 +37,7 @@ pub(super) fn apply(tx: &mut Tx) {
 
     // Every key is read (so each counts as consumed) before anything decides to ignore it.
     let auto_ca = tx.num("AutoLateralCA").unwrap_or(0.0);
+    let lens_profile = tx.num("LensProfileEnable").unwrap_or(0.0);
     let purple_amount = tx.num("DefringePurpleAmount").unwrap_or(0.0);
     let purple_lo = tx.num("DefringePurpleHueLo");
     let purple_hi = tx.num("DefringePurpleHueHi");
@@ -46,6 +52,7 @@ pub(super) fn apply(tx: &mut Tx) {
         LENS,
         LensParams {
             remove_ca: auto_ca != 0.0,
+            lensfun_profile: lens_profile != 0.0,
             ..LensParams::default()
         },
     );
@@ -81,6 +88,29 @@ mod tests {
         // Off is the default: no entry at all.
         let t = tr("s = { AutoLateralCA = 0 }");
         assert!(!t.document.stages.contains_key(LENS));
+    }
+
+    #[test]
+    fn an_applied_lens_profile_maps_to_the_lensfun_switch() {
+        let t = tr("s = { LensProfileEnable = 1, LensProfileSetup = \"Auto\" }");
+        assert_eq!(t.document.stages[LENS].params["lensfun_profile"], true);
+        assert!(!t.untranslated.contains(&"LensProfileEnable".to_string()));
+        // Off, absent, or the whole panel disabled: no stage.
+        for src in [
+            "s = { LensProfileEnable = 0 }",
+            "s = { AutoLateralCA = 0 }",
+            "s = { LensProfileEnable = 1, EnableLensCorrections = false }",
+        ] {
+            let t = tr(src);
+            assert!(!t.document.stages.contains_key(LENS), "{src}");
+        }
+        // It composes with the CA switch.
+        let t = tr("s = { LensProfileEnable = 1, AutoLateralCA = 1 }");
+        let p = &t.document.stages[LENS].params;
+        assert_eq!(
+            (p["lensfun_profile"].clone(), p["remove_ca"].clone()),
+            (true.into(), true.into())
+        );
     }
 
     #[test]
