@@ -1367,6 +1367,12 @@ impl eframe::App for PeltApp {
 
     /// Feeds the control channel's queued clicks and keys to egui as real input events (#649).
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Run waiting commands first: one that opens the delete or Export dialog must be seen by
+        // the gate below, not land after this frame's input was already delivered.
+        self.drain_commands(ctx);
+        // The dialog state as it is *now*, after the last pass finished: a click released late in
+        // that pass may have opened the delete confirmation after `ui` set the flag at its top.
+        crate::widgets::set_destructive_ui_open(ctx, self.destructive_ui_open());
         crate::widgets::deliver(ctx, raw_input);
     }
 

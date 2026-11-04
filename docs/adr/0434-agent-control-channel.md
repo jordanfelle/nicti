@@ -348,3 +348,10 @@ still race the check (a link planted between check and write).
   allowed (it only opens a dialog), after which the channel can do nothing in it without the flag;
   `export.run` remains the headless route.
 - **Not built:** screenshot (3a) and the MCP shim (3b) are separate PRs of this ticket.
+
+### Slice 2b review hardening (#649)
+
+- The hook drains waiting commands before it reads the live dialog state, so a command that opens the delete or Export dialog is seen by the gate before that frame's input is delivered.
+- At most one step is carried while no `ui` pass has run (hidden or minimised window), so the scrub always covers everything carried.
+- `scrub_injected` removes key events only; egui builds pointer state before `ui`, so the gate relies on delivery-time refusal for the mouse. A press cannot confirm a dialog on its own (the release is a separate step and is discarded).
+- Out of scope, stated plainly: Tab then Enter/Space can activate any focusable button, and only the delete and Export dialogs are gated. Other confirm-style buttons (purge previews, clear positions, repair thumbnails/models, "Use file") are reachable by keys with `--control` on. The channel is loopback + token only.

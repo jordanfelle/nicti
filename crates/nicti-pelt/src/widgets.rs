@@ -56,6 +56,9 @@ struct State {
     /// The events [`deliver`] put into this frame's input, so [`scrub_injected`] can take exactly
     /// those back out (and never a person's).
     injected_now: Vec<Event>,
+    /// A step was delivered and no `ui` pass has run since: a window that is hidden runs the hook
+    /// and `logic` but not `ui`, and further steps would pile up unscrubbed in eframe's carried input.
+    awaiting_ui: bool,
 }
 
 /// The channel's handle on the registry and the input queue. Cheap to clone.
@@ -77,6 +80,7 @@ pub fn install(ctx: &egui::Context, allow_destructive: bool) -> Widgets {
         frame: 0,
         last_frame_at: None,
         last_injected_frame: 0,
+        awaiting_ui: false,
         destructive_ui_open: false,
         discarded: 0,
         injected_now: Vec::new(),
@@ -153,7 +157,9 @@ pub fn set_destructive_ui_open(ctx: &egui::Context, open: bool) {
 pub fn deliver(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
     let Some(w) = handle(ctx) else { return };
     let mut st = w.lock();
-    st.injected_now.clear();
+    if !st.awaiting_ui {
+        st.injected_now.clear();
+    }
     if st.steps.is_empty() {
         return;
     }
@@ -164,7 +170,11 @@ pub fn deliver(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         st.steps.clear();
         return;
     }
+    if st.awaiting_ui {
+        return;
+    }
     if let Some(events) = st.steps.pop_front() {
+        st.awaiting_ui = true;
         st.injected_now = events.clone();
         raw_input.events.extend(events);
         st.last_injected_frame = st.frame;
@@ -179,6 +189,7 @@ pub fn deliver(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
 pub fn scrub_injected(ctx: &egui::Context, open_now: bool) {
     let Some(w) = handle(ctx) else { return };
     let mut st = w.lock();
+    st.awaiting_ui = false;
     if !open_now || st.allow_destructive || st.injected_now.is_empty() {
         return;
     }
@@ -628,6 +639,28 @@ mod tests {
             .unwrap();
         rig.frames(4);
         assert_eq!(rig.delete_clicks, 1);
+    }
+
+    #[test]
+    fn a_window_that_runs_no_ui_pass_receives_one_step_at_most() {
+        let mut rig = Rig::new(false);
+        rig.frames(2);
+        rig.w.key(Key::Tab, Modifiers::NONE).unwrap();
+        rig.w.key(Key::Enter, Modifiers::NONE).unwrap();
+        let before = rig.w.pending();
+        // Hook-only passes (hidden window: no `ui`, so no scrub could ever run).
+        let mut total = 0;
+        for _ in 0..6 {
+            let mut raw = egui::RawInput::default();
+            deliver(&rig.ctx, &mut raw);
+            total += raw.events.len();
+        }
+        let first_step = before - rig.w.pending();
+        assert_eq!(
+            first_step, 1,
+            "only one step may be carried without a ui pass"
+        );
+        assert!(total > 0);
     }
 
     #[test]
