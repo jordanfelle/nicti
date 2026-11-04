@@ -307,6 +307,7 @@ fn warp_from(block: &LensBlock) -> Option<Warp> {
         return None;
     }
     Some(Warp {
+        odd: Vec::new(),
         planes: vec![[k0, k1, k2, k3, 0.0, 0.0]],
         center: [0.5, 0.5],
     })

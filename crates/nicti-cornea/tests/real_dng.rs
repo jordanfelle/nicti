@@ -19,6 +19,7 @@ use nicti_iris::{LensModel, Vignette, Warp};
 fn known_profile() -> LensModel {
     LensModel {
         warp: Some(Warp {
+            odd: Vec::new(),
             planes: vec![
                 [1.0010, 0.012, -0.004, 0.0, 0.0003, -0.0002],
                 [1.0, 0.010, -0.004, 0.0, 0.0003, -0.0002],

@@ -114,6 +114,17 @@ confidence-threshold = 0.9
 allow = ["LGPL-2.1"]
 name = "rawler"
 
+# Exception (#462): `lensfun` (crates.io name of lensfun-rs, the pure-Rust lensfun port) declares the
+# single licence "LGPL-3.0-or-later" -- not the dual "... OR GPL-3.0" an earlier survey recorded, which
+# passed through the GPL-3.0 arm. The or-later grant is exactly what Nicti's own AGPL-3.0-or-later
+# needs (docs/licensing.md's 2026-11-04 #462 update has the check and the shipping checklist: LGPL text
+# + notice, CC BY-SA 3.0 attribution for its bundled, unmodified database). Per-crate for the same
+# reason as `rawler` above: cargo-deny cannot verify the packaging obligations a blanket LGPL entry
+# would wave through. Matches by crate name across the whole graph.
+[[licenses.exceptions]]
+allow = ["LGPL-3.0-or-later"]
+name = "lensfun"
+
 # CDLA-Permissive-2.0: `webpki-root-certs` (a root-CA-bundle *data* crate, not code), reachable
 # only via `ureq`'s own `native-tls-webpki-roots` feature -- which `cargo deny check
 # --workspace --all-features` (ci.yml's own job) turns on for every optional feature of every

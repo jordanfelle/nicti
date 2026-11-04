@@ -4,8 +4,9 @@ version = "0.0.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "Lens-correction extension point (ADR-0019 §8) plus, since #428, the lens data model, the DNG-embedded OpcodeList3 provider and the automatic lateral-CA estimator. A lensfun/NEF-backed provider is #410."
+description = "Lens-correction extension point (ADR-0019 §8) plus, since #428, the lens data model, the DNG-embedded OpcodeList3 provider and the automatic lateral-CA estimator. The NEF-backed provider is #410 and the lensfun fallback #462."
 
 [dependencies]
+lensfun = "0.7"
 nicti-claw = { path = "../nicti-claw" }
 serde_json = "1"

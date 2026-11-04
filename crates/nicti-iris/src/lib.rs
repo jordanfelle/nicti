@@ -5,14 +5,15 @@
 //! [`LensCorrection::model`], returning a [`LensModel`]: plain data (per-plane warp, radial
 //! vignette, optical centre) that a GPU kernel can upload without knowing where it came from.
 //! The first provider is [`dng::DngEmbedded`] (OpcodeList3 from a DNG). [`nikon::NikonEmbedded`] (#410) reads
-//! Nikon's own coefficients out of a Z-series NEF; a lensfun-backed provider plugs in behind the
-//! same trait.
+//! Nikon's own coefficients out of a Z-series NEF; [`lensfun::LensfunProvider`] (#462) is the
+//! fallback for lenses Nikon's blob does not cover (adapted F-mount, third party).
 //!
 //! [`lateral_ca`] holds the automatic lateral-chromatic-aberration estimator, the no-profile
 //! fallback.
 
 pub mod dng;
 pub mod lateral_ca;
+pub mod lensfun;
 pub mod nikon;
 
 use nicti_claw::{Module, Registry};
@@ -24,6 +25,10 @@ pub struct Warp {
     /// One entry per plane (1..=4). A single entry applies to every channel; otherwise plane 0/1/2
     /// are R/G/B.
     pub planes: Vec<[f64; 6]>,
+    /// Odd radial terms per plane, `[c1, c3]`: `f` gains `c1 r + c3 r³` (`r` normalised to the
+    /// farthest corner). DNG has none, so its profiles leave this empty; lensfun's `ptlens`
+    /// distortion has them (#462). Empty = none; a shorter list than `planes` reuses plane 0's.
+    pub odd: Vec<[f64; 2]>,
     pub center: [f64; 2],
 }
 
@@ -48,6 +53,15 @@ impl Warp {
         self.planes.get(ch).unwrap_or(&self.planes[0])
     }
 
+    /// The odd radial terms `[c1, c3]` for colour channel `ch` (zeros when the profile has none).
+    pub fn odd_plane(&self, ch: usize) -> [f64; 2] {
+        self.odd
+            .get(ch)
+            .or_else(|| self.odd.first())
+            .copied()
+            .unwrap_or([0.0; 2])
+    }
+
     /// True when the planes differ in a way that matters, i.e. the profile already corrects lateral
     /// CA. Compared with a tolerance: a profile whose planes differ by float noise (1e-12) has no
     /// per-channel correction, and treating it as having one would disable auto-CA for nothing.
@@ -57,6 +71,9 @@ impl Warp {
             p.iter()
                 .zip(&self.planes[0])
                 .any(|(a, b)| (a - b).abs() > TOLERANCE)
+        }) || (1..self.odd.len().max(self.planes.len())).any(|ch| {
+            let (a, b) = (self.odd_plane(ch), self.odd_plane(0));
+            (a[0] - b[0]).abs() > TOLERANCE || (a[1] - b[1]).abs() > TOLERANCE
         })
     }
 
@@ -67,7 +84,8 @@ impl Warp {
         let [kr0, kr1, kr2, kr3, kt0, kt1] = *self.plane(ch);
         let (x, y) = (dx / m, dy / m);
         let r2 = x * x + y * y;
-        let f = kr0 + r2 * (kr1 + r2 * (kr2 + r2 * kr3));
+        let [c1, c3] = self.odd_plane(ch);
+        let f = kr0 + r2 * (kr1 + r2 * (kr2 + r2 * kr3)) + r2.sqrt() * (c1 + r2 * c3);
         let sx = f * x + 2.0 * kt0 * x * y + kt1 * (r2 + 2.0 * x * x);
         let sy = f * y + kt0 * (r2 + 2.0 * y * y) + 2.0 * kt1 * x * y;
         (sx * m, sy * m)
@@ -99,6 +117,18 @@ pub struct LensSource<'a> {
     pub dng_opcode_list3: Option<&'a [u8]>,
     /// The raw Nikon 0xC7D5 lens-correction blob (#410), when the file is a Z-series NEF that has one.
     pub nikon_lens_info: Option<&'a [u8]>,
+    /// The lens model string from EXIF (`LensModel`), for the lensfun fallback (#462). Empty when
+    /// the file names none.
+    pub lens_model: &'a str,
+    /// Focal length in millimetres (EXIF `FocalLength`, the real focal length, not the 35 mm
+    /// equivalent), aperture (`FNumber`) and focus distance in metres (`SubjectDistance`), the
+    /// interpolation axes of a lensfun calibration. `None` when the file does not say.
+    pub focal_length_mm: Option<f32>,
+    pub aperture: Option<f32>,
+    pub focus_distance_m: Option<f32>,
+    /// The frame's pixel size: lensfun's normalisation depends on it. Zero when unknown.
+    pub image_width: u32,
+    pub image_height: u32,
 }
 
 /// A lens-correction data provider.
@@ -166,6 +196,7 @@ mod tests {
     #[test]
     fn identity_warp_maps_every_point_to_itself() {
         let w = Warp {
+            odd: Vec::new(),
             planes: vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
             center: [0.5, 0.5],
         };
@@ -178,6 +209,7 @@ mod tests {
     #[test]
     fn radial_term_scales_with_radius_and_tangential_is_zero_on_axis() {
         let w = Warp {
+            odd: Vec::new(),
             planes: vec![[1.0, 0.1, 0.0, 0.0, 0.0, 0.0]],
             center: [0.5, 0.5],
         };
@@ -191,6 +223,7 @@ mod tests {
     #[test]
     fn per_plane_warp_reports_lateral_ca_only_when_planes_differ() {
         let same = Warp {
+            odd: Vec::new(),
             planes: vec![[1.0; 6]; 3],
             center: [0.5; 2],
         };
@@ -200,6 +233,7 @@ mod tests {
         assert!(diff.corrects_lateral_ca());
         // A single-plane warp serves all channels.
         let one = Warp {
+            odd: Vec::new(),
             planes: vec![[2.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
             center: [0.5; 2],
         };
@@ -210,6 +244,7 @@ mod tests {
     #[test]
     fn planes_that_differ_only_by_float_noise_do_not_count_as_ca_correction() {
         let mut w = Warp {
+            odd: Vec::new(),
             planes: vec![[1.0, 0.01, 0.0, 0.0, 0.0, 0.0]; 3],
             center: [0.5; 2],
         };
@@ -227,6 +262,7 @@ mod tests {
     #[test]
     fn the_warp_matches_a_hand_computed_specification_vector() {
         let w = Warp {
+            odd: Vec::new(),
             planes: vec![[1.0, 0.1, 0.0, 0.0, 0.01, 0.02]],
             center: [0.5; 2],
         };

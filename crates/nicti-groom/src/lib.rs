@@ -191,6 +191,7 @@ mod tests {
             pixels: (0..3 * 2 * 3).map(|i| 100 + i * 50).collect(),
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            lens_exif: Default::default(),
             orientation: 0,
         };
         let expected = normalize_pixels(&frame);
@@ -222,6 +223,7 @@ mod tests {
             pixels: vec![1100, 1100, 1100, 500, 400, 300, 900, 300, 300],
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            lens_exif: Default::default(),
             orientation: 0,
         };
         let expected = normalize_pixels(&frame);
@@ -255,6 +257,7 @@ mod tests {
                 .collect(),
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            lens_exif: Default::default(),
             orientation: 0,
         }
     }

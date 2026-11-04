@@ -109,10 +109,65 @@ pub struct LinearFrame {
     /// NEF that carries one, `None` otherwise. Located by `embedded::Walker::find_nikon_lens_info`,
     /// decoded by `nicti_iris::nikon`, applied by the Tapetum lens stage when the user opts in (#410).
     pub nikon_lens_info: Option<Vec<u8>>,
+    /// The lens as the file's EXIF names it (#462), for lens-database lookups: the fallback for
+    /// lenses `nikon_lens_info` does not cover. All fields are empty/`None` when the file records
+    /// none (older Nikon bodies keep the lens only in the MakerNote, which is not read).
+    pub lens_exif: LensExif,
     /// The container's IFD0 Orientation as the EXIF value 1-8 (#341); `0` when the file has none
     /// or it is out of range. The pixels above are **not** rotated by it: crop, heal and mask
     /// coordinates stay in sensor orientation, and the on-screen view turns the image instead.
     pub orientation: u8,
+}
+
+/// The EXIF lens fields a lens-database lookup needs (#462). Default is "unknown".
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LensExif {
+    /// EXIF `LensModel`, trimmed; empty when absent.
+    pub lens_model: String,
+    /// EXIF `FocalLength` in millimetres (the real focal length, not the 35 mm equivalent).
+    pub focal_length_mm: Option<f32>,
+    /// EXIF `FNumber`.
+    pub aperture: Option<f32>,
+    /// EXIF `SubjectDistance` in metres; `None` when absent or not a finite positive distance.
+    pub focus_distance_m: Option<f32>,
+}
+
+/// Reads [`LensExif`] from a TIFF-based container (NEF, DNG). Anything unreadable is the default:
+/// a missing lens is a normal outcome, never a decode failure.
+pub fn read_lens_exif(data: &[u8]) -> LensExif {
+    use exif::{In, Reader, Tag, Value};
+
+    let Ok(exif) = Reader::new().read_from_container(&mut std::io::Cursor::new(data)) else {
+        return LensExif::default();
+    };
+    let rational = |tag: Tag| -> Option<f32> {
+        match &exif.get_field(tag, In::PRIMARY)?.value {
+            Value::Rational(v) => v.first().filter(|r| r.denom != 0).map(|r| r.to_f32()),
+            _ => None,
+        }
+        .filter(|v| v.is_finite() && *v > 0.0)
+    };
+    let lens_model = match exif
+        .get_field(Tag::LensModel, In::PRIMARY)
+        .map(|f| &f.value)
+    {
+        Some(Value::Ascii(v)) => v
+            .first()
+            .map(|b| {
+                String::from_utf8_lossy(b)
+                    .trim_matches(['\0', ' '])
+                    .to_string()
+            })
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    LensExif {
+        lens_model,
+        focal_length_mm: rational(Tag::FocalLength),
+        aperture: rational(Tag::FNumber),
+        // 0 and 0xFFFFFFFF/1 (infinity) are both "not a usable distance".
+        focus_distance_m: rational(Tag::SubjectDistance).filter(|d| *d < 1.0e6),
+    }
 }
 
 /// The production `RawDecoder`: LibRaw (vendored `yogthos/LibRaw#nikon-he-decoder`, see
@@ -179,6 +234,7 @@ impl RawDecoder for LibRawDecoder {
         let nikon_lens_info = embedded::Walker::new(embedded::SliceSource::new(&data))
             .ok()
             .and_then(|mut w| w.find_nikon_lens_info().ok().flatten());
+        let lens_exif = read_lens_exif(&data);
         let orientation = container_orientation(&data);
         let image = handle
             .linear_image()
@@ -218,6 +274,7 @@ impl RawDecoder for LibRawDecoder {
             pixels,
             dng_opcode_list3,
             nikon_lens_info,
+            lens_exif,
             orientation,
         })
     }
@@ -280,6 +337,64 @@ mod tests {
 
     fn make_dummy() -> Arc<dyn RawDecoder> {
         Arc::new(Dummy)
+    }
+
+    /// A little-endian TIFF carrying the four lens fields, built with kamadak-exif's own writer
+    /// (the repo has no NEF fixture), then read back through [`read_lens_exif`].
+    fn tiff_with(fields: Vec<exif::Field>) -> Vec<u8> {
+        let mut writer = exif::experimental::Writer::new();
+        for f in &fields {
+            writer.push_field(f);
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        writer.write(&mut out, true).unwrap();
+        out.into_inner()
+    }
+
+    fn field(tag: exif::Tag, value: exif::Value) -> exif::Field {
+        exif::Field {
+            tag,
+            ifd_num: exif::In::PRIMARY,
+            value,
+        }
+    }
+
+    fn rat(n: u32, d: u32) -> exif::Value {
+        exif::Value::Rational(vec![exif::Rational { num: n, denom: d }])
+    }
+
+    #[test]
+    fn lens_exif_reads_model_focal_aperture_and_distance() {
+        let data = tiff_with(vec![
+            field(
+                exif::Tag::LensModel,
+                exif::Value::Ascii(vec![b"NIKKOR Z 24-70mm f/2.8 S ".to_vec()]),
+            ),
+            field(exif::Tag::FocalLength, rat(240, 10)),
+            field(exif::Tag::FNumber, rat(28, 10)),
+            field(exif::Tag::SubjectDistance, rat(35, 10)),
+        ]);
+        assert_eq!(
+            read_lens_exif(&data),
+            LensExif {
+                lens_model: "NIKKOR Z 24-70mm f/2.8 S".into(),
+                focal_length_mm: Some(24.0),
+                aperture: Some(2.8),
+                focus_distance_m: Some(3.5),
+            }
+        );
+    }
+
+    #[test]
+    fn lens_exif_drops_unusable_values_and_garbage() {
+        let data = tiff_with(vec![
+            field(exif::Tag::FocalLength, rat(50, 0)),
+            field(exif::Tag::FNumber, rat(0, 10)),
+            field(exif::Tag::SubjectDistance, rat(u32::MAX, 1)),
+        ]);
+        assert_eq!(read_lens_exif(&data), LensExif::default());
+        assert_eq!(read_lens_exif(b"not a tiff"), LensExif::default());
+        assert_eq!(read_lens_exif(&[]), LensExif::default());
     }
 
     #[test]

@@ -581,6 +581,12 @@ pub fn show(
                 "Use Nikon lens profile (unverified)",
             );
         }
+        if develop.has_lensfun_lens_profile() {
+            ui.checkbox(
+                &mut lens.lensfun_profile,
+                "Use lensfun database profile (community-calibrated)",
+            );
+        }
         develop.set_stage_params(LENS, &lens);
         fur::divider(ui);
         ui.label("Defringe");

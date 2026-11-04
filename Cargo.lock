@@ -3230,6 +3230,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
+name = "lensfun"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe52f943cdba39214e90c8ff14c10cebc0f597dcbbbcdab15a68902fc8392bd8"
+dependencies = [
+ "flate2",
+ "regex",
+ "roxmltree 0.20.0",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3810,6 +3822,7 @@ dependencies = [
  "clap",
  "image",
  "jpeg-encoder 0.7.1",
+ "kamadak-exif",
  "moxcms 0.9.1",
  "nicti-calico",
  "nicti-claw",
@@ -3851,6 +3864,7 @@ dependencies = [
 name = "nicti-iris"
 version = "0.0.0"
 dependencies = [
+ "lensfun",
  "nicti-claw",
  "serde_json",
 ]

@@ -29,7 +29,7 @@ struct Uniforms {
     vig_c: vec4<f32>,
     // Red and blue lateral-CA scales (xy), CA centre in pixels (zw).
     ca: vec4<f32>,
-    // Per colour plane p (0 = R, 1 = G, 2 = B): [2p] = kr0..kr3, [2p + 1] = (kt0, kt1, 0, 0).
+    // Per colour plane p (0 = R, 1 = G, 2 = B): [2p] = kr0..kr3, [2p + 1] = (kt0, kt1, c1, c3), the odd radial terms c1 r + c3 r³.
     warp: array<vec4<f32>, 6>,
     // Vignette k0..k3, then (k4, 0, 0, 0).
     vig_k: array<vec4<f32>, 2>,
@@ -68,7 +68,7 @@ fn warp_source(ch: u32, p: vec2<f32>) -> vec2<f32> {
     let k = u.warp[2u * ch];
     let t = u.warp[2u * ch + 1u];
     let r2 = dot(d, d);
-    let f = k.x + r2 * (k.y + r2 * (k.z + r2 * k.w));
+    let f = k.x + r2 * (k.y + r2 * (k.z + r2 * k.w)) + sqrt(r2) * (t.z + r2 * t.w);
     let sx = f * d.x + 2.0 * t.x * d.x * d.y + t.y * (r2 + 2.0 * d.x * d.x);
     let sy = f * d.y + t.x * (r2 + 2.0 * d.y * d.y) + 2.0 * t.y * d.x * d.y;
     return c + vec2<f32>(sx, sy) * m;

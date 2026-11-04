@@ -34,6 +34,7 @@ use nicti_claw::Module;
 use nicti_cornea::LinearFrame;
 use nicti_iris::dng::DngEmbedded;
 use nicti_iris::lateral_ca::{self, RgbU16};
+use nicti_iris::lensfun::LensfunProvider;
 use nicti_iris::nikon::NikonEmbedded;
 use nicti_iris::{LensCorrection, LensModel, LensSource};
 
@@ -160,6 +161,9 @@ impl RenderStage for LensStage {
 pub struct WarpPlan {
     /// `[kr0, kr1, kr2, kr3, kt0, kt1]` for R, G, B (a one-plane profile fills all three).
     pub planes: [[f32; 6]; 3],
+    /// Odd radial terms `[c1, c3]` per plane (`f += c1 r + c3 r³`, lensfun `ptlens`, #462); zero
+    /// for DNG and Nikon profiles.
+    pub odd: [[f32; 2]; 3],
     pub center: [f32; 2],
     /// Centre-to-farthest-corner distance in pixels.
     pub radius: f32,
@@ -207,8 +211,10 @@ impl LensPlan {
         let warp = model.and_then(|m| m.warp.as_ref()).map(|warp| {
             let c = px(warp.center);
             let planes = std::array::from_fn(|ch| warp.plane(ch).map(|v| v as f32));
+            let odd = std::array::from_fn(|ch| warp.odd_plane(ch).map(|v| v as f32));
             WarpPlan {
                 planes,
+                odd,
                 center: [c[0] as f32, c[1] as f32],
                 radius: nicti_iris::farthest_corner(w, h, c[0], c[1]) as f32,
             }
@@ -292,7 +298,8 @@ impl LensPlan {
             );
             let [k0, k1, k2, k3, t0, t1] = w.planes[ch];
             let r2 = dx * dx + dy * dy;
-            let f = k0 + r2 * (k1 + r2 * (k2 + r2 * k3));
+            let [c1, c3] = w.odd[ch];
+            let f = k0 + r2 * (k1 + r2 * (k2 + r2 * k3)) + r2.sqrt() * (c1 + r2 * c3);
             let sx = f * dx + 2.0 * t0 * dx * dy + t1 * (r2 + 2.0 * dx * dx);
             let sy = f * dy + t0 * (r2 + 2.0 * dy * dy) + 2.0 * t1 * dx * dy;
             [w.center[0] + sx * w.radius, w.center[1] + sy * w.radius]
@@ -336,7 +343,7 @@ impl LensPlan {
             u.warp_c = [w.center[0], w.center[1], w.radius, 0.0];
             for (ch, p) in w.planes.iter().enumerate() {
                 u.warp[2 * ch] = [p[0], p[1], p[2], p[3]];
-                u.warp[2 * ch + 1] = [p[4], p[5], 0.0, 0.0];
+                u.warp[2 * ch + 1] = [p[4], p[5], w.odd[ch][0], w.odd[ch][1]];
             }
         }
         if let Some(v) = &self.vignette {
@@ -435,12 +442,18 @@ fn lens_source(frame: &LinearFrame) -> LensSource<'_> {
         model: &frame.model,
         dng_opcode_list3: frame.dng_opcode_list3.as_deref(),
         nikon_lens_info: frame.nikon_lens_info.as_deref(),
+        lens_model: &frame.lens_exif.lens_model,
+        focal_length_mm: frame.lens_exif.focal_length_mm,
+        aperture: frame.lens_exif.aperture,
+        focus_distance_m: frame.lens_exif.focus_distance_m,
+        image_width: frame.width,
+        image_height: frame.height,
     }
 }
 
-/// The file's own lens model under `params`: the DNG `OpcodeList3` when `embedded_profile` is on
-/// (unchanged, default), else Nikon's 0xC7D5 data when `nikon_profile` is opted into (#410). The
-/// providers never both apply -- a file is a DNG or a NEF.
+/// The lens model under `params`: the DNG `OpcodeList3` when `embedded_profile` is on
+/// (unchanged, default), else Nikon's 0xC7D5 data when `nikon_profile` is opted into (#410), else the lensfun
+/// database's fit for the EXIF lens (#462) when opted into. The file's own data always wins.
 pub fn embedded_lens_model(params: &LensParams, frame: &LinearFrame) -> Option<LensModel> {
     let source = lens_source(frame);
     params
@@ -451,6 +464,12 @@ pub fn embedded_lens_model(params: &LensParams, frame: &LinearFrame) -> Option<L
             params
                 .nikon_profile
                 .then(|| NikonEmbedded.model(&source))
+                .flatten()
+        })
+        .or_else(|| {
+            params
+                .lensfun_profile
+                .then(|| LensfunProvider.model(&source))
                 .flatten()
         })
 }
@@ -464,6 +483,11 @@ pub fn has_embedded_profile(frame: &LinearFrame) -> bool {
 /// Whether `frame` carries usable Nikon correction data (a Z-series NEF), for the opt-in switch.
 pub fn has_nikon_profile(frame: &LinearFrame) -> bool {
     NikonEmbedded.model(&lens_source(frame)).is_some()
+}
+
+/// Whether the lensfun database knows `frame`'s body and lens (#462), for the opt-in switch.
+pub fn has_lensfun_profile(frame: &LinearFrame) -> bool {
+    nicti_iris::lensfun::has_profile(&lens_source(frame))
 }
 
 /// One render's lens pass: the persistent kernel, the document's params and the source frame.
@@ -549,6 +573,7 @@ mod tests {
     fn full_model() -> LensModel {
         LensModel {
             warp: Some(Warp {
+                odd: Vec::new(),
                 planes: vec![
                     [1.0010, 0.012, -0.004, 0.0, 0.0003, -0.0002],
                     [1.0, 0.010, -0.004, 0.0, 0.0003, -0.0002],
@@ -583,6 +608,88 @@ mod tests {
         assert!(LensPlan::new(None, [f64::NAN, f64::INFINITY], None, e).is_identity());
     }
 
+    /// The odd radial terms (lensfun `ptlens`, #462) reach the plan and its CPU twin, and the CPU
+    /// twin agrees with `Warp::source_offset`; a model without them is unchanged.
+    #[test]
+    fn odd_radial_terms_reach_the_plan_and_match_the_iris_math() {
+        let e = ext(600, 400);
+        let mut model = full_model();
+        let warp = model.warp.as_mut().unwrap();
+        warp.odd = vec![[0.03, -0.02], [0.03, -0.02], [0.031, -0.021]];
+        let plan = LensPlan::new(Some(&model), [0.0; 2], None, e);
+        let w = plan.warp.unwrap();
+        assert_eq!(w.odd[0], [0.03, -0.02]);
+        let warp = model.warp.as_ref().unwrap();
+        let (cx, cy) = (0.52 * 600.0, 0.48 * 400.0);
+        let m = nicti_iris::farthest_corner(600.0, 400.0, cx, cy);
+        let (dx, dy) = (200.0f32 / w.radius, 150.0f32 / w.radius);
+        let [k0, k1, k2, k3, t0, t1] = w.planes[2];
+        let [c1, c3] = w.odd[2];
+        let r2 = dx * dx + dy * dy;
+        let f = k0 + r2 * (k1 + r2 * (k2 + r2 * k3)) + r2.sqrt() * (c1 + r2 * c3);
+        let sx = (f * dx + 2.0 * t0 * dx * dy + t1 * (r2 + 2.0 * dx * dx)) * w.radius;
+        let reference = warp.source_offset(2, 200.0, 150.0, m);
+        assert!(
+            (f64::from(sx) - reference.0).abs() < 1e-2,
+            "{sx} {}",
+            reference.0
+        );
+        // Without odd terms the plan carries zeros (DNG/Nikon profiles are untouched).
+        let plain = LensPlan::new(Some(&full_model()), [0.0; 2], None, e)
+            .warp
+            .unwrap();
+        assert_eq!(plain.odd, [[0.0; 2]; 3]);
+    }
+
+    fn lens_frame(lens_model: &str) -> nicti_cornea::LinearFrame {
+        nicti_cornea::LinearFrame {
+            make: "Nikon".into(),
+            model: "Z 8".into(),
+            width: 8256,
+            height: 5504,
+            black: 0,
+            maximum: 65535,
+            cam_mul: [1.0; 4],
+            pre_mul: [1.0; 4],
+            cam_xyz: [0.0; 12],
+            cblack: [0; 4],
+            pixels: Vec::new(),
+            dng_opcode_list3: None,
+            nikon_lens_info: None,
+            lens_exif: nicti_cornea::LensExif {
+                lens_model: lens_model.into(),
+                focal_length_mm: Some(24.0),
+                aperture: Some(4.0),
+                focus_distance_m: None,
+            },
+            orientation: 0,
+        }
+    }
+
+    /// The lensfun fallback is opt-in and needs the EXIF lens to be known to the database.
+    #[test]
+    fn the_lensfun_fallback_is_opt_in_and_needs_a_known_lens() {
+        let known = lens_frame("NIKKOR Z 24-70mm f/2.8 S");
+        let off = LensParams::default();
+        let on = LensParams {
+            lensfun_profile: true,
+            ..LensParams::default()
+        };
+        assert!(embedded_lens_model(&off, &known).is_none());
+        assert!(embedded_lens_model(&on, &known).is_some());
+        assert!(has_lensfun_profile(&known));
+        let unknown = lens_frame("Nonexistent 9000mm f/0.1");
+        assert!(embedded_lens_model(&on, &unknown).is_none());
+        assert!(!has_lensfun_profile(&unknown));
+        assert!(embedded_lens_model(&on, &lens_frame("")).is_none());
+        assert!(!on.is_noop());
+        assert!(LensParams {
+            embedded_profile: false,
+            ..LensParams::default()
+        }
+        .is_noop());
+    }
+
     #[test]
     fn plan_geometry_matches_the_iris_f64_math() {
         let e = ext(600, 400);
@@ -614,6 +721,7 @@ mod tests {
         // A one-plane profile serves every channel.
         let one = LensModel {
             warp: Some(Warp {
+                odd: Vec::new(),
                 planes: vec![[1.0, 0.1, 0.0, 0.0, 0.0, 0.0]],
                 center: [0.5, 0.5],
             }),
@@ -629,6 +737,7 @@ mod tests {
         let img = textured(e);
         let model = LensModel {
             warp: Some(Warp {
+                odd: Vec::new(),
                 planes: vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
                 center: [0.5, 0.5],
             }),
@@ -771,6 +880,19 @@ mod tests {
                 None,
                 e,
             ),
+            // Odd radial terms (lensfun ptlens, #462), per-channel, with the vignette.
+            LensPlan::new(
+                Some(&LensModel {
+                    warp: model.warp.clone().map(|w| Warp {
+                        odd: vec![[0.03, -0.02], [0.03, -0.02], [0.032, -0.019]],
+                        ..w
+                    }),
+                    vignette: model.vignette.clone(),
+                }),
+                [0.0; 2],
+                None,
+                e,
+            ),
         ];
         let kernel = LensKernel::new(&gpu);
         for (i, plan) in cases.iter().enumerate() {
@@ -826,6 +948,7 @@ mod tests {
             pixels: vec![0; (e.width * e.height * 3) as usize],
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            lens_exif: Default::default(),
             orientation: 0,
         };
         let kernel = LensKernel::new(&gpu);
@@ -862,6 +985,7 @@ mod tests {
             pixels: (0..w * h * 3).map(|i| (i * 7919 % 60001) as u16).collect(),
             dng_opcode_list3: None,
             nikon_lens_info: None,
+            lens_exif: Default::default(),
             orientation: 0,
         };
         let params = LensParams {
@@ -905,6 +1029,7 @@ mod tests {
             pixels: vec![0; (e.width * e.height * 3) as usize],
             dng_opcode_list3: None,
             nikon_lens_info: Some(blob),
+            lens_exif: Default::default(),
             orientation: 0,
         };
         assert!(has_nikon_profile(&frame) && !has_embedded_profile(&frame));
@@ -951,6 +1076,7 @@ mod tests {
             pixels: vec![0; (e.width * e.height * 3) as usize],
             dng_opcode_list3: Some(blob),
             nikon_lens_info: None,
+            lens_exif: Default::default(),
             orientation: 0,
         };
         let on = LensPlan::resolve(&LensParams::default(), &frame, e);

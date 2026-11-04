@@ -78,6 +78,7 @@ fn parse_warp(params: &[u8]) -> Option<Warp> {
         return None;
     }
     Some(Warp {
+        odd: Vec::new(),
         planes: out,
         center,
     })
@@ -204,6 +205,7 @@ mod tests {
     fn sample() -> LensModel {
         LensModel {
             warp: Some(Warp {
+                odd: Vec::new(),
                 planes: vec![
                     [1.0, 0.01, -0.002, 0.0, 0.0001, -0.0002],
                     [1.001, 0.011, -0.002, 0.0, 0.0001, -0.0002],
