@@ -1218,6 +1218,11 @@ mod tests {
         allow_destructive: true,
     };
 
+    /// An absolute folder path on any platform (`/tmp/x` is not absolute on Windows).
+    fn abs_path(name: &str) -> String {
+        std::env::temp_dir().join(name).display().to_string()
+    }
+
     fn export_host() -> Mock {
         Mock {
             export_dir: Some("/srv/exports".into()),
@@ -1245,9 +1250,9 @@ mod tests {
 
         // A caller-named folder, or overwrite, needs --control-allow-destructive.
         for params in [
-            json!({"destination": "/tmp/anywhere"}),
+            json!({"destination": abs_path("anywhere")}),
             json!({"overwrite": true}),
-            json!({"destination": "/tmp/x", "overwrite": true}),
+            json!({"destination": abs_path("x"), "overwrite": true}),
         ] {
             let mut m = export_host();
             let e = dispatch(&mut m, OPEN, "export.run", &params).unwrap_err();
@@ -1275,7 +1280,7 @@ mod tests {
             &mut m,
             ALLOW,
             "export.run",
-            &json!({"destination": "/mnt/out"}),
+            &json!({"destination": abs_path("out")}),
         )
         .unwrap();
         assert!(dispatch(
