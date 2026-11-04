@@ -38,7 +38,11 @@ VIAddVersionKey "LegalCopyright" "AGPL-3.0-or-later"
 ; Third-party notices (#689): the LGPL notice and the CC BY-SA database attribution that the
 ; bundled lens-correction library requires us to show. Shown as the licence page, installed beside
 ; the exe, and shown in the app (nicti-pelt embeds the same file).
-!define NOTICES_DIR "${__FILEDIR__}\..\..\assets\notices"
+; CI passes an absolute /DNOTICES_DIR: when makensis is given a relative script path, __FILEDIR__ is
+; relative too and NSIS then resolves it against the script directory a second time (doubled path).
+!ifndef NOTICES_DIR
+  !define NOTICES_DIR "${__FILEDIR__}\..\..\assets\notices"
+!endif
 
 !define MUI_ABORTWARNING
 !define MUI_LICENSEPAGE_TEXT_TOP "Nicti is free software (AGPL-3.0-or-later). It includes third-party components under the licences below."
