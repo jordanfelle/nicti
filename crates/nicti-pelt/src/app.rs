@@ -3912,9 +3912,10 @@ impl PeltApp {
     }
 
     /// Whether a dialog the control channel must not operate without
-    /// `--control-allow-destructive` is open: the delete confirmation or the Export dialog.
+    /// `--control-allow-destructive` is open: the delete confirmation, the Export dialog, or a
+    /// Copy/Sync/Save-preset/Straighten prompt (#717: they apply edits to many photos).
     fn destructive_ui_open(&self) -> bool {
-        self.delete.is_confirming() || self.export.dialog_open()
+        self.delete.is_confirming() || self.export.dialog_open() || self.knead.is_asking()
     }
 }
 
