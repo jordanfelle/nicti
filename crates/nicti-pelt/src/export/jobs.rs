@@ -2047,7 +2047,7 @@ mod tests {
             .unwrap(),
         ));
         let identity = blake3::hash(b"fp-a.NEF");
-        let key = ai_bake_key(&source, spine::neutral_key(&doc, identity)).unwrap();
+        let key = ai_bake_key(&source, spine::neutral_key(&doc, identity).unwrap()).unwrap();
         let alpha = AiAlpha::quantized(
             8,
             8,

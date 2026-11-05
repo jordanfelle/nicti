@@ -623,8 +623,6 @@ impl MaskEngine {
             let used = state.dabs_used + dabs.len();
             let next_tex = match bin_stroke(&dabs, mw as usize, mh as usize) {
                 None => Arc::clone(&state.tex),
-                // The guide is built whenever a stroke needs it; without one the stroke is skipped.
-                Some(_) if stroke.auto_mask && guide.is_none() => Arc::clone(&state.tex),
                 Some(_) if stroke.auto_mask => {
                     self.stats.brush_passes += 1;
                     self.stats.auto_mask_refines += 1;
@@ -632,7 +630,11 @@ impl MaskEngine {
                         Some(guide) => Arc::new(
                             self.auto_mask_stroke(gpu, &state.tex, stroke, budget, guide, cx.mask),
                         ),
-                        None => Arc::clone(&state.tex),
+                        // Unreachable: the guide is built whenever any stroke in the walk needs it.
+                        None => {
+                            debug_assert!(false, "auto-mask stroke without a guide");
+                            Arc::clone(&state.tex)
+                        }
                     }
                 }
                 Some(binned) => {
