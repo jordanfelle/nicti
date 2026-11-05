@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "nicti": {
+      "command": "nicti-mcp",
+      "args": []
+    }
+  }
+}
