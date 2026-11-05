@@ -197,7 +197,7 @@ jobs:
             for ($attempt = 1; $attempt -le 5; $attempt++) {
               choco install nsis -y
               if ($LASTEXITCODE -eq 0) { $installed = $true; break }
-              Start-Sleep -Seconds (15 * $attempt)
+              if ($attempt -lt 5) { Start-Sleep -Seconds (15 * $attempt) }
             }
             if (-not $installed) { throw "choco install nsis failed after 5 attempts" }
             # A GitHub Actions job's process PATH isn't refreshed mid-job after an installer

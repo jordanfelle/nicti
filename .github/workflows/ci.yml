@@ -172,7 +172,7 @@ jobs:
           for ($attempt = 1; $attempt -le 5; $attempt++) {
             choco install nasm -y
             if ($LASTEXITCODE -eq 0) { exit 0 }
-            Start-Sleep -Seconds (15 * $attempt)
+            if ($attempt -lt 5) { Start-Sleep -Seconds (15 * $attempt) }
           }
           throw "choco install nasm failed after 5 attempts"
       - uses: dtolnay/rust-toolchain@stable
@@ -221,7 +221,7 @@ jobs:
           for ($attempt = 1; $attempt -le 5; $attempt++) {
             choco install nasm -y
             if ($LASTEXITCODE -eq 0) { exit 0 }
-            Start-Sleep -Seconds (15 * $attempt)
+            if ($attempt -lt 5) { Start-Sleep -Seconds (15 * $attempt) }
           }
           throw "choco install nasm failed after 5 attempts"
       - uses: dtolnay/rust-toolchain@stable
