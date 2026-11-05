@@ -141,12 +141,7 @@ pub fn read_frame_region(
     );
     gpu.queue.submit(Some(encoder.finish()));
 
-    let slice = staging.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("device poll failed");
-    let raw = slice.get_mapped_range().expect("output buffer not mapped");
+    let raw = crate::gpu::read_mapped(gpu, &staging);
 
     let mut out = Vec::with_capacity((width * height) as usize);
     for row_index in 0..height {
@@ -162,8 +157,6 @@ pub fn read_frame_region(
             ]);
         }
     }
-    drop(raw);
-    staging.unmap();
     out
 }
 

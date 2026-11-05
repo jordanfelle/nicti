@@ -149,7 +149,7 @@ impl ChunkedJob for MaskBakeJob {
             // unknown state, so refuse rather than run on them.
             Err(_) => Err("the mask engine failed earlier; restart to reload it".to_owned()),
         };
-        *self.slot.lock().unwrap() = Some(MaskBakeOutcome {
+        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(MaskBakeOutcome {
             image_key: self.image_key,
             bake_key: self.bake_key,
             result,

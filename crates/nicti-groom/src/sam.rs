@@ -235,7 +235,13 @@ impl Segmenter for MobileSam {
             let embedding = self.encode(frame)?;
             self.embedding = Some((key, embedding));
         }
-        let embedding = &self.embedding.as_ref().expect("just ensured").1;
+        let embedding = &self
+            .embedding
+            .as_ref()
+            .ok_or_else(|| {
+                RemovalError::BadInput("internal error: the image embedding was not built".into())
+            })?
+            .1;
 
         let (coords, labels) = decoder_points(prompt);
         let n = labels.len();

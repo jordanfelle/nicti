@@ -164,7 +164,9 @@ impl RenderGraph {
             order.push(id.to_string());
             if let Some(kids) = self.children.get(id) {
                 for kid in kids {
-                    let d = indegree.get_mut(kid.as_str()).unwrap();
+                    let Some(d) = indegree.get_mut(kid.as_str()) else {
+                        continue;
+                    };
                     *d -= 1;
                     if *d == 0 {
                         queue.push_back(kid.as_str());

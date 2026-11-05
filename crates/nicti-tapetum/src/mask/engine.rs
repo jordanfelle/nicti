@@ -124,9 +124,9 @@ impl AiAlpha {
         out.extend_from_slice(&(self.width as u32).to_le_bytes());
         out.extend_from_slice(&(self.height as u32).to_le_bytes());
         let mut z = flate2::write::ZlibEncoder::new(out, flate2::Compression::fast());
-        // Writing into a `Vec` cannot fail.
-        z.write_all(&plane).expect("write to Vec");
-        z.finish().expect("finish into Vec")
+        // Writing into a `Vec` cannot fail, so the fallbacks below are unreachable.
+        let _ = z.write_all(&plane);
+        z.finish().unwrap_or_default()
     }
 
     /// Inverse of [`AiAlpha::encode`]. `None` for anything that is not a well-formed payload
@@ -590,7 +590,7 @@ impl MaskEngine {
         prefix.push(chain.finalize());
         for s in strokes {
             let mut h = blake3::Hasher::new();
-            h.update(prefix.last().expect("seeded").as_bytes());
+            h.update(prefix.last().map_or(&[][..], |p| &p.as_bytes()[..]));
             h.update(stable_hash(s).as_bytes());
             prefix.push(h.finalize());
         }
@@ -626,14 +626,16 @@ impl MaskEngine {
                 Some(_) if stroke.auto_mask => {
                     self.stats.brush_passes += 1;
                     self.stats.auto_mask_refines += 1;
-                    Arc::new(self.auto_mask_stroke(
-                        gpu,
-                        &state.tex,
-                        stroke,
-                        budget,
-                        guide.as_ref().expect("built when a stroke needs it"),
-                        cx.mask,
-                    ))
+                    match guide.as_ref() {
+                        Some(guide) => Arc::new(
+                            self.auto_mask_stroke(gpu, &state.tex, stroke, budget, guide, cx.mask),
+                        ),
+                        // Unreachable: the guide is built whenever any stroke in the walk needs it.
+                        None => {
+                            debug_assert!(false, "auto-mask stroke without a guide");
+                            Arc::clone(&state.tex)
+                        }
+                    }
                 }
                 Some(binned) => {
                     self.stats.brush_passes += 1;

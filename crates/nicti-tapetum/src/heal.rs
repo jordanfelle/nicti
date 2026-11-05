@@ -276,7 +276,7 @@ pub fn stamp_removal_state(doc: &mut nicti_pawprint::EditDocument, removals: &Re
     if let Value::Object(map) = &mut entry.params {
         map.insert(
             "removals".to_owned(),
-            serde_json::to_value(ready).expect("a string map serializes"),
+            serde_json::to_value(ready).unwrap_or(Value::Null),
         );
     }
 }

@@ -64,6 +64,9 @@ pub const LIVE_IDS: [&str; 16] = [
 pub const GEOMETRY_IDS: [&str; 2] = [CROP, EFFECTS];
 
 /// The full graph: baked prefix -> live suffix -> crop -> effects.
+// Static-table invariant (unique stage ids), pinned by this module's tests; a failure is a
+// programming error in the constant tables, never input-dependent.
+#[allow(clippy::expect_used)]
 pub fn build_graph() -> RenderGraph {
     let mut graph = RenderGraph::new();
     let mut prev: Option<&str> = None;
@@ -154,6 +157,8 @@ render_stage_factory!(masks_factory, stages::masks_stage);
 type StageFactoryEntry = (&'static str, fn() -> Arc<dyn RenderStage>);
 
 /// Every stage [`build_graph`] can reference.
+// Static-table invariant (ids namespaced and registered once), pinned by this module's tests.
+#[allow(clippy::expect_used)]
 pub fn build_registry() -> StageRegistry {
     let mut registry = StageRegistry::new();
     let entries: [StageFactoryEntry; 24] = [
@@ -222,16 +227,16 @@ pub fn stamp_source_identity(doc: &mut EditDocument, identity: blake3::Hash) {
 /// reports once that photo is loaded and `doc` applied (a test in `nicti-pelt` pins this): `NEUTRAL`
 /// sits upstream of heal, the masks and every live stage, so only the identity and the baked
 /// prefix's own entries reach it.
-pub fn neutral_key(doc: &EditDocument, identity: blake3::Hash) -> blake3::Hash {
+///
+/// `None` when the document cannot be keyed (a stage's params hold a value the canonical hasher
+/// refuses, such as a JSON `null` or NaN from a hand-edited or older document): that is input, not
+/// a bug, so callers skip the photo instead of crashing.
+pub fn neutral_key(doc: &EditDocument, identity: blake3::Hash) -> Option<blake3::Hash> {
     let mut graph = build_graph();
     let mut doc = doc.clone();
     stamp_source_identity(&mut doc, identity);
-    graph
-        .apply_document(&doc, &build_registry())
-        .expect("build_registry covers every id build_graph adds");
-    graph
-        .cache_key(NEUTRAL)
-        .expect("build_graph always adds NEUTRAL")
+    graph.apply_document(&doc, &build_registry()).ok()?;
+    graph.cache_key(NEUTRAL).ok()
 }
 
 /// One stage's typed params out of a document (`T::default()` when the document has no entry).
@@ -661,6 +666,15 @@ mod tests {
         );
         let out = resolve_inputs(&doc, &f, EXTENT, None, Some(&look), 1.0);
         assert!(out.live.look_curve.is_empty());
+    }
+
+    #[test]
+    fn an_unkeyable_document_has_no_neutral_key_instead_of_panicking() {
+        // A JSON null in a stage's params (a hand-edited or older document) is refused by the
+        // canonical hasher: that is input, not a bug.
+        let doc = doc_with(LENS, serde_json::json!({ "amount": null }));
+        assert_eq!(neutral_key(&doc, blake3::hash(b"photo")), None);
+        assert!(neutral_key(&EditDocument::default(), blake3::hash(b"photo")).is_some());
     }
 
     #[test]

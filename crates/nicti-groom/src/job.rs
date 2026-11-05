@@ -122,7 +122,7 @@ impl ChunkedJob for RemoveJob {
             // unknown state, so refuse rather than run on them.
             Err(_) => Err("the removal engine failed earlier; restart to reload it".to_owned()),
         };
-        *self.slot.lock().unwrap() = Some(RemoveOutcome {
+        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(RemoveOutcome {
             image_key: self.image_key,
             spot_key: self.spot_key.clone(),
             result,

@@ -1105,7 +1105,8 @@ pub fn parse<T: serde::de::DeserializeOwned + Default>(params: &Value) -> T {
 /// The JSON `Value` a fresh `T::default()` serializes to -- what a `RenderStage::default_params`
 /// closure returns for a stage backed by one of this module's typed structs.
 pub fn default_value<T: Serialize + Default>() -> Value {
-    serde_json::to_value(T::default()).expect("a coat params struct always serializes")
+    // A derive(Serialize) params struct always serializes; `Null` is the total fallback.
+    serde_json::to_value(T::default()).unwrap_or(Value::Null)
 }
 
 #[cfg(test)]

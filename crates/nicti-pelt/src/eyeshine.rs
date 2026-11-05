@@ -79,7 +79,9 @@ pub fn needed_alpha_keys(identity: &blake3::Hash, doc: &EditDocument) -> Vec<bla
     let active = MaskParams {
         corrections: params.active().cloned().collect(),
     };
-    let neutral_key = spine::neutral_key(doc, *identity);
+    let Some(neutral_key) = spine::neutral_key(doc, *identity) else {
+        return Vec::new();
+    };
     let mut keys: Vec<blake3::Hash> = mask_compose::bake_requests(&active, neutral_key)
         .iter()
         .map(|r| r.key)

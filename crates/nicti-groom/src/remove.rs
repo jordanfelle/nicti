@@ -110,7 +110,9 @@ impl<S: Segmenter, I: Inpainter> RemovalBackend for RemovalEngine<S, I> {
                 frame,
             });
         }
-        let cached = self.cached.as_ref().expect("just ensured");
+        let cached = self.cached.as_ref().ok_or_else(|| {
+            RemovalError::BadInput("internal error: the model frame was not built".into())
+        })?;
         let (space, frame) = (cached.space, &cached.frame);
 
         // 1. Object mask in the model frame, limited to the spot's circle.

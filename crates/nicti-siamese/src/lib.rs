@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! AI masks (#49, ADR-0048/ADR-0049), promoted from `spikes/siamese`.
 //!
 //! Layering, bottom to top:

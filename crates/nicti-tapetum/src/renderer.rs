@@ -206,7 +206,7 @@ impl Renderer {
             .baked_chain
             .last()
             .map(|(id, _)| *id)
-            .expect("checked non-empty");
+            .ok_or(RenderError::EmptyBakedChain)?;
         Ok((baked_output, req.graph.cache_key(last)?))
     }
 
@@ -291,12 +291,13 @@ impl Renderer {
         };
 
         let live_key = composite_key(req.graph, req.live_nodes, baked_output_key, req.extent)?;
-        let live_output = if self.live_key == Some(live_key) {
-            Arc::clone(
-                self.live_output
-                    .as_ref()
-                    .expect("live_key set implies live_output set"),
-            )
+        let cached_live = if self.live_key == Some(live_key) {
+            self.live_output.as_ref().map(Arc::clone)
+        } else {
+            None
+        };
+        let live_output = if let Some(cached) = cached_live {
+            cached
         } else {
             let output = Arc::new(FrameTexture::new(&self.gpu, req.extent));
             req.live
@@ -315,12 +316,13 @@ impl Renderer {
 
         let geometry_key =
             composite_key(req.graph, req.geometry_nodes, live_key, req.geometry_extent)?;
-        let geometry_output = if self.geometry_key == Some(geometry_key) {
-            Arc::clone(
-                self.geometry_output
-                    .as_ref()
-                    .expect("geometry_key set implies geometry_output set"),
-            )
+        let cached_geometry = if self.geometry_key == Some(geometry_key) {
+            self.geometry_output.as_ref().map(Arc::clone)
+        } else {
+            None
+        };
+        let geometry_output = if let Some(cached) = cached_geometry {
+            cached
         } else {
             let output = Arc::new(FrameTexture::new(&self.gpu, req.geometry_extent));
             req.geometry

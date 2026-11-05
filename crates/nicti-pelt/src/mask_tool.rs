@@ -859,12 +859,12 @@ mod tests {
         let doc = develop.document().clone();
         assert_eq!(
             develop.neutral_key(),
-            nicti_tapetum::spine::neutral_key(&doc, identity)
+            nicti_tapetum::spine::neutral_key(&doc, identity).unwrap()
         );
         let params: MaskParams = nicti_tapetum::coat::parse(&doc.stages[MASKS].params);
         let expected = nicti_tapetum::mask::compose::bake_requests(
             &params,
-            nicti_tapetum::spine::neutral_key(&doc, identity),
+            nicti_tapetum::spine::neutral_key(&doc, identity).unwrap(),
         );
         assert_eq!(develop.mask_bake_requests(), expected);
     }

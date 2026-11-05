@@ -218,6 +218,27 @@ pub fn make_compute_pipeline(
     })
 }
 
+/// Maps `staging` for reading, waits for the GPU, and copies the bytes out.
+///
+/// A failed poll/map means the device is lost. These synchronous readbacks feed export tiles, the
+/// dehaze airlight cache and auto-level, so a zero-filled stand-in would be written out or cached
+/// as if it were the photo; failing loudly is the safer behaviour until the readbacks are made
+/// fallible end to end (tracked in the #739 follow-up).
+#[allow(clippy::expect_used)]
+pub(crate) fn read_mapped(gpu: &GpuContext, staging: &wgpu::Buffer) -> Vec<u8> {
+    let slice = staging.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll failed");
+    let bytes = slice
+        .get_mapped_range()
+        .expect("readback buffer not mapped")
+        .to_vec();
+    staging.unmap();
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

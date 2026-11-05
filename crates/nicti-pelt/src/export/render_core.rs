@@ -302,7 +302,11 @@ pub(crate) fn load_stored_alphas(
     let active = MaskParams {
         corrections: params.active().cloned().collect(),
     };
-    let neutral_key = spine::neutral_key(edit, identity);
+    // An unkeyable document (hand-edited params) has no bakes to look up; the export proceeds
+    // without stored alphas rather than crashing.
+    let Some(neutral_key) = spine::neutral_key(edit, identity) else {
+        return (HashMap::new(), 0);
+    };
     let wanted = mask_compose::bake_requests(&active, neutral_key);
     let mut found = HashMap::new();
     let mut missing = 0usize;

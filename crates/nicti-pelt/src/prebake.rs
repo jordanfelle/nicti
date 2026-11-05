@@ -112,7 +112,8 @@ impl PlanJob {
             .get(MASKS)
             .map(|entry| coat::parse(&entry.params))
             .unwrap_or_default();
-        let mut requests = bake_requests(&params, spine::neutral_key(&doc, identity));
+        let neutral = spine::neutral_key(&doc, identity)?;
+        let mut requests = bake_requests(&params, neutral);
         if requests.is_empty() {
             return None;
         }
@@ -747,7 +748,11 @@ mod tests {
     fn key_of(f: &Fx, asset: i64, doc: &EditDocument) -> blake3::Hash {
         let a = f.store.get_asset(asset).unwrap().unwrap();
         let params: MaskParams = coat::parse(&doc.stages[MASKS].params);
-        bake_requests(&params, spine::neutral_key(doc, asset_cache_key(&a)))[0].key
+        bake_requests(
+            &params,
+            spine::neutral_key(doc, asset_cache_key(&a)).unwrap(),
+        )[0]
+        .key
     }
 
     #[test]
