@@ -33,6 +33,7 @@ use nicti_shed::state::Channel as UpdateChannel;
 
 use crate::cache_settings::{self, CacheSettingsUi};
 use crate::color_mgmt::ColorManagement;
+use crate::color_settings;
 use crate::cull::compare::{self as cull_compare, CompareSession, Side};
 use crate::cull::delete::DeleteFlow;
 use crate::cull::input::KeyCommand;
@@ -101,6 +102,8 @@ pub struct PeltApp {
     view: View,
     /// Display ICC profile, soft-proofing and gamut warning (#42, ADR-0042).
     color: ColorManagement,
+    /// Writes the Color-menu settings beside the catalog when they change (#725).
+    color_saver: color_settings::Saver,
     version: String,
     catalog_path: PathBuf,
     catalog: Arc<SqliteCatalog>,
@@ -457,6 +460,7 @@ impl PeltApp {
             _ => None,
         });
         let preview_settings = preview_settings::load(&catalog_path);
+        let color_settings = color_settings::load(&catalog_path);
         let mask_prefs_path = catalog_path.clone();
         crate::fur::install_section_states(egui_ctx, section_state::load(&catalog_path));
         let eyeshine = EyeshineService::new(larder.as_ref().map(|l| {
@@ -470,7 +474,8 @@ impl PeltApp {
 
         Self {
             view: View::Library,
-            color: ColorManagement::new(),
+            color: ColorManagement::with_settings(&color_settings),
+            color_saver: color_settings::Saver::new(color_settings),
             version,
             catalog_path,
             catalog,
@@ -1394,6 +1399,9 @@ impl eframe::App for PeltApp {
             let _ = section_state::save(&self.catalog_path, &states);
         }
         self.color.handle_shortcuts(ui.ctx());
+        // The Color menu (or Shift+S) changed a setting last frame: remember it across restarts.
+        self.color_saver
+            .save_if_changed(&self.catalog_path, &self.color.settings());
         self.color.sync(frame);
         self.sync_preview_color();
         self.poll_backup();
