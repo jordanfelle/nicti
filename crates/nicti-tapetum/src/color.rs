@@ -54,16 +54,23 @@ fn mat3_diag(d: [f32; 3]) -> Mat3 {
     [[d[0], 0.0, 0.0], [0.0, d[1], 0.0], [0.0, 0.0, d[2]]]
 }
 
-/// Cramer's-rule 3x3 inverse. Panics on a singular matrix -- `cam_xyz` (the only matrix this
-/// module inverts) is always invertible in practice: LibRaw derives it from a real sensor's
-/// spectral-sensitivity calibration, never a degenerate/rank-deficient one.
+/// Cramer's-rule 3x3 inverse, or the identity when `m` is singular or non-finite. Every caller
+/// inverts a fixed constant or a matrix [`usable_cam_xyz`] has already vetted, so the fallback is
+/// never reached in practice; it exists so a bad file can never abort the app (#756).
 pub(crate) fn mat3_invert(m: &Mat3) -> Mat3 {
+    mat3_try_invert(m).unwrap_or_else(mat3_identity)
+}
+
+/// Cramer's-rule 3x3 inverse; `None` when the determinant is ~0 or any entry is non-finite.
+fn mat3_try_invert(m: &Mat3) -> Option<Mat3> {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-    assert!(det.abs() > 1e-12, "cannot invert a singular matrix");
+    if !det.is_finite() || det.abs() <= 1e-9 || m.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
     let inv_det = 1.0 / det;
-    [
+    Some([
         [
             (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv_det,
             (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv_det,
@@ -79,7 +86,41 @@ pub(crate) fn mat3_invert(m: &Mat3) -> Mat3 {
             (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv_det,
             (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_det,
         ],
-    ]
+    ])
+}
+
+/// Bradford-adapted XYZ(D50) -> linear sRGB (Lindbloom), as a `cam_xyz`: what a file with no
+/// usable colour matrix is treated as, the same primaries a JPEG declares.
+const SRGB_FALLBACK_CAM_XYZ: [f32; 12] = [
+    3.133_856,
+    -1.616_866_7,
+    -0.490_614_6,
+    -0.978_768_4,
+    1.916_141_5,
+    0.033_454,
+    0.071_945_3,
+    -0.228_991_4,
+    1.405_242_7,
+    0.0,
+    0.0,
+    0.0,
+];
+
+/// Whether `cam_xyz` can be inverted into a camera -> XYZ matrix: finite and not rank-deficient.
+/// LibRaw reports an all-zero matrix for a file with no colour data, so this is a real input case.
+pub fn cam_xyz_is_usable(cam_xyz: &[f32; 12]) -> bool {
+    mat3_try_invert(&cam_xyz_to_mat3(cam_xyz)).is_some()
+}
+
+/// `cam_xyz` itself when it [`cam_xyz_is_usable`], else the sRGB-primaries fallback, so the colour
+/// chain always gets an invertible matrix (#756). The photo then renders with sRGB primaries
+/// instead of aborting the app.
+pub fn usable_cam_xyz(cam_xyz: &[f32; 12]) -> [f32; 12] {
+    if cam_xyz_is_usable(cam_xyz) {
+        *cam_xyz
+    } else {
+        SRGB_FALLBACK_CAM_XYZ
+    }
 }
 
 /// The first three rows/cols of `nicti_cornea::LinearFrame::cam_xyz` (row-major 4x3) as a 3x3 --
@@ -170,10 +211,18 @@ fn wb_gains_for_temp_tint(cam_xyz: &[f32; 12], temp_k: f32, tint: f32) -> [f32; 
 /// way, PV2012's Temp and Tint sliders stay independent -- a tint-only edit never requires an
 /// explicit temp.
 pub fn wb_gains_with_params(cam_mul: [f32; 4], cam_xyz: &[f32; 12], wb: &WbParams) -> [f32; 3] {
+    let cam_xyz = &usable_cam_xyz(cam_xyz);
     match wb.temp_k {
         Some(k) => wb_gains_for_temp_tint(cam_xyz, k, wb.tint),
         None => {
             let mut gains = wb_gains(cam_mul);
+            // A missing as-shot multiplier (LibRaw reports 0, or a non-finite value) means "no
+            // white balance", not a zero gain that would black out a channel (#756).
+            for i in [0, 2] {
+                if !gains[i].is_finite() || gains[i] <= 0.0 {
+                    gains[i] = 1.0;
+                }
+            }
             let tint_mult = (1.0 - wb.tint * 0.0004).max(1e-3);
             gains[1] *= tint_mult;
             gains
@@ -202,6 +251,7 @@ pub fn camera_to_working_space_matrix(
     cam_xyz: &[f32; 12],
     wb: &WbParams,
 ) -> Mat3 {
+    let cam_xyz = &usable_cam_xyz(cam_xyz);
     let wb_mat = mat3_diag(wb_gains_with_params(cam_mul, cam_xyz, wb));
     // cam_xyz_to_mat3 returns XYZ->camera (see its own doc comment); invert to get camera->XYZ.
     let cam_to_xyz = mat3_invert(&cam_xyz_to_mat3(cam_xyz));
@@ -1125,6 +1175,63 @@ mod tests {
     #[test]
     fn mat3_invert_of_identity_is_identity() {
         assert_eq!(mat3_invert(&mat3_identity()), mat3_identity());
+    }
+
+    #[test]
+    fn a_singular_or_non_finite_matrix_inverts_to_identity_instead_of_panicking() {
+        let zero = [[0.0f32; 3]; 3];
+        assert_eq!(mat3_invert(&zero), mat3_identity());
+        let mut nan = mat3_identity();
+        nan[1][1] = f32::NAN;
+        assert_eq!(mat3_invert(&nan), mat3_identity());
+    }
+
+    #[test]
+    fn an_all_zero_cam_xyz_still_yields_a_finite_working_space_matrix() {
+        // LibRaw reports zeros for a file with no colour data (#756).
+        let m =
+            camera_to_working_space_matrix([2.0, 1.0, 1.5, 1.0], &[0.0; 12], &WbParams::default());
+        assert!(m.iter().flatten().all(|v| v.is_finite()));
+        // The fallback is the sRGB primaries, so it must equal an explicit sRGB declaration.
+        let explicit = camera_to_working_space_matrix(
+            [2.0, 1.0, 1.5, 1.0],
+            &SRGB_FALLBACK_CAM_XYZ,
+            &WbParams::default(),
+        );
+        assert_eq!(m, explicit);
+        let t = camera_to_working_space_matrix(
+            [1.0; 4],
+            &[0.0; 12],
+            &WbParams {
+                temp_k: Some(5500.0),
+                tint: 0.0,
+            },
+        );
+        assert!(t.iter().flatten().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn a_zero_as_shot_multiplier_is_no_white_balance_not_a_black_channel() {
+        let cam_xyz = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let p = WbParams::default();
+        assert_eq!(
+            wb_gains_with_params([0.0; 4], &cam_xyz, &p),
+            [1.0, 1.0, 1.0]
+        );
+        assert_eq!(
+            wb_gains_with_params([2.0, 1.0, 0.0, 1.0], &cam_xyz, &p),
+            [2.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn a_real_cam_xyz_is_used_unchanged() {
+        let real = [
+            0.6, 0.2, 0.1, 0.15, 0.75, 0.1, 0.05, 0.15, 0.9, 0.0, 0.0, 0.0,
+        ];
+        assert!(cam_xyz_is_usable(&real));
+        assert_eq!(usable_cam_xyz(&real), real);
+        assert!(!cam_xyz_is_usable(&[0.0; 12]));
     }
 
     #[test]
