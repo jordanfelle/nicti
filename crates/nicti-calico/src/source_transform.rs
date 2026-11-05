@@ -11,9 +11,12 @@
 
 use crate::icc::color_profile;
 use crate::space::OutputSpace;
-use crate::transform::{equivalent_space, DisplayProfile};
-use moxcms::Transform8BitExecutor;
+use crate::transform::{
+    equivalent_space, has_lifted_black, shaper_table_u16, DisplayKind, DisplayProfile,
+    DisplayTransform, Lut3d,
+};
 use moxcms::{ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformOptions};
+use moxcms::{Transform16BitExecutor, Transform8BitExecutor};
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -32,6 +35,9 @@ enum Entry {
     /// Source and display are the same space: nothing to do, zero cost.
     Identity,
     Convert(Arc<Transform8BitExecutor>),
+    /// Black-point compensated (#624): source -> linear ProPhoto -> the display's BPC-baked LUT,
+    /// the same LUT the GPU applies to the render, so previews and the edit agree on shadows.
+    Compensated(Arc<Transform16BitExecutor>, Arc<Lut3d>),
 }
 
 /// Converts 8-bit RGBA from a JPEG's own color space to the display profile it was built for.
@@ -45,10 +51,74 @@ pub struct SourceTransforms {
     /// holds. `None` key = untagged (treated as sRGB).
     cache: Mutex<HashMap<Option<(usize, u64)>, Entry>>,
     hasher: RandomState,
+    /// The display's black-point-compensated LUT, when compensation applies (a LUT-based monitor
+    /// profile and BPC on). `None`: the plain direct transform.
+    bpc_lut: Option<Arc<Lut3d>>,
 }
 
 impl SourceTransforms {
     pub fn new(display: &DisplayProfile) -> Self {
+        Self::new_with(display, false)
+    }
+
+    /// Like [`Self::new`], with black-point compensation (#320/#624) when `bpc` is set. It takes
+    /// effect exactly where the monitor transform's does -- a LUT-based monitor profile; sRGB,
+    /// built-in spaces and matrix/TRC profiles are converted as before -- so a thumbnail's shadows
+    /// match the same photo in the Develop view.
+    pub fn new_with(display: &DisplayProfile, bpc: bool) -> Self {
+        let bpc_lut = if bpc {
+            // Same panic guard as every other `moxcms` use on an untrusted profile. Only a monitor
+            // whose black really is lifted gets the (slower, LUT-based) compensated path.
+            std::panic::catch_unwind(|| {
+                if let DisplayProfile::Icc(p) = display {
+                    if !has_lifted_black(p) {
+                        return None;
+                    }
+                }
+                match DisplayTransform::build_with(display, None, true) {
+                    Ok(DisplayTransform {
+                        kind: DisplayKind::Lut(lut),
+                        ..
+                    }) => Some(Arc::new(lut)),
+                    _ => None,
+                }
+            })
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+        Self::build_new(display, bpc_lut)
+    }
+
+    /// Forces the LUT path (even for a profile the monitor transform would evaluate analytically),
+    /// with compensation when `bpc` is set. For tests and tools.
+    pub fn with_lut_bpc(profile: &ColorProfile, bpc: bool) -> Result<Self, moxcms::CmsError> {
+        let t = DisplayTransform::with_lut_bpc(profile, None, bpc)?;
+        let lut = match t.kind {
+            DisplayKind::Lut(lut) if bpc && has_lifted_black(profile) => Some(Arc::new(lut)),
+            _ => None,
+        };
+        Ok(Self::build_new(
+            &DisplayProfile::Icc(Arc::new(profile.clone())),
+            lut,
+        ))
+    }
+
+    /// A converter for `display` that compensates through `bpc_lut` -- the BPC-baked LUT the
+    /// caller's display transform already holds, so the 33^3 bake is not repeated. `None` = the
+    /// plain direct transform. Pass a LUT only when compensation applies
+    /// ([`has_lifted_black`]): it makes every preview pixel take the slower two-stage path.
+    pub fn from_bpc_lut(display: &DisplayProfile, bpc_lut: Option<Arc<Lut3d>>) -> Self {
+        Self::build_new(display, bpc_lut)
+    }
+
+    /// Whether this converter compensates (and so differs from a plain one for the same display).
+    pub fn bpc_active(&self) -> bool {
+        self.bpc_lut.is_some()
+    }
+
+    fn build_new(display: &DisplayProfile, bpc_lut: Option<Arc<Lut3d>>) -> Self {
         let (display, display_space) = match display {
             DisplayProfile::Space(s) => (Arc::new(color_profile(*s)), Some(*s)),
             DisplayProfile::Icc(p) => (p.clone(), equivalent_space(p)),
@@ -58,6 +128,7 @@ impl SourceTransforms {
             display_space,
             cache: Mutex::new(HashMap::new()),
             hasher: RandomState::new(),
+            bpc_lut,
         }
     }
 
@@ -65,8 +136,13 @@ impl SourceTransforms {
     /// (`None`, or a profile that is unusable for RGB, means sRGB) to the display. Never fails:
     /// anything unconvertible leaves the pixels as they were, which is what happened before #319.
     pub fn convert_rgba8(&self, icc: Option<&[u8]>, rgba: &mut [u8]) {
-        let Entry::Convert(exec) = self.entry_for(icc) else {
-            return;
+        let exec = match self.entry_for(icc) {
+            Entry::Identity => return,
+            Entry::Compensated(to_working, lut) => {
+                convert_compensated(&*to_working, &lut, rgba);
+                return;
+            }
+            Entry::Convert(exec) => exec,
         };
         let mut scratch = vec![0u8; CHUNK_PIXELS * 4];
         for chunk in rgba.chunks_mut(CHUNK_PIXELS * 4) {
@@ -119,6 +195,27 @@ impl SourceTransforms {
     }
 
     fn build_from(&self, src: &ColorProfile) -> Option<Entry> {
+        if let Some(lut) = &self.bpc_lut {
+            // No "same space as the display" shortcut here: the display is a LUT profile, and even
+            // an sRGB source must go through the compensated LUT.
+            let options = TransformOptions {
+                rendering_intent: RenderingIntent::RelativeColorimetric,
+                allow_use_cicp_transfer: false,
+                ..TransformOptions::default()
+            };
+            return std::panic::catch_unwind(|| {
+                src.create_transform_16bit(
+                    Layout::Rgba,
+                    &linear_working_profile(),
+                    Layout::Rgb,
+                    options,
+                )
+                .ok()
+            })
+            .ok()
+            .flatten()
+            .map(|t| Entry::Compensated(t, lut.clone()));
+        }
         // Same space on both sides (judged the way `DisplayTransform::build` judges a monitor
         // profile): converting would only add rounding.
         // The probe runs `moxcms` transforms too: a profile that parses but panics there must
@@ -143,6 +240,45 @@ impl SourceTransforms {
         .ok()
         .flatten()
         .map(Entry::Convert)
+    }
+}
+
+/// Converts `rgba` in place through `to_working` (source -> 16-bit linear ProPhoto) and the
+/// compensated display `lut`. Alpha is left as it was. A chunk the engine rejects is left as it was.
+fn convert_compensated(
+    to_working: &(dyn moxcms::TransformExecutor<u16> + Send + Sync),
+    lut: &Lut3d,
+    rgba: &mut [u8],
+) {
+    let shaper = shaper_table_u16();
+    let mut wide = vec![0u16; CHUNK_PIXELS * 4];
+    let mut linear = vec![0u16; CHUNK_PIXELS * 3];
+    for chunk in rgba.chunks_mut(CHUNK_PIXELS * 4) {
+        let n = chunk.len() / 4;
+        for (w, &b) in wide.iter_mut().zip(&chunk[..n * 4]) {
+            *w = u16::from(b) * 257;
+        }
+        if to_working
+            .transform(&wide[..n * 4], &mut linear[..n * 3])
+            .is_err()
+        {
+            continue;
+        }
+        for (px, lin) in chunk
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(linear.as_chunks::<3>().0)
+        {
+            let out = lut.sample_shaped([
+                shaper[usize::from(lin[0])],
+                shaper[usize::from(lin[1])],
+                shaper[usize::from(lin[2])],
+            ]);
+            for c in 0..3 {
+                px[c] = (out[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+        }
     }
 }
 
@@ -385,5 +521,145 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// sRGB-primaries monitor whose device black shows `floor` linear light (a lifted black).
+    fn lifted_black_monitor(floor: f64) -> ColorProfile {
+        let mut p = ColorProfile::new_srgb();
+        let table = || -> moxcms::ToneReprCurve {
+            moxcms::ToneReprCurve::Lut(
+                (0..1024)
+                    .map(|i| {
+                        let e = f64::from(i) / 1023.0;
+                        let lin = if e <= 0.04045 {
+                            e / 12.92
+                        } else {
+                            ((e + 0.055) / 1.055).powf(2.4)
+                        };
+                        ((floor + lin * (1.0 - floor)) * 65535.0).round() as u16
+                    })
+                    .collect(),
+            )
+        };
+        p.red_trc = Some(table());
+        p.green_trc = Some(table());
+        p.blue_trc = Some(table());
+        p
+    }
+
+    fn gray(t: &SourceTransforms, icc: Option<&[u8]>, v: u8) -> u8 {
+        let mut px = vec![v, v, v, 200];
+        t.convert_rgba8(icc, &mut px);
+        assert_eq!(px[3], 200, "alpha is untouched");
+        px[1]
+    }
+
+    #[test]
+    fn bpc_keeps_jpeg_shadow_detail_a_lifted_black_monitor_would_crush() {
+        let monitor = lifted_black_monitor(0.02);
+        let off = SourceTransforms::with_lut_bpc(&monitor, false).unwrap();
+        let on = SourceTransforms::with_lut_bpc(&monitor, true).unwrap();
+        // Without compensation every source shadow below the monitor's black collapses...
+        let (a, b) = (gray(&off, None, 6), gray(&off, None, 14));
+        assert_eq!(a, b, "off: {a} vs {b}");
+        // ...with it they stay distinct and ordered, black stays the darkest the monitor can
+        // show, and white stays white.
+        let (a, b, c) = (gray(&on, None, 6), gray(&on, None, 14), gray(&on, None, 40));
+        assert!(a + 2 <= b && b + 2 <= c, "on: {a} {b} {c}");
+        assert!(gray(&on, None, 0) < 40, "black");
+        assert!(gray(&on, None, 255) >= 253, "white");
+    }
+
+    #[test]
+    fn a_compensated_preview_matches_the_display_transform_the_render_gets() {
+        // Same LUT, same input: a thumbnail's pixel equals what the GPU path gives the render at
+        // that colour (to the 8-bit rounding and the 16-bit linear intermediate).
+        let monitor = lifted_black_monitor(0.02);
+        let on = SourceTransforms::with_lut_bpc(&monitor, true).unwrap();
+        let display = DisplayTransform::with_lut_bpc(&monitor, None, true).unwrap();
+        let srgb = OutputSpace::Srgb;
+        for v in [4u8, 12, 30, 90, 200] {
+            let enc = f32::from(v) / 255.0;
+            let lin = srgb.decode(enc);
+            let inv = crate::math::mat_invert(&srgb.from_working());
+            let w = crate::math::mat_vec_mul(&inv, [f64::from(lin); 3]).map(|c| c as f32);
+            let (want, _) = display.apply(w);
+            let got = gray(&on, None, v);
+            assert!(
+                (f32::from(got) / 255.0 - want[1]).abs() < 2.0 / 255.0,
+                "v={v}: got {got}, display gives {}",
+                want[1] * 255.0
+            );
+        }
+    }
+
+    #[test]
+    fn a_true_black_monitor_and_a_builtin_display_keep_the_plain_path_byte_for_byte() {
+        // A true-black LUT monitor has nothing to compensate: it must not pay for the two-stage
+        // path (or lose accuracy to the LUT), whatever the flag says.
+        let srgb_monitor = ColorProfile::new_srgb();
+        let on = SourceTransforms::with_lut_bpc(&srgb_monitor, true).unwrap();
+        assert!(!on.bpc_active());
+        let plain = SourceTransforms::new(&DisplayProfile::Icc(Arc::new(srgb_monitor)));
+        let aw = profile_bytes(OutputSpace::AdobeRgb).unwrap();
+        let mut a: Vec<u8> = (0..=255u8).flat_map(|v| [v, 255 - v, v / 2, 255]).collect();
+        let mut b = a.clone();
+        on.convert_rgba8(Some(&aw), &mut a);
+        plain.convert_rgba8(Some(&aw), &mut b);
+        assert_eq!(a, b);
+        // A built-in display ignores the flag too, and `new_with(.., false)` is `new`.
+        let p3 = DisplayProfile::Space(OutputSpace::DisplayP3);
+        let (x, y) = (
+            SourceTransforms::new(&p3),
+            SourceTransforms::new_with(&p3, true),
+        );
+        assert!(!y.bpc_active());
+        let mut a = vec![200, 40, 90, 255, 10, 220, 30, 255];
+        let mut b = a.clone();
+        x.convert_rgba8(Some(&aw), &mut a);
+        y.convert_rgba8(Some(&aw), &mut b);
+        assert_eq!(a, b);
+        // A lifted-black monitor with the option on is the compensated converter; off, it is not.
+        let lifted = lifted_black_monitor(0.02);
+        assert!(SourceTransforms::with_lut_bpc(&lifted, true)
+            .unwrap()
+            .bpc_active());
+        assert!(!SourceTransforms::with_lut_bpc(&lifted, false)
+            .unwrap()
+            .bpc_active());
+    }
+
+    #[test]
+    fn compensation_only_moves_the_shadows_midtones_and_highlights_stay_close_to_the_direct_transform(
+    ) {
+        // The compensated path goes through the 33^3 LUT, so away from the shadows it must stay
+        // within the LUT's own error of the exact direct transform (which has no compensation).
+        let monitor = lifted_black_monitor(0.02);
+        let on = SourceTransforms::with_lut_bpc(&monitor, true).unwrap();
+        let direct = SourceTransforms::new(&DisplayProfile::Icc(Arc::new(monitor)));
+        for v in (96..=255u16).step_by(8) {
+            let (a, b) = (gray(&on, None, v as u8), gray(&direct, None, v as u8));
+            assert!(a.abs_diff(b) <= 8, "v={v}: compensated {a} vs direct {b}");
+        }
+    }
+
+    #[test]
+    fn a_tagged_wide_gamut_source_still_converts_through_the_compensated_path() {
+        let monitor = lifted_black_monitor(0.02);
+        let on = SourceTransforms::with_lut_bpc(&monitor, true).unwrap();
+        let aw = profile_bytes(OutputSpace::AdobeRgb).unwrap();
+        let mut tagged = px(0, 200, 0);
+        let mut untagged = px(0, 200, 0);
+        on.convert_rgba8(Some(&aw), &mut tagged);
+        on.convert_rgba8(None, &mut untagged);
+        assert_ne!(tagged, untagged, "the profile must be honoured");
+        // A garbage profile degrades to sRGB, never panics.
+        let mut garbage = px(0, 200, 0);
+        on.convert_rgba8(Some(&[0xAB; 300]), &mut garbage);
+        assert_eq!(garbage, untagged);
+        // A trailing partial pixel leaves the original bytes.
+        let mut odd = vec![10, 20, 30, 255, 1, 2];
+        on.convert_rgba8(None, &mut odd);
+        assert_eq!(&odd[4..], &[1, 2]);
     }
 }

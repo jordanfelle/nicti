@@ -97,6 +97,7 @@ impl ColorManagement {
                 k
             }
         };
+        self.apply_bpc_to_source(&kind);
         Ok(DisplayTransform {
             proof: self.soft_proof.then_some(self.proof_space),
             kind,
@@ -104,8 +105,31 @@ impl ColorManagement {
     }
 
     /// The baked LUT depends on `black_point`: drop it so the next build rebakes, not just re-pushes.
+    /// That build also decides whether the JPEG previews compensate (see
+    /// [`Self::apply_bpc_to_source`]).
     fn invalidate_bake(&mut self) {
         self.display_kind = None;
+    }
+
+    /// Makes the JPEG preview converter (thumbnails, T0/T2 previews) compensate exactly when the
+    /// monitor transform does (#624): a LUT-based monitor profile whose black is lifted, with the
+    /// Color-menu option on. It reuses the LUT `build_transform` just baked (no second bake) and
+    /// bumps the preview generation only when compensation switches on or off, so toggling the
+    /// option on a monitor it cannot affect (a built-in space, a matrix/TRC profile, a true-black
+    /// LUT) reloads nothing.
+    fn apply_bpc_to_source(&mut self, kind: &DisplayKind) {
+        let lut = match (&self.display, kind) {
+            (DisplayProfile::Icc(p), DisplayKind::Lut(lut))
+                if self.black_point && nicti_calico::transform::has_lifted_black(p) =>
+            {
+                Some(Arc::new(lut.clone()))
+            }
+            _ => None,
+        };
+        if lut.is_some() != self.source.bpc_active() {
+            self.source = Arc::new(SourceTransforms::from_bpc_lut(&self.display, lut));
+            self.generation += 1;
+        }
     }
 
     /// The gamut overlay only means something while proofing.
@@ -290,6 +314,80 @@ mod tests {
         assert!(cm.display_kind.is_none(), "a toggle must rebake");
     }
 
+    /// An sRGB-primaries monitor whose device black shows `floor` linear light.
+    fn lifted_black_monitor(floor: f64) -> nicti_calico::transform::ColorProfile {
+        use nicti_calico::transform::{ColorProfile, ToneReprCurve};
+        let table = || {
+            ToneReprCurve::Lut(
+                (0..1024)
+                    .map(|i| {
+                        let e = f64::from(i) / 1023.0;
+                        let lin = if e <= 0.04045 {
+                            e / 12.92
+                        } else {
+                            ((e + 0.055) / 1.055).powf(2.4)
+                        };
+                        ((floor + lin * (1.0 - floor)) * 65535.0).round() as u16
+                    })
+                    .collect(),
+            )
+        };
+        let mut p = ColorProfile::new_srgb();
+        p.red_trc = Some(table());
+        p.green_trc = Some(table());
+        p.blue_trc = Some(table());
+        p
+    }
+
+    #[test]
+    fn previews_compensate_only_where_the_monitor_transform_does_and_reload_only_on_a_real_change()
+    {
+        use nicti_calico::icc::color_profile;
+        // A built-in space, and a monitor profile that is one: the flag changes nothing, so a
+        // toggle must not purge the thumbnails.
+        let mut cm = ColorManagement::new();
+        cm.adopt_profile(DisplayProfile::Icc(Arc::new(color_profile(
+            OutputSpace::AdobeRgb,
+        ))));
+        cm.build_transform().unwrap();
+        let (source, generation) = (cm.source_transforms(), cm.generation());
+        for on in [false, true, false] {
+            cm.black_point = on;
+            cm.invalidate_bake();
+            cm.build_transform().unwrap();
+        }
+        assert_eq!(cm.generation(), generation);
+        assert!(Arc::ptr_eq(&source, &cm.source_transforms()));
+        assert!(!cm.source_transforms().bpc_active());
+
+        // A LUT monitor with a lifted black (the baked kind is injected: a synthetic profile would
+        // otherwise be evaluated analytically): compensation switches on with the option, and
+        // only then do the cached previews reload.
+        let monitor = lifted_black_monitor(0.02);
+        let lut = DisplayTransform::with_lut_bpc(&monitor, None, true)
+            .unwrap()
+            .kind;
+        let mut cm = ColorManagement::new();
+        cm.adopt_profile(DisplayProfile::Icc(Arc::new(monitor)));
+        let generation = cm.generation();
+        cm.black_point = true;
+        cm.display_kind = Some(lut);
+        cm.build_transform().unwrap();
+        assert!(cm.source_transforms().bpc_active());
+        assert_eq!(cm.generation(), generation + 1);
+        // Building again changes nothing.
+        let (source, generation) = (cm.source_transforms(), cm.generation());
+        cm.build_transform().unwrap();
+        assert_eq!(cm.generation(), generation);
+        assert!(Arc::ptr_eq(&source, &cm.source_transforms()));
+        // The option off: the bake is dropped, rebuilt uncompensated (not a LUT here), and the
+        // previews go back to the plain converter.
+        cm.black_point = false;
+        cm.invalidate_bake();
+        cm.build_transform().unwrap();
+        assert!(!cm.source_transforms().bpc_active());
+        assert_eq!(cm.generation(), generation + 1);
+    }
     #[test]
     fn default_is_a_direct_srgb_transform() {
         let mut cm = ColorManagement::new();
