@@ -114,6 +114,8 @@ pub struct PeltApp {
     export: ExportUi,
     /// Copy/paste, sync and presets for develop settings (#52).
     knead: KneadUi,
+    /// The Ctrl+K command palette (#719).
+    palette: crate::palette::Palette,
     export_registry: Arc<ExporterRegistry>,
     /// A save of Develop's edits that failed, and the document it failed for: the autosave doesn't
     /// retry the same document every frame, and the message shows in the top bar.
@@ -525,6 +527,7 @@ impl PeltApp {
             gpu,
             export,
             knead,
+            palette: Default::default(),
             export_registry: Arc::new(builtin_registry()),
             edit_save_failed: None,
             render_due: eyeshine::RenderDebounce::default(),
@@ -1393,6 +1396,9 @@ impl eframe::App for PeltApp {
         let destructive_ui_open = self.destructive_ui_open();
         crate::widgets::scrub_injected(ui.ctx(), destructive_ui_open);
         crate::widgets::set_destructive_ui_open(ui.ctx(), destructive_ui_open);
+        // The palette takes its keys (arrows, Enter, Escape) before anything else reads the frame's
+        // input, so Escape closing it does not also drop the heal tool.
+        self.palette.consume_keys(ui.ctx());
         // A section toggled last frame: remember it across restarts. Best effort; the layout is
         // not worth a notice if the disk write fails.
         if let Some(states) = crate::fur::take_changed_section_states(ui.ctx()) {
@@ -1419,6 +1425,18 @@ impl eframe::App for PeltApp {
             // Progress text; nothing else repaints an otherwise idle window.
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        // Ctrl+K opens (and closes) the command palette; it works from the palette's own text field
+        // too, so it is not held back by the keyboard-focus check below.
+        if (self.palette.is_open() || !ui.ctx().egui_wants_keyboard_input())
+            && ui.ctx().input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::COMMAND,
+                    egui::Key::K,
+                ))
+            })
+        {
+            self.palette.toggle();
         }
         if !ui.ctx().egui_wants_keyboard_input()
             && ui.ctx().input_mut(|i| {
@@ -1785,6 +1803,7 @@ impl eframe::App for PeltApp {
         self.show_delete_modal(ui.ctx());
         self.show_export_dialog(ui.ctx());
         self.show_knead_modal(ui.ctx());
+        self.show_palette(ui.ctx());
     }
 }
 
@@ -2921,6 +2940,28 @@ impl PeltApp {
     }
 
     /// Draws the checklist prompt; a confirmed sync runs here.
+    /// The command palette overlay (#719): drawn over everything, and its chosen action runs
+    /// through the command table with the app as the host, like an agent's request would.
+    fn show_palette(&mut self, ctx: &egui::Context) {
+        if !self.palette.is_open() {
+            return;
+        }
+        // The overlay reads the app (each row's availability) while it is itself part of the app.
+        let mut palette = std::mem::take(&mut self.palette);
+        let outcome = palette.show(ctx, &*self);
+        if let crate::palette::Outcome::Run(i) = outcome {
+            if let Some(entry) = palette.entry(i) {
+                match crate::palette::run(self, &entry) {
+                    Ok(_) => palette.close(),
+                    Err(e) => palette.fail(e),
+                }
+                // The command ran after the panels were drawn: show its effect now.
+                ctx.request_repaint();
+            }
+        }
+        self.palette = palette;
+    }
+
     fn show_knead_modal(&mut self, ctx: &egui::Context) {
         if let Some(command) = self.knead.show_modal(ctx) {
             self.run_knead_command(command);
