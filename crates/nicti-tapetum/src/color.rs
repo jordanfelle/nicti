@@ -58,7 +58,10 @@ fn mat3_diag(d: [f32; 3]) -> Mat3 {
 /// inverts a fixed constant or a matrix [`usable_cam_xyz`] has already vetted, so the fallback is
 /// never reached in practice; it exists so a bad file can never abort the app (#756).
 pub(crate) fn mat3_invert(m: &Mat3) -> Mat3 {
-    mat3_try_invert(m).unwrap_or_else(mat3_identity)
+    let inverse = mat3_try_invert(m);
+    // Loud in dev and tests (a typo'd constant must not render silently wrong), total in release.
+    debug_assert!(inverse.is_some(), "singular matrix passed to mat3_invert");
+    inverse.unwrap_or_else(mat3_identity)
 }
 
 /// Cramer's-rule 3x3 inverse; `None` when the determinant is ~0 or any entry is non-finite.
@@ -1180,10 +1183,19 @@ mod tests {
     #[test]
     fn a_singular_or_non_finite_matrix_inverts_to_identity_instead_of_panicking() {
         let zero = [[0.0f32; 3]; 3];
-        assert_eq!(mat3_invert(&zero), mat3_identity());
+        assert_eq!(mat3_try_invert(&zero), None);
         let mut nan = mat3_identity();
         nan[1][1] = f32::NAN;
-        assert_eq!(mat3_invert(&nan), mat3_identity());
+        assert_eq!(mat3_try_invert(&nan), None);
+        // Rank-deficient but non-zero (two equal rows).
+        assert_eq!(
+            mat3_try_invert(&[[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [0.0, 1.0, 0.0]]),
+            None
+        );
+        // Release builds fall back to identity rather than aborting.
+        if !cfg!(debug_assertions) {
+            assert_eq!(mat3_invert(&zero), mat3_identity());
+        }
     }
 
     #[test]
@@ -1222,6 +1234,31 @@ mod tests {
             wb_gains_with_params([2.0, 1.0, 0.0, 1.0], &cam_xyz, &p),
             [2.0, 1.0, 1.0]
         );
+    }
+
+    #[test]
+    fn wb_gains_survive_a_degenerate_cam_xyz_on_the_manual_temperature_path() {
+        // spine.rs calls wb_gains_with_params directly with the frame's raw cam_xyz.
+        let p = WbParams {
+            temp_k: Some(5500.0),
+            tint: 0.0,
+        };
+        let good = wb_gains_with_params([1.0; 4], &SRGB_FALLBACK_CAM_XYZ, &p);
+        assert_eq!(wb_gains_with_params([1.0; 4], &[0.0; 12], &p), good);
+        let mut bad = SRGB_FALLBACK_CAM_XYZ;
+        bad[4] = f32::NAN;
+        assert_eq!(wb_gains_with_params([1.0; 4], &bad, &p), good);
+        assert!(!cam_xyz_is_usable(&bad));
+    }
+
+    #[test]
+    fn a_non_finite_or_negative_as_shot_multiplier_is_no_white_balance() {
+        let cam_xyz = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let p = WbParams::default();
+        for mul in [f32::NAN, f32::INFINITY, -2.0] {
+            let g = wb_gains_with_params([mul, 1.0, mul, 1.0], &cam_xyz, &p);
+            assert_eq!(g, [1.0, 1.0, 1.0], "mul={mul}");
+        }
     }
 
     #[test]
