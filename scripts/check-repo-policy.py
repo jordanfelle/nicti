@@ -6,6 +6,8 @@
    family) may only be depended on by nicti-pelt and the root `nicti` binary.
 2. Assets: every tracked font/icon/image/model file outside spikes/ and test snapshots needs a
    `path` row in assets/ATTRIBUTION.md, and every row must point at a tracked file.
+3. Notices (#695): lensfun, rawler or the vendored LibRaw (nicti-cornea) anywhere in the shipped
+   `nicti` package's dependency closure needs its name in assets/notices/THIRD-PARTY-NOTICES.txt.
 
 Run from anywhere: python3 scripts/check-repo-policy.py
 """
@@ -101,12 +103,57 @@ def check_assets():
     return errs
 
 
+# Shipped components whose licences require a notice (#695). A Cargo crate in the dependency closure
+# of the shipped `nicti` package (read from Cargo.lock, so it is offline and transitive) must be
+# named, as a whole word, in the notices file. `nicti-cornea` statically compiles the vendored
+# LibRaw. Cargo.lock also lists dev-dependencies, so this is conservative: a dev-only dependency on
+# one of these would ask for a notice it does not need.
+NOTICE_CRATES = {"lensfun": "LensFun", "rawler": "rawler", "nicti-cornea": "LibRaw"}
+NOTICES = os.path.join("assets", "notices", "THIRD-PARTY-NOTICES.txt")
+SHIPPED_ROOT = "nicti"
+
+
+def lock_closure(lock_text, root):
+    """Names of every package reachable from `root` in a Cargo.lock."""
+    deps = {}
+    for block in lock_text.split("[[package]]")[1:]:
+        m = re.search(r'^name = "([^"]+)"', block, re.M)
+        if not m:
+            continue
+        d = re.search(r"^dependencies = \[(.*?)^\]", block, re.M | re.S)
+        names = re.findall(r'"([^" ]+)(?: [^"]*)?"', d.group(1)) if d else []
+        deps.setdefault(m.group(1), set()).update(names)
+    seen, todo = set(), [root]
+    while todo:
+        n = todo.pop()
+        if n not in seen:
+            seen.add(n)
+            todo.extend(deps.get(n, ()))
+    return seen
+
+
+def check_notices():
+    """Every shipped component that needs a notice is named in assets/notices/THIRD-PARTY-NOTICES.txt."""
+    path = os.path.join(ROOT, NOTICES)
+    if not os.path.exists(path):
+        return [f"{NOTICES} is missing"]
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    with open(os.path.join(ROOT, "Cargo.lock"), encoding="utf-8") as fh:
+        closure = lock_closure(fh.read(), SHIPPED_ROOT)
+    errs = []
+    for crate, needle in NOTICE_CRATES.items():
+        if crate in closure and not re.search(rf"\b{re.escape(needle)}\b", text):
+            errs.append(f"{SHIPPED_ROOT} ships {crate}; {NOTICES} must mention {needle}")
+    return errs
+
+
 def main():
-    errs = check_layers() + check_assets()
+    errs = check_layers() + check_assets() + check_notices()
     for e in errs:
         print(f"error: {e}", file=sys.stderr)
     if not errs:
-        print("repo policy: layering and asset attribution OK")
+        print("repo policy: layering, asset attribution and third-party notices OK")
     return 1 if errs else 0
 
 

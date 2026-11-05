@@ -49,3 +49,81 @@ Commons Attribution-ShareAlike 3.0 Unported licence:
 Nicti uses the database unmodified and only reads it. Per-lens corrections that
 Nicti derives from it are computed at run time and are not stored or
 redistributed as a database.
+
+
+RAW DECODING: LibRaw  --  LGPL-2.1 NOTICE
+-----------------------------------------
+
+Nicti decodes camera raw files with LibRaw (https://www.libraw.org/), statically
+linked into Nicti. The copy used is a fork of LibRaw that adds the Nikon
+High Efficiency (HE/HE*) decoder:
+
+  https://github.com/yogthos/LibRaw  (branch nikon-he-decoder, from
+  LibRaw pull request #826), included in the Nicti source tree as the git
+  submodule crates/nicti-cornea/vendor/LibRaw.
+
+LibRaw is offered under two licences at the licensee's choice: the GNU Lesser
+General Public License, version 2.1 (LGPL-2.1), or the Common Development and
+Distribution License 1.0 (CDDL-1.0). Nicti uses it under the LGPL-2.1. The full
+licence text is in LICENSE-LGPL-2.1.txt, installed beside this file.
+
+This is free software: you may redistribute it and/or modify it under the terms
+of that licence. It is distributed WITHOUT ANY WARRANTY, without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+Nicti is statically linked with LibRaw. The complete corresponding source of the
+combined program is the Nicti source at the URL above together with the LibRaw
+submodule it names; you may modify LibRaw there and rebuild Nicti from that source
+(with the Rust toolchain and a C++ compiler), and you may reverse engineer Nicti
+for debugging such modifications, as the LGPL permits.
+
+Copyright notices carried by the LibRaw code Nicti compiles:
+
+  Copyright (C) 2008-2025 LibRaw LLC (http://www.libraw.org, info@libraw.org)
+  Copyright (C) 2026      Dmitri Sotnikov (the Nikon HE/HE* decoder of the fork)
+  Copyright (C) 2016-2019 Alexey Danilchenko (Fujifilm and Canon CRX decoders)
+  Copyright (C) 2013      Anton Petrusevich (AAHD and DHT demosaic)
+  Copyright (C) 2010      Jacek Gozdz (DCB demosaic and FBDD denoise; licence below)
+
+LibRaw also derives code from dcraw.c, Copyright 1997-2018 by Dave Coffin (only the
+code that dcraw's author released without restriction; LibRaw does not use the
+restricted parts).
+
+The DCB demosaic and FBDD denoise are licensed under a 3-clause BSD licence, whose
+text follows:
+
+  Copyright (C) 2010,  Jacek Gozdz (cuniek@kft.umcs.lublin.pl)
+
+  This code is licensed under a (3-clause) BSD license as follows :
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following
+  conditions are met:
+
+  * Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+  * Redistributions in binary form must reproduce the above
+  copyright notice, this list of conditions and the following
+  disclaimer in the documentation and/or other materials provided
+  with the distribution.
+  * Neither the name of the author nor the names of its
+  contributors may be used to endorse or promote products
+  derived from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+  FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
+  THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+  INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE,
+  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+  ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+  OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+  OF SUCH DAMAGE.
+
+The LibRaw source tree also contains optional code for Foveon X3F files, the Adobe
+DNG SDK and RawSpeed under their own licences (see its COPYRIGHT file). Nicti's
+build does not enable or compile any of it.
