@@ -348,6 +348,76 @@ pub fn rgba8_to_linear_prophoto16(icc: &[u8], rgba: &[u8]) -> Option<Vec<u16>> {
     Some(out)
 }
 
+/// Converts 8-bit **CMYK ink** samples (`C, M, Y, K` interleaved; 255 = full ink, 0 = none, i.e.
+/// the ICC convention, not Adobe's stored-inverted one) through the CMYK profile `icc` to
+/// **16-bit linear ProPhoto (D50) RGB**, interleaved (#681).
+///
+/// `None` when the caller should fall back to its profile-less conversion: the profile is not a
+/// CMYK one, has no usable table, or the transform cannot be built or panics inside `moxcms` (it
+/// parses untrusted profiles).
+pub fn cmyk8_to_linear_prophoto16(icc: &[u8], cmyk: &[u8]) -> Option<Vec<u16>> {
+    let exec = std::panic::catch_unwind(|| {
+        let src = ColorProfile::new_from_slice(icc)
+            .ok()
+            .filter(|p| p.color_space == DataColorSpace::Cmyk)?;
+        let options = TransformOptions {
+            rendering_intent: RenderingIntent::RelativeColorimetric,
+            allow_use_cicp_transfer: false,
+            ..TransformOptions::default()
+        };
+        src.create_transform_16bit(
+            Layout::Rgba,
+            &linear_working_profile(),
+            Layout::Rgb,
+            options,
+        )
+        .ok()
+    })
+    .ok()
+    .flatten()?;
+    let px = cmyk.len() / 4;
+    let mut out = vec![0u16; px * 3];
+    let mut wide = vec![0u16; WIDE_CHUNK_PIXELS * 4];
+    for (src, dst) in cmyk
+        .chunks(WIDE_CHUNK_PIXELS * 4)
+        .zip(out.chunks_mut(WIDE_CHUNK_PIXELS * 3))
+    {
+        let n = src.len() / 4;
+        for (w, &b) in wide.iter_mut().zip(&src[..n * 4]) {
+            *w = u16::from(b) * 257;
+        }
+        exec.transform(&wide[..n * 4], &mut dst[..n * 3]).ok()?;
+    }
+    Some(out)
+}
+
+/// [`cmyk8_to_linear_prophoto16`]'s 8-bit sibling for the preview tiers: CMYK ink through the
+/// profile `icc` to sRGB-encoded RGB8, interleaved. `None` under the same conditions.
+pub fn cmyk8_to_srgb8(icc: &[u8], cmyk: &[u8]) -> Option<Vec<u8>> {
+    let exec = std::panic::catch_unwind(|| {
+        let src = ColorProfile::new_from_slice(icc)
+            .ok()
+            .filter(|p| p.color_space == DataColorSpace::Cmyk)?;
+        let options = TransformOptions {
+            rendering_intent: RenderingIntent::RelativeColorimetric,
+            allow_use_cicp_transfer: false,
+            ..TransformOptions::default()
+        };
+        src.create_transform_8bit(
+            Layout::Rgba,
+            &ColorProfile::new_srgb(),
+            Layout::Rgb,
+            options,
+        )
+        .ok()
+    })
+    .ok()
+    .flatten()?;
+    let mut out = vec![0u8; cmyk.len() / 4 * 3];
+    exec.transform(&cmyk[..cmyk.len() / 4 * 4], &mut out).ok()?;
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
