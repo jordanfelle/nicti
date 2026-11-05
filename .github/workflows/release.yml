@@ -190,7 +190,16 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
-            choco install nsis -y
+            # The Chocolatey community feed 503s now and then (it failed a main run once with the
+            # misleading "makensis is not recognized" two steps later): retry, and fail here, with
+            # the real cause, if it never comes back.
+            $installed = $false
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              choco install nsis -y
+              if ($LASTEXITCODE -eq 0) { $installed = $true; break }
+              if ($attempt -lt 5) { Start-Sleep -Seconds (15 * $attempt) }
+            }
+            if (-not $installed) { throw "choco install nsis failed after 5 attempts" }
             # A GitHub Actions job's process PATH isn't refreshed mid-job after an installer
             # runs -- only steps that come after this one pick up an addition to GITHUB_PATH.
             Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files (x86)\NSIS'
