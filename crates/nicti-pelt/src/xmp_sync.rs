@@ -59,10 +59,18 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Test hook (#706): the asset id whose lookup panics, to prove the writer survives a panic.
+#[cfg(test)]
+const PANIC_ASSET_ID: i64 = 987_654_321;
+
 /// An asset's RAW path as the catalog resolves it, and whether the file is actually there. The
 /// path is still meaningful when it isn't (an offline volume): dirtiness is recorded against it
 /// without ever creating a sidecar in a directory that may not exist.
 fn raw_path_for(store: &dyn CatalogStore, asset_id: i64) -> Option<(PathBuf, bool)> {
+    #[cfg(test)]
+    if asset_id == PANIC_ASSET_ID {
+        panic!("simulated panic while resolving a sidecar path");
+    }
     let asset = store.get_asset(asset_id).ok()??;
     let root = store.get_root_path(asset.root_id).ok()??;
     let raw = Path::new(&root).join(&asset.rel_path);
@@ -92,6 +100,12 @@ pub struct XmpWriter {
     store: Store,
     autowrite: Arc<AtomicBool>,
     status: Arc<Mutex<Status>>,
+}
+
+/// The status lock, tolerating poisoning: it only holds a message, and a panicking writer is
+/// exactly when that message must stay readable (#706).
+fn lock_status(status: &Mutex<Status>) -> std::sync::MutexGuard<'_, Status> {
+    status.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl XmpWriter {
@@ -126,24 +140,49 @@ impl XmpWriter {
                         if is_flush && !flushing {
                             continue;
                         }
-                        let Some((raw, exists)) = raw_path_for(&*writer_store, id) else {
-                            continue;
-                        };
-                        // An offline RAW can't get a sidecar, but the edit must still be recorded
-                        // as newer so a later rescan doesn't let a changed sidecar win over it.
-                        let result = if flag.load(Ordering::Relaxed) && exists {
-                            scent_sync::write_sidecar(&*writer_store, id, &raw, now_ms())
-                                .map(|_| ())
-                        } else {
-                            scent_sync::mark_catalog_dirty(&*writer_store, id, &raw, now_ms())
-                        };
-                        if let Err(e) = result {
-                            // A failed write (sidecar locked by LRC, unparseable at that moment)
-                            // must not look like "nothing changed": record that the catalog is
-                            // now newer, so a later rescan doesn't let the file silently win.
-                            let _ =
-                                scent_sync::mark_catalog_dirty(&*writer_store, id, &raw, now_ms());
-                            st.lock().unwrap().last_error = Some(e.to_string());
+                        // A panic writing one photo's sidecar (#706) must not end the writer:
+                        // every later marker change would silently stop reaching disk. Report
+                        // it where the user already looks and carry on with the next photo.
+                        let one = nicti_pounce::guard::catch_panic(|| {
+                            let Some((raw, exists)) = raw_path_for(&*writer_store, id) else {
+                                return;
+                            };
+                            // An offline RAW can't get a sidecar, but the edit must still be recorded
+                            // as newer so a later rescan doesn't let a changed sidecar win over it.
+                            let result = if flag.load(Ordering::Relaxed) && exists {
+                                scent_sync::write_sidecar(&*writer_store, id, &raw, now_ms())
+                                    .map(|_| ())
+                            } else {
+                                scent_sync::mark_catalog_dirty(&*writer_store, id, &raw, now_ms())
+                            };
+                            if let Err(e) = result {
+                                // A failed write (sidecar locked by LRC, unparseable at that moment)
+                                // must not look like "nothing changed": record that the catalog is
+                                // now newer, so a later rescan doesn't let the file silently win.
+                                let _ = scent_sync::mark_catalog_dirty(
+                                    &*writer_store,
+                                    id,
+                                    &raw,
+                                    now_ms(),
+                                );
+                                lock_status(&st).last_error = Some(e.to_string());
+                            }
+                        });
+                        if let Err(panic) = one {
+                            // Same rule as a failed write: the catalog is now newer than the
+                            // sidecar, so record it or a later rescan lets the stale file win.
+                            let _ = nicti_pounce::guard::catch_panic(|| {
+                                if let Some((raw, _)) = raw_path_for(&*writer_store, id) {
+                                    let _ = scent_sync::mark_catalog_dirty(
+                                        &*writer_store,
+                                        id,
+                                        &raw,
+                                        now_ms(),
+                                    );
+                                }
+                            });
+                            lock_status(&st).last_error =
+                                Some(format!("The sidecar writer hit an internal error: {panic}"));
                         }
                     }
                 }
@@ -174,25 +213,33 @@ impl XmpWriter {
         let was = self.autowrite.swap(on, Ordering::Relaxed);
         if on && !was {
             let (store, tx, status) = (self.store.clone(), self.tx.clone(), self.status.clone());
-            std::thread::spawn(move || match store.sidecar_dirty_assets() {
-                Ok(ids) if !ids.is_empty() => {
-                    let _ = tx.send(Batch { ids, flush: true });
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    status.lock().unwrap().last_error =
-                        Some(format!("Couldn't list assets awaiting sidecar write: {e}"));
+            std::thread::spawn(move || {
+                let listed = nicti_pounce::guard::catch_panic(|| store.sidecar_dirty_assets());
+                match listed {
+                    Ok(Ok(ids)) if !ids.is_empty() => {
+                        let _ = tx.send(Batch { ids, flush: true });
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        lock_status(&status).last_error =
+                            Some(format!("Couldn't list assets awaiting sidecar write: {e}"));
+                    }
+                    Err(panic) => {
+                        lock_status(&status).last_error = Some(format!(
+                            "Couldn't list assets awaiting sidecar write: internal error: {panic}"
+                        ));
+                    }
                 }
             });
         }
     }
 
     fn last_error(&self) -> Option<String> {
-        self.status.lock().unwrap().last_error.clone()
+        lock_status(&self.status).last_error.clone()
     }
 
     fn clear_error(&self) {
-        self.status.lock().unwrap().last_error = None;
+        lock_status(&self.status).last_error = None;
     }
 }
 
@@ -464,6 +511,28 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         cond()
+    }
+
+    #[test]
+    fn a_panic_writing_one_sidecar_is_reported_and_the_writer_keeps_writing() {
+        let (_dir, store, id, raw) = fixture();
+        let writer = XmpWriter::spawn(store.clone(), true);
+        writer.queue(vec![PANIC_ASSET_ID]);
+        assert!(
+            eventually(|| writer
+                .last_error()
+                .is_some_and(|e| e.contains("internal error") && e.contains("simulated panic"))),
+            "the panic was never reported: {:?}",
+            writer.last_error()
+        );
+        // The thread is still alive: a later photo still gets its sidecar.
+        let meta = XmpMeta::new(store.clone(), writer);
+        meta.set_meta(&[(id, rated(4))]).unwrap();
+        assert!(
+            eventually(|| std::fs::read_to_string(raw.with_extension("xmp"))
+                .is_ok_and(|t| t.contains("Rating"))),
+            "the writer died after the panic"
+        );
     }
 
     #[test]

@@ -451,6 +451,23 @@ fn authenticates(first: &str, token: &str, nonce: &str) -> Option<String> {
     .then(|| cnonce.to_owned())
 }
 
+/// [`serve_connection`] with a panic contained (#706): the peer gets one `error` line instead of
+/// a silent close, and the connection's slots are released by their `Drop`s as the unwind
+/// passes. The accept loop is unaffected either way. The panic text is deliberately not sent (the
+/// peer may not have authenticated yet); and since a request may already be queued, the line says
+/// the command might still have run, so a client does not blindly retry a non-idempotent one.
+pub fn serve_guarded(stream: TcpStream, shared: &Shared) {
+    let reply = stream.try_clone();
+    if nicti_pounce::guard::catch_panic(|| serve_connection(stream, shared)).is_err() {
+        if let Ok(mut reply) = reply {
+            let _ = send_line(
+                &mut reply,
+                &json!({"ok": false, "error": "internal error in the control server; a submitted command may still have run"}),
+            );
+        }
+    }
+}
+
 /// Runs one connection to completion.
 pub fn serve_connection(stream: TcpStream, shared: &Shared) {
     let _ = stream.set_nodelay(true);
@@ -645,7 +662,7 @@ fn start_with(
                 let _ = thread::Builder::new()
                     .name("nicti-control-conn".into())
                     .stack_size(256 * 1024)
-                    .spawn(move || serve_connection(stream, &shared));
+                    .spawn(move || serve_guarded(stream, &shared));
             }
         })
         .map_err(|e| format!("can't start the control thread: {e}"))?;
@@ -931,6 +948,10 @@ mod tests {
 
     impl Rig {
         fn new() -> Self {
+            Self::with_wake(Arc::new(|| {}))
+        }
+
+        fn with_wake(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
             let dir = tempfile_dir("rig");
             #[cfg(unix)]
             {
@@ -946,7 +967,7 @@ mod tests {
                 },
                 &dir,
                 &queue,
-                Arc::new(|| {}),
+                wake,
             )
             .unwrap();
             let v: Value =
@@ -1063,6 +1084,31 @@ mod tests {
             ask(&mut s, &mut r, r#"{"id":2,"method":"ui.inspect"}"#)["ok"],
             true
         );
+    }
+
+    #[test]
+    fn a_panic_serving_one_connection_is_reported_to_that_client_and_the_server_keeps_serving() {
+        // The wake hook runs on the connection thread once per submitted request: make the first
+        // one panic, the way a bug anywhere in request handling would.
+        let first = Arc::new(AtomicBool::new(true));
+        let rig = Rig::with_wake(Arc::new(move || {
+            if first.swap(false, Ordering::SeqCst) {
+                panic!("simulated bug in request handling");
+            }
+        }));
+        let (mut s, mut r) = rig.authed();
+        let out = ask(&mut s, &mut r, r#"{"id":1,"method":"ui.inspect"}"#);
+        assert_eq!(out["ok"], false);
+        let msg = out["error"].as_str().unwrap();
+        assert!(msg.contains("internal error"), "{msg}");
+        assert!(
+            !msg.contains("simulated bug"),
+            "the panic text must not reach the peer: {msg}"
+        );
+        // The accept loop and its connection slots survived: a fresh client works.
+        let (mut s2, mut r2) = rig.authed();
+        let out = ask(&mut s2, &mut r2, r#"{"id":2,"method":"ui.inspect"}"#);
+        assert_eq!(out["ok"], true);
     }
 
     #[test]

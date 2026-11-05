@@ -561,13 +561,7 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
 /// panicked is dropped by the caller (reported `Failed`, never stepped again), so nothing observes
 /// its half-updated state.
 fn guarded<T>(f: impl FnOnce() -> T) -> Result<T, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
-        payload
-            .downcast_ref::<&str>()
-            .map(|s| (*s).to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "non-string panic payload".to_string())
-    })
+    crate::guard::catch_panic(f)
 }
 
 /// The `on_change` callback is the UI's repaint hook: a panic in it must not kill a worker either.
