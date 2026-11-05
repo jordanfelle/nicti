@@ -10,7 +10,7 @@ nicti --control --control-export-dir ~/exports   # lets export.run write there
 nicti --control --control-allow-destructive      # also lets an agent confirm delete/Export dialogs
 ```
 
-The catalog is the first non-option argument; without one it is `nicti.catalog.sqlite` in the current directory if that exists, else `nicti.catalog.sqlite` in the per-user data directory (`%LOCALAPPDATA%\\nicti`, `$XDG_DATA_HOME/nicti` or `~/.local/share/nicti`). A flag is never taken as the catalog (#758).
+The catalog is the first non-option argument (or the one after `--`). Without one, the per-user catalog (`nicti.catalog.sqlite` in `%LOCALAPPDATA%\nicti`, `$XDG_DATA_HOME/nicti` or `~/.local/share/nicti`) is used if it exists, else one left in the current directory by an earlier build, else a new per-user one. A flag is never taken as the catalog (#758).
 
 The app writes `nicti-control-<pid>.json` (port, token, pid) to `$XDG_RUNTIME_DIR` (Windows:
 `%LOCALAPPDATA%\nicti`), mode `0600`, and removes it on exit. The token never crosses the socket:

@@ -28,26 +28,45 @@ pub(crate) fn resolve_path_from(
     if let Some(positional) = positional_arg(args) {
         return PathBuf::from(positional);
     }
+    // The per-user catalog wins once it exists, so the library never depends on the launch
+    // directory; a catalog an earlier build left in the cwd is adopted only until then.
+    let in_data = data_dir.map(|d| d.join(DEFAULT_CATALOG_FILENAME));
+    if let Some(p) = in_data.as_ref().filter(|p| p.is_file()) {
+        return p.clone();
+    }
     let legacy = cwd.join(DEFAULT_CATALOG_FILENAME);
     if legacy.is_file() {
         return legacy;
     }
-    match data_dir {
-        Some(dir) => {
+    match (data_dir, in_data) {
+        (Some(dir), Some(path)) => {
             // Best effort: `SqliteCatalog::open` reports a real failure in the launch window.
-            let _ = std::fs::create_dir_all(dir);
-            dir.join(DEFAULT_CATALOG_FILENAME)
+            create_private_dir(dir);
+            path
         }
-        None => PathBuf::from(DEFAULT_CATALOG_FILENAME),
+        _ => PathBuf::from(DEFAULT_CATALOG_FILENAME),
     }
 }
 
-/// The first argument that is not an option or an option's value. Options that take a value
-/// (`--control-export-dir X`) skip it; anything starting with `-` is an option.
+/// Creates `dir` (and parents), owner-only on Unix: it holds the catalog, with GPS metadata.
+fn create_private_dir(dir: &std::path::Path) {
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    let _ = b.create(dir);
+}
+
+/// The first argument that is not an option or an option's value. After a bare `--` the next
+/// argument is the catalog whatever it looks like (`nicti -- -x.sqlite`). Options that take a
+/// separate value skip it: keep this list in step with `ControlOptions::parse` in `control.rs`
+/// (the `=` forms need nothing, they are one argument).
 fn positional_arg(args: impl IntoIterator<Item = String>) -> Option<String> {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
-        if arg == "--control-export-dir" || arg == "--control-port" {
+        if arg == "--" {
+            return args.next();
+        } else if arg == "--control-export-dir" {
             args.next();
         } else if !arg.starts_with('-') {
             return Some(arg);
@@ -63,14 +82,16 @@ fn default_data_dir() -> Option<PathBuf> {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
     } else {
         std::env::var_os("XDG_DATA_HOME")
-            .filter(|v| !v.is_empty())
             .map(PathBuf::from)
+            // The XDG spec: a relative value is invalid and ignored.
+            .filter(|p| p.is_absolute())
             .or_else(|| {
                 std::env::var_os("HOME")
                     .filter(|v| !v.is_empty())
                     .map(|h| PathBuf::from(h).join(".local/share"))
             })
-    }?;
+    }
+    .filter(|p| p.is_absolute())?;
     Some(base.join("nicti"))
 }
 
@@ -129,6 +150,41 @@ mod tests {
             !data.exists(),
             "no data directory is made when the cwd one is used"
         );
+    }
+
+    #[test]
+    fn the_data_dir_catalog_beats_a_stray_one_in_the_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join(DEFAULT_CATALOG_FILENAME), b"").unwrap();
+        std::fs::write(dir.path().join(DEFAULT_CATALOG_FILENAME), b"").unwrap();
+        let got = resolve_path_from(args(&[]), dir.path(), Some(&data));
+        assert_eq!(got, data.join(DEFAULT_CATALOG_FILENAME));
+    }
+
+    #[test]
+    fn double_dash_makes_the_next_argument_the_catalog() {
+        let d = std::path::Path::new("/nonexistent");
+        assert_eq!(
+            resolve_path_from(args(&["--", "-x.sqlite"]), d, None),
+            PathBuf::from("-x.sqlite")
+        );
+        assert_eq!(
+            resolve_path_from(args(&["--control=9", "--control-export-dir=/e"]), d, None),
+            PathBuf::from(DEFAULT_CATALOG_FILENAME)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_data_dir_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("a/b");
+        resolve_path_from(args(&[]), dir.path(), Some(&data));
+        let mode = std::fs::metadata(&data).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[test]
