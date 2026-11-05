@@ -62,6 +62,16 @@ mod tests {
         assert!(THIRD_PARTY_NOTICES.contains("github.com/yogthos/LibRaw"));
         assert!(THIRD_PARTY_NOTICES.contains("crates/nicti-cornea/vendor/LibRaw"));
         assert!(THIRD_PARTY_NOTICES.contains("Dave Coffin"));
+        // The DCB demosaic is compiled in and its BSD-3 licence must be reproduced in full, as
+        // must the copyright holders of the other compiled LibRaw files.
+        assert!(THIRD_PARTY_NOTICES.contains("Redistributions in binary form must reproduce"));
+        assert!(THIRD_PARTY_NOTICES.contains("THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS"));
+        assert!(THIRD_PARTY_NOTICES.contains("Jacek Gozdz"));
+        assert!(THIRD_PARTY_NOTICES.contains("Dmitri Sotnikov"));
+        assert!(THIRD_PARTY_NOTICES.contains("Alexey Danilchenko"));
+        assert!(THIRD_PARTY_NOTICES.contains("Anton Petrusevich"));
+        // Code that is in the LibRaw tree but not compiled (X3F, DNG SDK) is not claimed.
+        assert!(!THIRD_PARTY_NOTICES.contains("Roland Karlsson"));
         assert!(LGPL_2_1.contains("GNU LESSER GENERAL PUBLIC LICENSE"));
         assert!(LGPL_2_1.contains("Version 2.1, February 1999"));
     }
