@@ -139,7 +139,7 @@ fn resize_and_encode(
         .flatten()
         .filter(|p| p.get(16..20) == Some(b"RGB ".as_slice()));
     // CMYK/YCCK: converted through the file's CMYK profile (or the plain subtractive model), never
-    // by the RGB-only decoder, which would invert Adobe's ink values (#681).
+    // by the RGB-only decoder, which ignores the CMYK profile (#681).
     let mut decoded = match nicti_cornea::jpeg::four_component_to_srgb8(jpeg) {
         Some(converted) => {
             let (cw, ch, rgb) = converted?;

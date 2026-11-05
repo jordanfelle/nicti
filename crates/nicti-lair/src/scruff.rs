@@ -331,7 +331,7 @@ fn jpeg_preview(path: &Path) -> Option<(Preview, u32, u32)> {
     // Verbatim only while the file itself stays within the RAW T0 byte cap (an APPn/ICC blob can
     // make a tiny image huge); otherwise it is re-encoded below like a large one.
     // A CMYK/YCCK file is never stored verbatim: the grid decodes T0 with an RGB-only decoder that
-    // would show its (Adobe-inverted) ink values wrongly, so it is converted below (#681).
+    // would ignore its CMYK profile, so it is converted below (#681).
     let cmyk = nicti_cornea::jpeg::four_component_to_srgb8(&bytes);
     if cmyk.is_none() && w.max(h) <= T0_LONG_EDGE && bytes.len() as u64 <= MAX_T0_PREVIEW_BYTES {
         return Some((

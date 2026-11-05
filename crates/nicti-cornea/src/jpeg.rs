@@ -76,6 +76,8 @@ struct FourComponent {
     adobe: bool,
     /// The APP14 colour transform: 0 = CMYK, 2 = YCCK. Without a marker the file is plain CMYK.
     transform: u8,
+    /// Every component has the same sampling factors (4:4:4:4).
+    uniform: bool,
 }
 
 impl FourComponent {
@@ -86,7 +88,7 @@ impl FourComponent {
 
 /// Reads the headers up to the start of scan: `Some` for a 4-component JPEG.
 fn four_component(data: &[u8]) -> Option<FourComponent> {
-    let (mut adobe, mut transform, mut four) = (false, 0u8, false);
+    let (mut adobe, mut transform, mut four, mut uniform) = (false, 0u8, false, true);
     let mut i = 2;
     while i + 4 <= data.len() {
         if data[i] != 0xFF {
@@ -116,12 +118,21 @@ fn four_component(data: &[u8]) -> Option<FourComponent> {
             0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
                 // precision(1) height(2) width(2) components(1)
                 four = body.get(5) == Some(&4);
+                // Then `id, sampling (h<<4|v), quant table` per component.
+                let factors: Vec<u8> = (0..4)
+                    .filter_map(|i| body.get(7 + 3 * i).copied())
+                    .collect();
+                uniform = factors.len() == 4 && factors.iter().all(|f| *f == factors[0]);
             }
             _ => {}
         }
         i += 2 + len;
     }
-    four.then_some(FourComponent { adobe, transform })
+    four.then_some(FourComponent {
+        adobe,
+        transform,
+        uniform,
+    })
 }
 
 /// The raw samples of a CMYK/YCCK JPEG, as ink coverage (#681).
@@ -143,12 +154,23 @@ fn decode_cmyk_samples(data: &[u8], kind: FourComponent) -> Result<CmykSamples, 
     use zune_jpeg::zune_core::colorspace::ColorSpace;
     use zune_jpeg::zune_core::options::DecoderOptions;
 
+    // zune's raw plain-CMYK output is wrong when the planes are sampled differently (checked
+    // against libjpeg-turbo's `djpeg`; YCCK is fine), and wrong colours would be silent: refuse.
+    if !kind.ycck() && !kind.uniform {
+        return Err(
+            "CMYK JPEGs with mixed component subsampling are not supported yet".to_string(),
+        );
+    }
     let raw_space = if kind.ycck() {
         ColorSpace::YCCK
     } else {
         ColorSpace::CMYK
     };
-    let options = DecoderOptions::default().jpeg_set_out_colorspace(raw_space);
+    // `image` lifts zune's default 16384 px cap; `check_dimensions` below is the real bound.
+    let options = DecoderOptions::default()
+        .set_max_width(usize::MAX)
+        .set_max_height(usize::MAX)
+        .jpeg_set_out_colorspace(raw_space);
     let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(data), options);
     decoder.decode_headers().map_err(|e| e.to_string())?;
     let info = decoder
@@ -185,8 +207,10 @@ fn decode_cmyk_samples(data: &[u8], kind: FourComponent) -> Result<CmykSamples, 
             px[2] = 255 - b.round().clamp(0.0, 255.0) as u8;
         }
     }
-    if kind.adobe {
-        // Adobe stores 255 = no ink.
+    {
+        // Every 4-component JPEG is stored inverted (255 = no ink): libjpeg, PIL and zune/`image`
+        // all read it that way whether or not the Adobe marker survived, so a file that lost its
+        // APP14 must not come out as a photographic negative.
         for v in &mut samples {
             *v = 255 - *v;
         }
@@ -206,7 +230,7 @@ fn naive_cmyk_to_rgb8(ink: &[u8]) -> Vec<u8> {
     for px in ink.as_chunks::<4>().0 {
         let k = 255 - u32::from(px[3]);
         for &c in &px[..3] {
-            rgb.push(((255 - u32::from(c)) * k + 127).div_ceil(255).min(255) as u8);
+            rgb.push((((255 - u32::from(c)) * k + 127) / 255) as u8);
         }
     }
     rgb
@@ -338,8 +362,10 @@ impl RawDecoder for JpegDecoder {
         let (dw, dh) = decoder.dimensions();
         check_dimensions(dw, dh).map_err(fail)?;
         // CMYK/YCCK: raw samples through the embedded CMYK profile (#681), never `image`'s
-        // conversion, which inverts Adobe's ink values.
+        // conversion, which ignores the embedded CMYK profile (#681).
         if let Some(kind) = four_component(&data) {
+            // `image`'s decoder holds a second copy of the file; release it before the big buffers.
+            drop(decoder);
             let cmyk = decode_cmyk_samples(&data, kind).map_err(fail)?;
             let profile = icc.as_deref().or(cmyk.icc.as_deref());
             let (pixels, matrix) = match profile.and_then(|p| {
@@ -729,6 +755,17 @@ mod tests {
     /// stored samples with no marker, which a reader must take as direct coverage (so the pixel
     /// then means `255 - ink`). `icc` is embedded as APP2 when given.
     fn cmyk_jpeg_with(adobe: bool, ycck: bool, ink: [u8; 4], icc: Option<&[u8]>) -> Vec<u8> {
+        cmyk_jpeg_sized(adobe, ycck, ink, icc, (8, 8), 100)
+    }
+
+    fn cmyk_jpeg_sized(
+        adobe: bool,
+        ycck: bool,
+        ink: [u8; 4],
+        icc: Option<&[u8]>,
+        (w, h): (u16, u16),
+        quality: u8,
+    ) -> Vec<u8> {
         // `ColorType::Cmyk` writes the Adobe convention itself (marker + inverted samples), but
         // `ColorType::Ycck` takes the four planes *already* in YCCK and writes them untouched, so
         // build them as libjpeg does: stored CMY = 255 - ink, then YCbCr of (255 - stored) = ink,
@@ -740,9 +777,13 @@ mod tests {
             let cr = 0.5 * c - 0.418_688 * m - 0.081_312 * y + 128.0;
             let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
             let plane = [q(yy), q(cb), q(cr), 255 - q(k)];
-            (0..64).flat_map(|_| plane).collect()
+            (0..usize::from(w) * usize::from(h))
+                .flat_map(|_| plane)
+                .collect()
         } else {
-            (0..64).flat_map(|_| ink).collect()
+            (0..usize::from(w) * usize::from(h))
+                .flat_map(|_| ink)
+                .collect()
         };
         let mut bytes = Vec::new();
         let ct = if ycck {
@@ -750,11 +791,11 @@ mod tests {
         } else {
             jpeg_encoder::ColorType::Cmyk
         };
-        let mut enc = jpeg_encoder::Encoder::new(&mut bytes, 100);
+        let mut enc = jpeg_encoder::Encoder::new(&mut bytes, quality);
         if let Some(icc) = icc {
             enc.add_icc_profile(icc).unwrap();
         }
-        enc.encode(&px, 8, 8, ct).unwrap();
+        enc.encode(&px, w, h, ct).unwrap();
         assert!(
             four_component(&bytes).is_some_and(|k| k.adobe),
             "the encoder is expected to write the Adobe marker"
@@ -861,17 +902,65 @@ mod tests {
     }
 
     #[test]
-    fn plain_cmyk_without_an_adobe_marker_is_direct_ink_coverage() {
-        // Same stored samples as an Adobe file, no APP14: they are coverage as written, so a pixel
-        // that means "no ink" to Adobe (stored 255) is full ink here -- the two conventions differ.
-        for (ink, want) in [
-            ([255, 255, 255, 255], [255, 255, 255]), // stored 0: no ink
-            ([0, 255, 255, 255], [0, 255, 255]),     // stored C 255, rest 0: full cyan
-            ([255, 255, 255, 0], [0, 0, 0]),         // stored K 255: black
-        ] {
-            let f = decode_bytes(&cmyk_jpeg_with(false, false, ink, None));
-            near(first_pixel_srgb8(&f), want, 6);
+    fn a_four_component_file_without_the_adobe_marker_is_read_the_same_way() {
+        // libjpeg, PIL and zune/`image` all treat 4-component data as inverted whether or not the
+        // APP14 marker survived; a file that lost it must not become a photographic negative.
+        for ink in [[0, 0, 0, 0], [255, 0, 0, 0], [0, 0, 0, 255]] {
+            let with = decode_bytes(&cmyk_jpeg_with(true, false, ink, None));
+            let without = decode_bytes(&cmyk_jpeg_with(false, false, ink, None));
+            assert_eq!(
+                first_pixel_srgb8(&with),
+                first_pixel_srgb8(&without),
+                "{ink:?}"
+            );
         }
+        near(
+            first_pixel_srgb8(&decode_bytes(&cmyk_jpeg_with(
+                false,
+                false,
+                [255, 0, 0, 0],
+                None,
+            ))),
+            [0, 255, 255],
+            6,
+        );
+    }
+
+    #[test]
+    fn large_and_subsampled_ycck_files_decode_across_mcu_boundaries() {
+        // 37x19 is not a multiple of any MCU size; quality 75 makes jpeg-encoder subsample.
+        let bytes = cmyk_jpeg_sized(true, true, [255, 0, 0, 0], None, (37, 19), 75);
+        let f = decode_bytes(&bytes);
+        assert_eq!((f.width, f.height), (37, 19));
+        let last = f.pixels.len() / 3 - 1;
+        for px in [0, 18 * 37 + 20, last] {
+            let g = LinearFrame {
+                pixels: f.pixels[px * 3..px * 3 + 3].to_vec(),
+                ..f.clone()
+            };
+            near(first_pixel_srgb8(&g), [0, 255, 255], 12);
+        }
+    }
+
+    #[test]
+    fn plain_cmyk_with_mixed_component_sampling_is_refused_not_decoded_wrongly() {
+        // jpeg-encoder samples CMY 1x1 and K 2x2 below quality 90; zune's raw output for that is
+        // wrong, so the decoder must say so instead of returning plausible garbage.
+        let bytes = cmyk_jpeg_sized(true, false, [255, 0, 0, 0], None, (37, 19), 75);
+        assert_eq!(four_component(&bytes).map(|k| k.uniform), Some(false));
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("mixed.jpg");
+        std::fs::write(&p, bytes).unwrap();
+        let err = JpegDecoder.decode_linear(&p).unwrap_err().to_string();
+        assert!(err.contains("subsampling"), "{err}");
+    }
+
+    #[test]
+    fn a_cmyk_file_wider_than_zunes_default_limit_decodes() {
+        // zune caps width/height at 16384 by default; `image` lifts that and so must we.
+        let bytes = cmyk_jpeg_sized(true, false, [0, 0, 0, 0], None, (16_500, 4), 100);
+        let f = decode_bytes(&bytes);
+        assert_eq!((f.width, f.height), (16_500, 4));
     }
 
     #[test]
@@ -1088,7 +1177,8 @@ mod tests {
             four_component(&jpeg),
             Some(FourComponent {
                 adobe: true,
-                transform: 0
+                transform: 0,
+                uniform: true
             })
         );
     }

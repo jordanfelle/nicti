@@ -67,10 +67,10 @@ so no caller needs a JPEG branch. `SourceDecoder` (libraw feature) dispatches on
   samples with `zune-jpeg` (the decoder `image` wraps, asked for the unconverted channels, so `cornea::jpeg` takes it as a direct
   dependency). The APP14 marker decides the convention: with it (Photoshop/Lightroom/`jpeg-encoder`) the samples are stored
   *inverted* (255 = no ink) and are un-inverted; transform 2 is YCCK, turned back into CMYK exactly as libjpeg does (C = 255 - R of
-  the YCC, K untouched); without it the samples are direct coverage. Ink then goes through the embedded CMYK ICC profile when there
+  the YCC, K untouched); every 4-component file is read as inverted, marker or not (checked against libjpeg-turbo `djpeg`, which gives byte-identical RGB with and without APP14; PIL and zune do the same). Plain CMYK whose planes are sampled differently (jpeg-encoder below quality 90) is refused: zune's raw output for it is wrong. Ink then goes through the embedded CMYK ICC profile when there
   is a usable one (`calico::source_transform::cmyk8_to_linear_prophoto16`, same wide-gamut path as tagged RGB), else the plain
   subtractive model `R = (1-C)(1-K)`. T0 (lair) and T2 (pelt) previews convert the same way (`cornea::jpeg::four_component_to_srgb8`),
-  and a CMYK file's T0 is never stored verbatim. **Evidence:** fixtures are synthesised, not real Photoshop files (none in the
+  and a CMYK file's T0 is never stored verbatim. **Evidence:** an independent reviewer compared against `djpeg` (diff 0 for Adobe CMYK and YCCK at quality 100, max 2 at quality 75 YCCK); fixtures are synthesised, not real Photoshop files (none in the
   sandbox): `jpeg-encoder` writes the Adobe convention itself (verified: marker present, input ink 10 stored as 245), YCCK planes are
   built libjpeg-style in the test, and the profile test uses a hand-built CMYK ICC (`mft2` A2B0, 2^4 CLUT of subtractive corners)
   because no CMYK profile exists locally, so it proves channel order, inversion and the profile plumbing, not a real press
