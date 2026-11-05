@@ -49,6 +49,26 @@ impl Default for ColorManagement {
 }
 
 impl ColorManagement {
+    /// A manager starting from the remembered Color-menu settings (#725).
+    pub fn with_settings(settings: &crate::color_settings::ColorSettings) -> Self {
+        let mut cm = Self::new();
+        cm.black_point = settings.black_point;
+        cm.soft_proof = settings.soft_proof;
+        cm.proof_space = settings.proof();
+        cm.gamut_warn = settings.gamut_warn;
+        cm
+    }
+
+    /// The Color-menu settings as they are now (what is remembered across launches).
+    pub fn settings(&self) -> crate::color_settings::ColorSettings {
+        crate::color_settings::ColorSettings {
+            black_point: self.black_point,
+            soft_proof: self.soft_proof,
+            proof_space: self.proof_space.name().to_owned(),
+            gamut_warn: self.gamut_warn,
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             display: DisplayProfile::Space(OutputSpace::Srgb),
@@ -388,6 +408,28 @@ mod tests {
         assert!(!cm.source_transforms().bpc_active());
         assert_eq!(cm.generation(), generation + 1);
     }
+    #[test]
+    fn the_color_menu_settings_round_trip_through_the_manager() {
+        use crate::color_settings::ColorSettings;
+        // A fresh manager's settings are the defaults, so a first launch writes nothing.
+        assert_eq!(ColorManagement::new().settings(), ColorSettings::default());
+        let saved = ColorSettings {
+            black_point: false,
+            soft_proof: true,
+            proof_space: OutputSpace::AdobeRgb.name().to_owned(),
+            gamut_warn: true,
+        };
+        let mut cm = ColorManagement::with_settings(&saved);
+        assert_eq!(cm.settings(), saved);
+        // The remembered settings drive the transform: proofing through the saved space.
+        let t = cm.build_transform().unwrap();
+        assert_eq!(t.proof, Some(OutputSpace::AdobeRgb));
+        assert!(cm.gamut_warn_active());
+        // Toggling something shows up in `settings()`, which is what the app compares to save.
+        cm.black_point = true;
+        assert_ne!(cm.settings(), saved);
+    }
+
     #[test]
     fn default_is_a_direct_srgb_transform() {
         let mut cm = ColorManagement::new();
