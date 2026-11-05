@@ -68,11 +68,25 @@ pub fn is_jpeg(path: &Path) -> bool {
         .is_some_and(|e| JPEG_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
-/// True for a 4-component (CMYK/YCCK) JPEG carrying Adobe's APP14 marker, which is how Photoshop
-/// and friends write them -- with *inverted* ink values. `image`'s decoder converts those as if
-/// they were plain CMYK, so the colours come out wrong; refuse them rather than show that (#652).
-fn is_adobe_cmyk(data: &[u8]) -> bool {
-    let (mut adobe, mut four) = (false, false);
+/// What the JPEG headers say about a 4-component (CMYK or YCCK) file (#681).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FourComponent {
+    /// An Adobe APP14 marker is present: Photoshop and friends then store the ink values
+    /// *inverted* (0 = full ink), and `transform` says whether the channels are YCCK.
+    adobe: bool,
+    /// The APP14 colour transform: 0 = CMYK, 2 = YCCK. Without a marker the file is plain CMYK.
+    transform: u8,
+}
+
+impl FourComponent {
+    fn ycck(self) -> bool {
+        self.adobe && self.transform == 2
+    }
+}
+
+/// Reads the headers up to the start of scan: `Some` for a 4-component JPEG.
+fn four_component(data: &[u8]) -> Option<FourComponent> {
+    let (mut adobe, mut transform, mut four) = (false, 0u8, false);
     let mut i = 2;
     while i + 4 <= data.len() {
         if data[i] != 0xFF {
@@ -94,7 +108,11 @@ fn is_adobe_cmyk(data: &[u8]) -> bool {
         let len = usize::from(u16::from_be_bytes([data[i + 2], data[i + 3]]));
         let body = data.get(i + 4..i + 2 + len).unwrap_or(&[]);
         match marker {
-            0xEE if body.starts_with(b"Adobe") => adobe = true,
+            0xEE if body.starts_with(b"Adobe") => {
+                adobe = true;
+                // "Adobe" version(2) flags0(2) flags1(2) transform(1)
+                transform = body.get(11).copied().unwrap_or(0);
+            }
             0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
                 // precision(1) height(2) width(2) components(1)
                 four = body.get(5) == Some(&4);
@@ -103,7 +121,119 @@ fn is_adobe_cmyk(data: &[u8]) -> bool {
         }
         i += 2 + len;
     }
-    adobe && four
+    four.then_some(FourComponent { adobe, transform })
+}
+
+/// The raw samples of a CMYK/YCCK JPEG, as ink coverage (#681).
+struct CmykSamples {
+    width: u32,
+    height: u32,
+    /// `C, M, Y, K` interleaved, 255 = full ink (the ICC convention): Adobe's inverted storage has
+    /// already been undone, and YCCK has been turned back into CMYK.
+    ink: Vec<u8>,
+    /// The embedded profile, if any.
+    icc: Option<Vec<u8>>,
+}
+
+/// Decodes the raw 4-component samples with `zune-jpeg` (the decoder `image` uses, but asked for
+/// the unconverted channels): the `image` crate would run its own CMYK -> RGB conversion, which
+/// treats Adobe's inverted values as plain ink and bypasses the embedded CMYK profile.
+fn decode_cmyk_samples(data: &[u8], kind: FourComponent) -> Result<CmykSamples, String> {
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+
+    let raw_space = if kind.ycck() {
+        ColorSpace::YCCK
+    } else {
+        ColorSpace::CMYK
+    };
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(raw_space);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(data), options);
+    decoder.decode_headers().map_err(|e| e.to_string())?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| "the JPEG header could not be read".to_string())?;
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    check_dimensions(width, height)?;
+    let size = decoder
+        .output_buffer_size()
+        .ok_or_else(|| "the JPEG output size could not be determined".to_string())?;
+    if size != width as usize * height as usize * 4 {
+        return Err(format!("unexpected CMYK buffer size {size}"));
+    }
+    let mut samples = vec![0u8; size];
+    decoder
+        .decode_into(&mut samples)
+        .map_err(|e| e.to_string())?;
+    let icc = decoder.icc_profile();
+
+    if kind.ycck() {
+        // libjpeg's YCCK -> CMYK: the first three channels are YCbCr of the *inverted* CMY, so
+        // C = 255 - R(Y, Cb, Cr) and so on; K passes through unchanged.
+        for px in samples.as_chunks_mut::<4>().0 {
+            let (y, cb, cr) = (
+                f32::from(px[0]),
+                f32::from(px[1]) - 128.0,
+                f32::from(px[2]) - 128.0,
+            );
+            let r = y + 1.402 * cr;
+            let g = y - 0.344_136 * cb - 0.714_136 * cr;
+            let b = y + 1.772 * cb;
+            px[0] = 255 - r.round().clamp(0.0, 255.0) as u8;
+            px[1] = 255 - g.round().clamp(0.0, 255.0) as u8;
+            px[2] = 255 - b.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    if kind.adobe {
+        // Adobe stores 255 = no ink.
+        for v in &mut samples {
+            *v = 255 - *v;
+        }
+    }
+    Ok(CmykSamples {
+        width,
+        height,
+        ink: samples,
+        icc,
+    })
+}
+
+/// Profile-less CMYK -> sRGB-encoded RGB8: the plain subtractive model every viewer falls back to
+/// (`R = (1 - C)(1 - K)`). Only used when the file carries no usable CMYK profile.
+fn naive_cmyk_to_rgb8(ink: &[u8]) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity(ink.len() / 4 * 3);
+    for px in ink.as_chunks::<4>().0 {
+        let k = 255 - u32::from(px[3]);
+        for &c in &px[..3] {
+            rgb.push(((255 - u32::from(c)) * k + 127).div_ceil(255).min(255) as u8);
+        }
+    }
+    rgb
+}
+
+/// `(width, height, interleaved sRGB-encoded RGB8)`.
+pub type SrgbImage8 = (u32, u32, Vec<u8>);
+
+/// A 4-component JPEG converted to sRGB-encoded RGB8 for the preview tiers (#681): through the
+/// embedded CMYK profile when there is a usable one, else the plain subtractive model. `None` for
+/// any other JPEG, so a caller can hand those to its normal decoder; `Some(Err)` when the file
+/// is 4-component but cannot be decoded.
+pub fn four_component_to_srgb8(data: &[u8]) -> Option<Result<SrgbImage8, String>> {
+    let kind = four_component(data)?;
+    Some(decode_cmyk_samples(data, kind).map(|c| {
+        let rgb = c
+            .icc
+            .as_deref()
+            .and_then(|icc| cmyk_profile_to_srgb8(icc, &c.ink))
+            .unwrap_or_else(|| naive_cmyk_to_rgb8(&c.ink));
+        (c.width, c.height, rgb)
+    }))
+}
+
+/// CMYK ink through its profile to sRGB-encoded RGB8; `None` when the profile is unusable.
+fn cmyk_profile_to_srgb8(icc: &[u8], ink: &[u8]) -> Option<Vec<u8>> {
+    nicti_calico::source_transform::cmyk8_to_srgb8(icc, ink)
 }
 
 pub struct JpegDecoder;
@@ -143,6 +273,41 @@ fn srgb_to_linear_u16(v: u8) -> u16 {
     })[v as usize]
 }
 
+/// The `LinearFrame` every JPEG decode path ends in: sRGB-like "camera" with a neutral white
+/// balance, `matrix` taking XYZ(D50) to its linear RGB.
+fn linear_frame(
+    width: u32,
+    height: u32,
+    pixels: Vec<u16>,
+    matrix: [f32; 9],
+    orientation: u8,
+) -> LinearFrame {
+    let mut cam_xyz = [0.0f32; 12];
+    cam_xyz[..9].copy_from_slice(&matrix);
+    LinearFrame {
+        make: String::new(),
+        model: "JPEG".to_string(),
+        width,
+        height,
+        black: 0,
+        maximum: 65535,
+        cam_mul: [1.0; 4],
+        pre_mul: [1.0; 4],
+        cam_xyz,
+        cblack: [0; 4],
+        pixels,
+        dng_opcode_list3: None,
+        nikon_lens_info: None,
+        lens_exif: Default::default(),
+        // 1 (upright) and "no tag" are indistinguishable from the decoder; both mean 0.
+        orientation: if (2..=8).contains(&orientation) {
+            orientation
+        } else {
+            0
+        },
+    }
+}
+
 impl RawDecoder for JpegDecoder {
     fn decode_linear(&self, path: &Path) -> Result<LinearFrame, DecodeError> {
         let io = |source| DecodeError::Io {
@@ -162,11 +327,6 @@ impl RawDecoder for JpegDecoder {
             message,
         };
 
-        if is_adobe_cmyk(&data) {
-            return Err(fail(
-                "CMYK/YCCK JPEGs are not supported yet (Adobe-inverted ink values)".to_string(),
-            ));
-        }
         let mut decoder = ImageReader::new(Cursor::new(&data))
             .with_guessed_format()
             .map_err(|e| fail(e.to_string()))?
@@ -177,6 +337,31 @@ impl RawDecoder for JpegDecoder {
         let orientation = decoder.orientation().map(Orientation::to_exif).unwrap_or(0);
         let (dw, dh) = decoder.dimensions();
         check_dimensions(dw, dh).map_err(fail)?;
+        // CMYK/YCCK: raw samples through the embedded CMYK profile (#681), never `image`'s
+        // conversion, which inverts Adobe's ink values.
+        if let Some(kind) = four_component(&data) {
+            let cmyk = decode_cmyk_samples(&data, kind).map_err(fail)?;
+            let profile = icc.as_deref().or(cmyk.icc.as_deref());
+            let (pixels, matrix) = match profile.and_then(|p| {
+                nicti_calico::source_transform::cmyk8_to_linear_prophoto16(p, &cmyk.ink)
+            }) {
+                Some(pixels) => (pixels, nicti_calico::space::xyz_d50_to_working_f32()),
+                None => {
+                    let rgb = naive_cmyk_to_rgb8(&cmyk.ink);
+                    (
+                        rgb.iter().map(|&v| srgb_to_linear_u16(v)).collect(),
+                        XYZ_D50_TO_SRGB,
+                    )
+                }
+            };
+            return Ok(linear_frame(
+                cmyk.width,
+                cmyk.height,
+                pixels,
+                matrix,
+                orientation,
+            ));
+        }
         let image = image::DynamicImage::from_decoder(decoder).map_err(|e| fail(e.to_string()))?;
         let (width, height) = (image.width(), image.height());
         let mut rgba = image.into_rgba8().into_raw();
@@ -207,30 +392,7 @@ impl RawDecoder for JpegDecoder {
         };
         drop(rgba);
 
-        let mut cam_xyz = [0.0f32; 12];
-        cam_xyz[..9].copy_from_slice(&matrix);
-        Ok(LinearFrame {
-            make: String::new(),
-            model: "JPEG".to_string(),
-            width,
-            height,
-            black: 0,
-            maximum: 65535,
-            cam_mul: [1.0; 4],
-            pre_mul: [1.0; 4],
-            cam_xyz,
-            cblack: [0; 4],
-            pixels,
-            dng_opcode_list3: None,
-            nikon_lens_info: None,
-            lens_exif: Default::default(),
-            // 1 (upright) and "no tag" are indistinguishable from the decoder; both mean 0.
-            orientation: if (2..=8).contains(&orientation) {
-                orientation
-            } else {
-                0
-            },
-        })
+        Ok(linear_frame(width, height, pixels, matrix, orientation))
     }
 }
 
@@ -561,49 +723,312 @@ mod tests {
         assert_eq!(JpegDecoder.decode_linear(&p).unwrap().orientation, 0);
     }
 
-    fn cmyk_jpeg(adobe: bool, ycck: bool) -> Vec<u8> {
-        let ink: Vec<u8> = (0..64).flat_map(|_| [255u8, 255, 255, 255]).collect();
+    /// An 8x8 CMYK/YCCK JPEG whose every pixel means the ink coverage `ink` (255 = full ink).
+    /// `jpeg-encoder` writes the Adobe convention itself (an APP14 marker and *inverted* samples),
+    /// so `adobe: true` is that file as-is; `adobe: false` strips the marker, leaving the same
+    /// stored samples with no marker, which a reader must take as direct coverage (so the pixel
+    /// then means `255 - ink`). `icc` is embedded as APP2 when given.
+    fn cmyk_jpeg_with(adobe: bool, ycck: bool, ink: [u8; 4], icc: Option<&[u8]>) -> Vec<u8> {
+        // `ColorType::Cmyk` writes the Adobe convention itself (marker + inverted samples), but
+        // `ColorType::Ycck` takes the four planes *already* in YCCK and writes them untouched, so
+        // build them as libjpeg does: stored CMY = 255 - ink, then YCbCr of (255 - stored) = ink,
+        // and K stored inverted like the others.
+        let px: Vec<u8> = if ycck {
+            let [c, m, y, k] = ink.map(f32::from);
+            let yy = 0.299 * c + 0.587 * m + 0.114 * y;
+            let cb = -0.168_736 * c - 0.331_264 * m + 0.5 * y + 128.0;
+            let cr = 0.5 * c - 0.418_688 * m - 0.081_312 * y + 128.0;
+            let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+            let plane = [q(yy), q(cb), q(cr), 255 - q(k)];
+            (0..64).flat_map(|_| plane).collect()
+        } else {
+            (0..64).flat_map(|_| ink).collect()
+        };
         let mut bytes = Vec::new();
         let ct = if ycck {
             jpeg_encoder::ColorType::Ycck
         } else {
             jpeg_encoder::ColorType::Cmyk
         };
-        jpeg_encoder::Encoder::new(&mut bytes, 100)
-            .encode(&ink, 8, 8, ct)
-            .unwrap();
-        if !adobe {
+        let mut enc = jpeg_encoder::Encoder::new(&mut bytes, 100);
+        if let Some(icc) = icc {
+            enc.add_icc_profile(icc).unwrap();
+        }
+        enc.encode(&px, 8, 8, ct).unwrap();
+        assert!(
+            four_component(&bytes).is_some_and(|k| k.adobe),
+            "the encoder is expected to write the Adobe marker"
+        );
+        if adobe {
             return bytes;
         }
-        let mut seg = vec![0xFF, 0xEE, 0, 14];
-        seg.extend_from_slice(b"Adobe");
-        seg.extend_from_slice(&[0, 100, 0, 0, 0, 0, if ycck { 2 } else { 0 }]);
-        let mut out = bytes[..2].to_vec();
-        out.extend_from_slice(&seg);
-        out.extend_from_slice(&bytes[2..]);
+        // Remove the APP14 segment.
+        let mut i = 2;
+        while i + 4 <= bytes.len() && bytes[i] == 0xFF {
+            let len = usize::from(u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]));
+            if bytes[i + 1] == 0xEE {
+                bytes.drain(i..i + 2 + len);
+                break;
+            }
+            i += 2 + len;
+        }
+        assert_eq!(four_component(&bytes).map(|k| k.adobe), Some(false));
+        bytes
+    }
+
+    fn cmyk_jpeg(adobe: bool, ycck: bool) -> Vec<u8> {
+        cmyk_jpeg_with(adobe, ycck, [255; 4], None)
+    }
+
+    /// The first pixel of a decoded frame as sRGB-encoded 8-bit, whatever working space the frame
+    /// is in: the frame's own `cam_xyz` (XYZ -> its RGB) is inverted back to XYZ, then sent
+    /// through sRGB's matrix and curve.
+    fn first_pixel_srgb8(f: &LinearFrame) -> [u8; 3] {
+        let m: [[f64; 3]; 3] =
+            std::array::from_fn(|r| std::array::from_fn(|c| f64::from(f.cam_xyz[r * 3 + c])));
+        let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+        let inv = [
+            [
+                (m[1][1] * m[2][2] - m[1][2] * m[2][1]) / det,
+                (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / det,
+                (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / det,
+            ],
+            [
+                (m[1][2] * m[2][0] - m[1][0] * m[2][2]) / det,
+                (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / det,
+                (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / det,
+            ],
+            [
+                (m[1][0] * m[2][1] - m[1][1] * m[2][0]) / det,
+                (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / det,
+                (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / det,
+            ],
+        ];
+        let lin = [0, 1, 2].map(|i| f64::from(f.pixels[i]) / 65535.0);
+        let xyz = [0, 1, 2].map(|r| (0..3).map(|c| inv[r][c] * lin[c]).sum::<f64>());
+        let enc = |v: f64| {
+            let v = v.clamp(0.0, 1.0);
+            let e = if v <= 0.003_130_8 {
+                v * 12.92
+            } else {
+                1.055 * v.powf(1.0 / 2.4) - 0.055
+            };
+            (e * 255.0).round() as u8
+        };
+        [0, 1, 2].map(|r| {
+            enc((0..3)
+                .map(|c| f64::from(XYZ_D50_TO_SRGB[r * 3 + c]) * xyz[c])
+                .sum::<f64>())
+        })
+    }
+
+    fn near(got: [u8; 3], want: [u8; 3], tol: i32) {
+        for c in 0..3 {
+            assert!(
+                (i32::from(got[c]) - i32::from(want[c])).abs() <= tol,
+                "got {got:?}, want {want:?} (+-{tol})"
+            );
+        }
+    }
+
+    fn decode_bytes(bytes: &[u8]) -> LinearFrame {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("c.jpg");
+        std::fs::write(&p, bytes).unwrap();
+        JpegDecoder.decode_linear(&p).unwrap()
+    }
+
+    #[test]
+    fn adobe_cmyk_and_ycck_decode_with_their_inverted_storage_undone() {
+        // The ink coverage written is what must come out: none = paper white, a single full plate =
+        // its subtractive colour, full K = black.
+        for ycck in [false, true] {
+            for (ink, want) in [
+                ([0, 0, 0, 0], [255, 255, 255]),
+                ([255, 0, 0, 0], [0, 255, 255]),
+                ([0, 255, 0, 0], [255, 0, 255]),
+                ([0, 0, 255, 0], [255, 255, 0]),
+                ([0, 0, 0, 255], [0, 0, 0]),
+                ([255, 255, 255, 255], [0, 0, 0]),
+            ] {
+                let f = decode_bytes(&cmyk_jpeg_with(true, ycck, ink, None));
+                near(first_pixel_srgb8(&f), want, 6);
+                assert_eq!(f.cam_xyz[..9], XYZ_D50_TO_SRGB);
+            }
+        }
+    }
+
+    #[test]
+    fn plain_cmyk_without_an_adobe_marker_is_direct_ink_coverage() {
+        // Same stored samples as an Adobe file, no APP14: they are coverage as written, so a pixel
+        // that means "no ink" to Adobe (stored 255) is full ink here -- the two conventions differ.
+        for (ink, want) in [
+            ([255, 255, 255, 255], [255, 255, 255]), // stored 0: no ink
+            ([0, 255, 255, 255], [0, 255, 255]),     // stored C 255, rest 0: full cyan
+            ([255, 255, 255, 0], [0, 0, 0]),         // stored K 255: black
+        ] {
+            let f = decode_bytes(&cmyk_jpeg_with(false, false, ink, None));
+            near(first_pixel_srgb8(&f), want, 6);
+        }
+    }
+
+    #[test]
+    fn four_component_previews_use_the_same_inversion_as_the_decoder() {
+        let bytes = cmyk_jpeg_with(true, false, [255, 0, 0, 0], None);
+        let (w, h, rgb) = four_component_to_srgb8(&bytes).unwrap().unwrap();
+        assert_eq!((w, h, rgb.len()), (8, 8, 8 * 8 * 3));
+        near([rgb[0], rgb[1], rgb[2]], [0, 255, 255], 6);
+        // Anything that is not 4-component is left to the normal decoder.
+        let d = tempfile::tempdir().unwrap();
+        let rgb_jpeg = std::fs::read(write_jpeg(d.path(), "r.jpg", 8, 8, [1, 2, 3])).unwrap();
+        assert!(four_component_to_srgb8(&rgb_jpeg).is_none());
+    }
+
+    /// A minimal but real CMYK output profile (ICC v2, `prtr`, `A2B0` as a 16-bit lut with a 2^4
+    /// CLUT) built here because no CMYK profile ships in the sandbox. Each of the 16 ink corners
+    /// maps to the Lab of the plain subtractive colour `R = (1-C)(1-K)`, so a corner ink value must
+    /// land on that colour whatever channel order or inversion the decoder applies.
+    fn synthetic_cmyk_icc() -> Vec<u8> {
+        fn lab_d50(rgb: [f64; 3]) -> [f64; 3] {
+            let m = [
+                [0.436_074_7, 0.385_064_9, 0.143_080_4],
+                [0.222_504_5, 0.716_878_6, 0.060_616_9],
+                [0.013_932_2, 0.097_104_5, 0.714_173_3],
+            ];
+            let xyz = [0, 1, 2].map(|r| (0..3).map(|c| m[r][c] * rgb[c]).sum::<f64>());
+            let white = [0.9642, 1.0, 0.8249];
+            let f = |t: f64| {
+                if t > 216.0 / 24389.0 {
+                    t.cbrt()
+                } else {
+                    (24389.0 / 27.0 * t + 16.0) / 116.0
+                }
+            };
+            let (fx, fy, fz) = (
+                f(xyz[0] / white[0]),
+                f(xyz[1] / white[1]),
+                f(xyz[2] / white[2]),
+            );
+            [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+        }
+        let be16 = |v: u16| v.to_be_bytes();
+        let be32 = |v: u32| v.to_be_bytes();
+        // mft2: 4 in, 3 out, grid 2.
+        let mut lut = Vec::new();
+        lut.extend_from_slice(b"mft2");
+        lut.extend_from_slice(&[0; 4]);
+        lut.extend_from_slice(&[4, 3, 2, 0]);
+        for v in [1.0f64, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] {
+            lut.extend_from_slice(&be32((v * 65536.0) as u32));
+        }
+        lut.extend_from_slice(&be16(2));
+        lut.extend_from_slice(&be16(2));
+        for _ in 0..4 {
+            lut.extend_from_slice(&be16(0));
+            lut.extend_from_slice(&be16(65535));
+        }
+        // CLUT: first input (C) varies slowest, K fastest.
+        for c in 0..2u32 {
+            for m in 0..2u32 {
+                for y in 0..2u32 {
+                    for k in 0..2u32 {
+                        let rgb = [c, m, y].map(|ink| f64::from(1 - ink) * f64::from(1 - k));
+                        let [l, a, b] = lab_d50(rgb);
+                        // ICC v2 16-bit Lab: L = v / 652.8, a/b = v / 256 - 128.
+                        lut.extend_from_slice(
+                            &be16((l * 652.8).round().clamp(0.0, 65535.0) as u16),
+                        );
+                        lut.extend_from_slice(&be16(
+                            ((a + 128.0) * 256.0).round().clamp(0.0, 65535.0) as u16,
+                        ));
+                        lut.extend_from_slice(&be16(
+                            ((b + 128.0) * 256.0).round().clamp(0.0, 65535.0) as u16,
+                        ));
+                    }
+                }
+            }
+        }
+        for _ in 0..3 {
+            lut.extend_from_slice(&be16(0));
+            lut.extend_from_slice(&be16(65535));
+        }
+        let xyz_tag = |x: f64, y: f64, z: f64| {
+            let mut t = b"XYZ \0\0\0\0".to_vec();
+            for v in [x, y, z] {
+                t.extend_from_slice(&((v * 65536.0).round() as i32).to_be_bytes());
+            }
+            t
+        };
+        let desc = {
+            let name = b"synthetic cmyk\0";
+            let mut t = b"desc\0\0\0\0".to_vec();
+            t.extend_from_slice(&be32(name.len() as u32));
+            t.extend_from_slice(name);
+            t.extend_from_slice(&[0; 4 + 4 + 2 + 1 + 67]);
+            t
+        };
+        let tags: Vec<(&[u8; 4], Vec<u8>)> = vec![
+            (b"desc", desc),
+            (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+            (b"A2B0", lut.clone()),
+            (b"A2B1", lut),
+        ];
+        let table_len = 4 + tags.len() * 12;
+        let mut offset = 128 + table_len;
+        let mut table = be32(tags.len() as u32).to_vec();
+        let mut data = Vec::new();
+        for (sig, body) in &tags {
+            table.extend_from_slice(*sig);
+            table.extend_from_slice(&be32(offset as u32));
+            table.extend_from_slice(&be32(body.len() as u32));
+            let padded = body.len().div_ceil(4) * 4;
+            data.extend_from_slice(body);
+            data.resize(data.len() + (padded - body.len()), 0);
+            offset += padded;
+        }
+        let mut header = vec![0u8; 128];
+        header[8..12].copy_from_slice(&[2, 0x10, 0, 0]);
+        header[12..16].copy_from_slice(b"prtr");
+        header[16..20].copy_from_slice(b"CMYK");
+        header[20..24].copy_from_slice(b"Lab ");
+        header[36..40].copy_from_slice(b"acsp");
+        // PCS illuminant D50.
+        for (i, v) in [0.9642f64, 1.0, 0.8249].iter().enumerate() {
+            header[68 + i * 4..72 + i * 4]
+                .copy_from_slice(&((*v * 65536.0).round() as i32).to_be_bytes());
+        }
+        let mut out = header;
+        out.extend_from_slice(&table);
+        out.extend_from_slice(&data);
+        let total = out.len() as u32;
+        out[0..4].copy_from_slice(&total.to_be_bytes());
         out
     }
 
     #[test]
-    fn adobe_cmyk_and_ycck_are_refused_not_shown_with_inverted_colours() {
-        let d = tempfile::tempdir().unwrap();
+    fn an_embedded_cmyk_profile_is_applied_to_the_ink_values() {
+        let icc = synthetic_cmyk_icc();
+        // The profile itself must be one moxcms accepts as CMYK, or this test proves nothing.
+        let parsed = moxcms::ColorProfile::new_from_slice(&icc).unwrap();
+        assert_eq!(parsed.color_space, moxcms::DataColorSpace::Cmyk);
         for ycck in [false, true] {
-            let p = d.path().join(format!("c{ycck}.jpg"));
-            std::fs::write(&p, cmyk_jpeg(true, ycck)).unwrap();
-            let err = JpegDecoder.decode_linear(&p).unwrap_err().to_string();
-            assert!(err.contains("CMYK"), "{err}");
+            for (ink, want) in [
+                ([0, 0, 0, 0], [255, 255, 255]), // no ink: paper
+                ([255, 0, 0, 0], [0, 255, 255]), // full cyan
+                ([0, 255, 0, 0], [255, 0, 255]), // full magenta
+                ([0, 0, 0, 255], [0, 0, 0]),     // full black
+            ] {
+                let f = decode_bytes(&cmyk_jpeg_with(true, ycck, ink, Some(&icc)));
+                // Through a profile the frame is in the working space, not sRGB.
+                assert_ne!(f.cam_xyz[..9], XYZ_D50_TO_SRGB);
+                // The corners sit on the sRGB gamut boundary, where the Lab round trip through
+                // 16-bit table values and the gamut clamp leave a few levels of slack; a wrong
+                // channel order or inversion would be 255 off.
+                near(first_pixel_srgb8(&f), want, 14);
+            }
         }
-        // A 3-component JPEG that merely has an Adobe marker still decodes.
-        let plain = std::fs::read(write_jpeg(d.path(), "p.jpg", 8, 8, [1, 2, 3])).unwrap();
-        let mut seg = vec![0xFF, 0xEE, 0, 14];
-        seg.extend_from_slice(b"Adobe");
-        seg.extend_from_slice(&[0, 100, 0, 0, 0, 0, 1]);
-        let mut with = plain[..2].to_vec();
-        with.extend_from_slice(&seg);
-        with.extend_from_slice(&plain[2..]);
-        let p = d.path().join("a.jpg");
-        std::fs::write(&p, with).unwrap();
-        assert!(JpegDecoder.decode_linear(&p).is_ok());
     }
 
     #[test]
@@ -650,13 +1075,21 @@ mod tests {
     }
 
     #[test]
-    fn adobe_cmyk_is_still_refused_with_padding_between_segments() {
+    fn adobe_cmyk_is_still_recognised_with_padding_between_segments() {
         let mut jpeg = cmyk_jpeg(true, false);
-        // A stray zero pad right after the APP14 segment (offset 2 + 2 + 14 = 18).
-        jpeg.insert(18, 0x00);
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("pad.jpg");
-        std::fs::write(&p, jpeg).unwrap();
-        assert!(JpegDecoder.decode_linear(&p).is_err());
+        // A stray zero pad right after the APP14 segment.
+        let at = jpeg
+            .windows(2)
+            .position(|w| w == [0xFF, 0xEE])
+            .expect("the encoder wrote an APP14 segment");
+        let len = usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
+        jpeg.insert(at + 2 + len, 0x00);
+        assert_eq!(
+            four_component(&jpeg),
+            Some(FourComponent {
+                adobe: true,
+                transform: 0
+            })
+        );
     }
 }

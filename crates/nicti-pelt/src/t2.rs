@@ -138,7 +138,18 @@ fn resize_and_encode(
         .ok()
         .flatten()
         .filter(|p| p.get(16..20) == Some(b"RGB ".as_slice()));
-    let mut decoded = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+    // CMYK/YCCK: converted through the file's CMYK profile (or the plain subtractive model), never
+    // by the RGB-only decoder, which would invert Adobe's ink values (#681).
+    let mut decoded = match nicti_cornea::jpeg::four_component_to_srgb8(jpeg) {
+        Some(converted) => {
+            let (cw, ch, rgb) = converted?;
+            DynamicImage::ImageRgb8(
+                image::RgbImage::from_raw(cw, ch, rgb)
+                    .ok_or_else(|| "CMYK conversion produced a wrong-sized buffer".to_string())?,
+            )
+        }
+        None => DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?,
+    };
     decoded.apply_orientation(orientation);
     let (w, h) = (decoded.width(), decoded.height());
     if w == 0 || h == 0 {
@@ -440,6 +451,25 @@ pub(crate) mod testutil {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_cmyk_jpegs_t2_shows_the_ink_colour_not_inverted_values() {
+        // Adobe-convention CMYK, full cyan ink: `jpeg-encoder` writes the marker + inverted samples.
+        // (`image`'s own profile-less conversion also gets this case right; this pins the route, the
+        // embedded-profile behaviour is tested in `nicti-cornea`.)
+        let px: Vec<u8> = (0..64).flat_map(|_| [255u8, 0, 0, 0]).collect();
+        let mut cmyk = Vec::new();
+        jpeg_encoder::Encoder::new(&mut cmyk, 100)
+            .encode(&px, 8, 8, jpeg_encoder::ColorType::Cmyk)
+            .unwrap();
+        let out = resize_and_encode(&cmyk, None).unwrap();
+        let rgb = image::load_from_memory(&out).unwrap().to_rgb8();
+        let p = rgb.get_pixel(0, 0).0;
+        assert!(
+            p[0] < 30 && p[1] > 225 && p[2] > 225,
+            "cyan expected, got {p:?}"
+        );
+    }
     use super::testutil::*;
     use super::*;
     use nicti_lair::larder::LarderConfig;

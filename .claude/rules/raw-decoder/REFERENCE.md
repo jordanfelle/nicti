@@ -77,5 +77,5 @@ Full reasoning/history: `docs/decisions/raw-decoder.md`.
   REFERENCE.md). See `docs/research/retina-raw-decoder.md`.
 - JPEG assets (#576): `nicti_cornea::jpeg::JpegDecoder` is a `RawDecoder` returning a `LinearFrame` (ICC -> sRGB via
   calico `SourceTransforms`, sRGB curve -> 16-bit linear, `cam_xyz` = D50-adapted XYZ->sRGB, neutral `cam_mul`,
-  maximum 65535, orientation 2-8 or 0); `SourceDecoder` (libraw) routes by extension and is what `app.rs` uses. #652: non-sRGB RGB ICC -> 16-bit linear ProPhoto (`calico::source_transform::rgba8_to_linear_prophoto16`, `cam_xyz` = working matrix); Adobe CMYK/YCCK refused; one `JPEG_EXTENSIONS` list (jpg/jpeg/jpe/jfif).
+  maximum 65535, orientation 2-8 or 0); `SourceDecoder` (libraw) routes by extension and is what `app.rs` uses. #652: non-sRGB RGB ICC -> 16-bit linear ProPhoto (`calico::source_transform::rgba8_to_linear_prophoto16`, `cam_xyz` = working matrix); #681: CMYK/YCCK decoded from raw `zune-jpeg` samples (Adobe APP14 = inverted storage, transform 2 = YCCK, embedded CMYK ICC via `calico::source_transform::cmyk8_to_linear_prophoto16`, else subtractive model; T0/T2 via `four_component_to_srgb8`; synthesised fixtures only); one `JPEG_EXTENSIONS` list (jpg/jpeg/jpe/jfif).
   Detail: `docs/decisions/raw-decoder.md`.

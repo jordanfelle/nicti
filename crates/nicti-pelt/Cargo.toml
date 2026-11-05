@@ -57,6 +57,8 @@ rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] 
 
 [dev-dependencies]
 tempfile = "3"
+# Encodes an Adobe-convention CMYK JPEG for the T2 test (#681); already in the lockfile.
+jpeg-encoder = "0.7"
 rusqlite = { workspace = true }
 # PNG decode for export round-trip assertions.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

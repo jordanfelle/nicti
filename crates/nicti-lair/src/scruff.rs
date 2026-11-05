@@ -330,7 +330,10 @@ fn jpeg_preview(path: &Path) -> Option<(Preview, u32, u32)> {
     }
     // Verbatim only while the file itself stays within the RAW T0 byte cap (an APPn/ICC blob can
     // make a tiny image huge); otherwise it is re-encoded below like a large one.
-    if w.max(h) <= T0_LONG_EDGE && bytes.len() as u64 <= MAX_T0_PREVIEW_BYTES {
+    // A CMYK/YCCK file is never stored verbatim: the grid decodes T0 with an RGB-only decoder that
+    // would show its (Adobe-inverted) ink values wrongly, so it is converted below (#681).
+    let cmyk = nicti_cornea::jpeg::four_component_to_srgb8(&bytes);
+    if cmyk.is_none() && w.max(h) <= T0_LONG_EDGE && bytes.len() as u64 <= MAX_T0_PREVIEW_BYTES {
         return Some((
             Preview {
                 width: Some(w),
@@ -342,13 +345,23 @@ fn jpeg_preview(path: &Path) -> Option<(Preview, u32, u32)> {
         ));
     }
     use image::{ImageDecoder, ImageEncoder};
-    let mut decoder = image::ImageReader::new(std::io::Cursor::new(&bytes))
-        .with_guessed_format()
-        .ok()?
-        .into_decoder()
-        .ok()?;
-    let icc = decoder.icc_profile().ok().flatten();
-    let img = image::DynamicImage::from_decoder(decoder).ok()?;
+    let (img, icc) = match cmyk {
+        // Already sRGB, converted through the file's CMYK profile when it has one.
+        Some(converted) => {
+            let (cw, ch, rgb) = converted.ok()?;
+            let buf = image::RgbImage::from_raw(cw, ch, rgb)?;
+            (image::DynamicImage::ImageRgb8(buf), None)
+        }
+        None => {
+            let mut decoder = image::ImageReader::new(std::io::Cursor::new(&bytes))
+                .with_guessed_format()
+                .ok()?
+                .into_decoder()
+                .ok()?;
+            let icc = decoder.icc_profile().ok().flatten();
+            (image::DynamicImage::from_decoder(decoder).ok()?, icc)
+        }
+    };
     // Never upscale: a small file only lands here for its byte size.
     let thumb = if w.max(h) <= T0_LONG_EDGE {
         img.to_rgb8()
@@ -802,6 +815,35 @@ fn catalog_io_error(e: std::io::Error) -> CatalogError {
 
 #[cfg(test)]
 mod tests {
+
+    /// An 8x8 Adobe-convention CMYK JPEG that is full cyan ink (`jpeg-encoder` writes the Adobe
+    /// marker and the inverted samples itself).
+    fn cyan_cmyk_jpeg() -> Vec<u8> {
+        let px: Vec<u8> = (0..64).flat_map(|_| [255u8, 0, 0, 0]).collect();
+        let mut bytes = Vec::new();
+        jpeg_encoder::Encoder::new(&mut bytes, 100)
+            .encode(&px, 8, 8, jpeg_encoder::ColorType::Cmyk)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn a_cmyk_jpegs_t0_is_converted_to_rgb_not_stored_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cmyk.jpg");
+        let original = cyan_cmyk_jpeg();
+        std::fs::write(&path, &original).unwrap();
+        let (preview, w, h) = jpeg_preview(&path).expect("a CMYK JPEG gets a T0");
+        assert_eq!((w, h), (8, 8));
+        // Small enough to be stored as-is if it were RGB; a CMYK file must be re-encoded.
+        assert_ne!(preview.bytes, original);
+        let px = image::load_from_memory(&preview.bytes).unwrap().to_rgb8();
+        let p = px.get_pixel(0, 0).0;
+        assert!(
+            p[0] < 30 && p[1] > 225 && p[2] > 225,
+            "cyan expected, got {p:?}"
+        );
+    }
     use super::tag_orientation;
 
     fn tiny_jpeg(w: u32, h: u32) -> Vec<u8> {

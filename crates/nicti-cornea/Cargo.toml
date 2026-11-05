@@ -20,6 +20,8 @@ nicti-claw = { path = "../nicti-claw" }
 # JPEG sources (#576): ICC -> sRGB via calico's source transform, pixels via the `image` JPEG decoder.
 nicti-calico = { path = "../nicti-calico" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# Raw CMYK/YCCK samples for Adobe CMYK JPEGs (#681); `image` already pulls this decoder in.
+zune-jpeg = "0.5"
 thiserror = "2"
 clap = { version = "4", features = ["derive"], optional = true }
 serde_json = "1"
