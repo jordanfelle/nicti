@@ -49,3 +49,45 @@ Commons Attribution-ShareAlike 3.0 Unported licence:
 Nicti uses the database unmodified and only reads it. Per-lens corrections that
 Nicti derives from it are computed at run time and are not stored or
 redistributed as a database.
+
+
+RAW DECODING: LibRaw  --  LGPL-2.1 NOTICE
+-----------------------------------------
+
+Nicti decodes camera raw files with LibRaw (https://www.libraw.org/), statically
+linked into Nicti. The copy used is a fork of LibRaw that adds the Nikon
+High Efficiency (HE/HE*) decoder:
+
+  https://github.com/yogthos/LibRaw  (branch nikon-he-decoder, from
+  LibRaw pull request #826), included in the Nicti source tree as the git
+  submodule crates/nicti-cornea/vendor/LibRaw.
+
+LibRaw is offered under two licences at the licensee's choice: the GNU Lesser
+General Public License, version 2.1 (LGPL-2.1), or the Common Development and
+Distribution License 1.0 (CDDL-1.0). Nicti uses it under the LGPL-2.1. The full
+licence text is in LICENSE-LGPL-2.1.txt, installed beside this file.
+
+This is free software: you may redistribute it and/or modify it under the terms
+of that licence. It is distributed WITHOUT ANY WARRANTY, without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+Because Nicti is itself open source under AGPL-3.0-or-later, the complete
+corresponding source of the combined program, which lets you modify LibRaw and
+relink or rebuild Nicti, is the Nicti source at the URL above together with the
+LibRaw submodule it names.
+
+Copyright notices carried by LibRaw:
+
+  Copyright (C) 2008-2025 LibRaw LLC (http://www.libraw.org, info@libraw.org)
+
+LibRaw also contains, under the licences stated in its own COPYRIGHT file:
+
+  - code from dcraw.c, Copyright 1997-2018 by Dave Coffin (only the code that
+    dcraw's author released without restriction; LibRaw does not use the
+    restricted parts);
+  - the DCB demosaic and FBDD denoise, Copyright (C) 2010 Jacek Gozdz
+    (BSD-like 3-clause licence);
+  - the X3F library for Foveon files, Copyright (c) 2010 Roland Karlsson
+    (BSD-style licence);
+  - pieces of the Adobe DNG SDK 1.4, Copyright (c) 2005 Adobe Systems
+    Incorporated (MIT licence).

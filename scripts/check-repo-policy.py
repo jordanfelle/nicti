@@ -6,6 +6,8 @@
    family) may only be depended on by nicti-pelt and the root `nicti` binary.
 2. Assets: every tracked font/icon/image/model file outside spikes/ and test snapshots needs a
    `path` row in assets/ATTRIBUTION.md, and every row must point at a tracked file.
+3. Notices (#695): a production crate that depends on lensfun/rawler, or the vendored LibRaw
+   submodule, needs its name in assets/notices/THIRD-PARTY-NOTICES.txt.
 
 Run from anywhere: python3 scripts/check-repo-policy.py
 """
@@ -101,12 +103,43 @@ def check_assets():
     return errs
 
 
+# Shipped components whose licences require a notice (#695): a production crate depending on one of
+# these Cargo crates, or the vendored LibRaw submodule, needs its name in the notices file.
+NOTICE_CRATES = {"lensfun": "LensFun", "rawler": "rawler"}
+NOTICES = os.path.join("assets", "notices", "THIRD-PARTY-NOTICES.txt")
+
+
+def check_notices():
+    """Every shipped LGPL component is named in assets/notices/THIRD-PARTY-NOTICES.txt."""
+    path = os.path.join(ROOT, NOTICES)
+    if not os.path.exists(path):
+        return [f"{NOTICES} is missing"]
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    meta = json.loads(sh("cargo", "metadata", "--no-deps", "--format-version", "1"))
+    errs = []
+    for pkg in meta["packages"]:
+        rel = os.path.relpath(pkg["manifest_path"], ROOT)
+        if not rel.startswith("crates" + os.sep):
+            continue  # spikes and bench tools are not shipped
+        for dep in pkg["dependencies"]:
+            needle = NOTICE_CRATES.get(dep["name"])
+            if needle and dep.get("kind") in (None, "build") and needle not in text:
+                errs.append(f"{pkg['name']} depends on {dep['name']}; {NOTICES} must mention {needle}")
+    gitmodules = os.path.join(ROOT, ".gitmodules")
+    if os.path.exists(gitmodules):
+        with open(gitmodules, encoding="utf-8") as fh:
+            if "vendor/LibRaw" in fh.read() and "LibRaw" not in text:
+                errs.append(f"the LibRaw submodule is vendored; {NOTICES} must mention LibRaw")
+    return errs
+
+
 def main():
-    errs = check_layers() + check_assets()
+    errs = check_layers() + check_assets() + check_notices()
     for e in errs:
         print(f"error: {e}", file=sys.stderr)
     if not errs:
-        print("repo policy: layering and asset attribution OK")
+        print("repo policy: layering, asset attribution and third-party notices OK")
     return 1 if errs else 0
 
 
