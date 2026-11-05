@@ -61,7 +61,7 @@ in the same binary; the workflow file's comments explain why).
 every crate listed in the tracking issue as done carries
 `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]` (tests are
 exempt), so clippy fails on a new `unwrap()`/`expect()`/`panic!`. A genuine invariant gets one
-`#[allow(clippy::expect_used)]` with the reason beside it. Converted so far: calico, cornea, preen, pounce (#705), tapetum, groom, siamese (#739), lair (#743); the rest are tracked in
+`#[allow(clippy::expect_used)]` with the reason beside it. Converted so far: calico, cornea, preen, pounce (#705), tapetum, groom, siamese (#739), lair (#743), stray and pelt (#749); the remaining work is the fallible GPU readbacks and the unreachable!/assert!/indexing coverage; the rest are tracked in
 the follow-up issue; when you convert one, add the attribute to its root in the same PR. Jobs run under Pounce are
 isolated from panics regardless (a panicking job is reported `Failed` and the worker keeps going), but a job whose result the UI waits on through a `ReportSlot` needs a `Drop` that fills the slot, and threads that are not Pounce jobs must use `nicti_pounce::guard::catch_panic` (#706, #740). The lint covers only unwrap/expect/panic: `assert!`, indexing and arithmetic overflow still panic (tracked in #739's follow-up).
 

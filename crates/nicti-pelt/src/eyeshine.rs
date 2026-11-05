@@ -838,7 +838,9 @@ impl RenderJob {
             return Ok(Step::Done);
         };
         if self.task.is_cancelled() {
-            let phase = self.phase.take().expect("checked Some");
+            let Some(phase) = self.phase.take() else {
+                return Ok(Step::Done);
+            };
             self.give_back(phase.ctx);
             phase.settle.settle(T2Outcome::Retry("superseded".into()));
             return Ok(Step::Done);
@@ -857,14 +859,17 @@ impl RenderJob {
         if phase.next < phase.tiles.len() {
             return Ok(Step::Yield);
         }
-        let RenderPhase {
+        let Some(RenderPhase {
             exif,
             ctx,
             live,
             sink,
             settle,
             ..
-        } = self.phase.take().expect("checked Some");
+        }) = self.phase.take()
+        else {
+            return Ok(Step::Done);
+        };
         drop(live);
         self.give_back(ctx);
         let frame = WorkingFrame {

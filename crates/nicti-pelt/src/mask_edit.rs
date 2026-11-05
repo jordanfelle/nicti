@@ -162,7 +162,7 @@ pub fn next_id(params: &MaskParams) -> String {
     (1..)
         .map(|n| format!("mask-{n}"))
         .find(|id| !used.contains(id.as_str()))
-        .expect("an unused id always exists")
+        .unwrap_or_else(|| format!("mask-{}", used.len() + 1))
 }
 
 /// A new correction of `kind`, with no adjustment yet (the user picks what it does).
@@ -666,7 +666,8 @@ pub fn preview_field(
         )),
         geometry => raster::rasterize_source(geometry, w, h),
     })
-    .expect("every field is produced at the requested extent")
+    // Every source yields a field at the requested extent; an empty mask is the safe fallback.
+    .unwrap_or_else(|_| Field::new(w, h, 0.0))
 }
 
 /// The photo's luminance at `w x h` from the thumbnail (camera -> working space, then the guide's

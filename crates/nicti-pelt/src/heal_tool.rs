@@ -314,7 +314,7 @@ impl RemovalService {
         let done = self
             .install
             .as_ref()
-            .and_then(|h| h.result.lock().unwrap().take())?;
+            .and_then(|h| h.result.lock().unwrap_or_else(|e| e.into_inner()).take())?;
         self.install = None;
         if done.is_ok() {
             // The files on disk may have just been replaced (a repair), so any backend built over
@@ -491,8 +491,8 @@ impl RemovalService {
     /// Collects every removal that has finished since the last call.
     pub fn poll_removals(&mut self) -> Vec<RemovalEvent> {
         let mut events = Vec::new();
-        self.pending
-            .retain(|slot| match slot.lock().unwrap().take() {
+        self.pending.retain(
+            |slot| match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(outcome) => {
                     let id = (outcome.image_key, outcome.spot_key.clone());
                     self.pending_keys.remove(&id);
@@ -509,7 +509,8 @@ impl RemovalService {
                     false
                 }
                 None => true,
-            });
+            },
+        );
         events
     }
 }

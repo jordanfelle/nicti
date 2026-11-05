@@ -347,7 +347,7 @@ fn layout_tick(
     };
     let layout = &mut state.layout;
     if let Some((_, slot)) = &layout.pending {
-        let landed = slot.lock().unwrap().take();
+        let landed = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(result) = landed {
             layout.pending = None;
             match result {

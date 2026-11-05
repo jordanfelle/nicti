@@ -493,7 +493,12 @@ impl GridSession {
         let Some(pending) = &self.pending_snapshot else {
             return;
         };
-        let Some(result) = pending.slot.lock().unwrap().take() else {
+        let Some(result) = pending
+            .slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        else {
             return;
         };
         let landed_sort = pending.sort;
@@ -532,7 +537,7 @@ impl GridSession {
     fn poll_batches(&mut self) {
         let mut finished = Vec::new();
         for (&batch, inflight) in &self.inflight {
-            let mut out = inflight.slot.lock().unwrap();
+            let mut out = inflight.slot.lock().unwrap_or_else(|e| e.into_inner());
             for (id, outcome) in out.ready.drain(..) {
                 match outcome {
                     Ok(thumb) => {

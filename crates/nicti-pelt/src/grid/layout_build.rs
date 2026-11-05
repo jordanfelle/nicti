@@ -90,7 +90,7 @@ impl LayoutJob {
     }
 
     fn finish(&mut self, outcome: LayoutResult) {
-        *self.result.lock().unwrap() = Some(outcome);
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
         self.done = true;
         self.build = None;
         self.ids = Vec::new();
@@ -196,7 +196,10 @@ impl ChunkedJob for LayoutJob {
         if self.next < self.ids.len() {
             return Ok(Step::Yield);
         }
-        let (aspects, index, groups) = self.build.take().expect("checked above").finish();
+        let Some(build) = self.build.take() else {
+            return Ok(Step::Done);
+        };
+        let (aspects, index, groups) = build.finish();
         let key = self.key;
         self.finish(Ok(BuiltLayout {
             key,

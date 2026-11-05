@@ -24,7 +24,9 @@ impl<T: Send + 'static> Pending<T> {
         let ctx = ctx.clone();
         // Named so a hung worker (e.g. a drive probe stuck on a dead mount) is identifiable in a
         // thread dump.
-        std::thread::Builder::new()
+        // If the thread can't start, the closure (and its sender) is dropped, so the consumer's
+        // `poll` reports the worker as gone instead of waiting forever.
+        let _ = std::thread::Builder::new()
             .name("nicti-pending-worker".into())
             .spawn(move || {
                 // A panic in `work` drops `tx` (the consumer sees `Disconnected`); wake the UI so it
@@ -40,8 +42,7 @@ impl<T: Send + 'static> Pending<T> {
                 if wake {
                     crate::repaint_trace::request(&ctx, crate::repaint_trace::Wake::Pending);
                 }
-            })
-            .expect("failed to spawn pending worker");
+            });
         Self(rx)
     }
 

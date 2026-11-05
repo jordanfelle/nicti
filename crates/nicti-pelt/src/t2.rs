@@ -327,7 +327,7 @@ impl ChunkedJob for T2Job {
         // slot (and a worker thread) for the rest of the session.
         let outcome = catch_unwind(AssertUnwindSafe(|| self.run()))
             .unwrap_or_else(|_| T2Outcome::Failed("T2 generation panicked".into()));
-        *self.result.lock().unwrap() = Some(outcome);
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
         self.done = true;
         Ok(Step::Done)
     }
@@ -405,7 +405,7 @@ impl ChunkedJob for CompactJob {
             larder.compact().map_err(|e| e.to_string())
         }))
         .unwrap_or_else(|_| Err("compaction panicked".to_string()));
-        *self.result.lock().unwrap() = Some(outcome);
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
         self.done = true;
         Ok(Step::Done)
     }

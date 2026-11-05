@@ -90,7 +90,7 @@ impl VerifyUi {
         let finished = match &self.pending {
             Some(Pending::Verify(slot)) => slot
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .take()
                 .map(|r| {
                     self.note = Some(summarize_verify(&r));
@@ -99,7 +99,7 @@ impl VerifyUi {
                 .is_some(),
             Some(Pending::Baseline(slot)) => slot
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .take()
                 .map(|r| {
                     self.note = Some(summarize_baseline(&r));

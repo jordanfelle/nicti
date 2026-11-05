@@ -492,8 +492,7 @@ impl DevelopDoc {
     where
         T: serde::Serialize + serde::de::DeserializeOwned + Default + 'static,
     {
-        let mut value =
-            serde_json::to_value(params).expect("a coat params struct always serializes");
+        let mut value = crate::params_value(params);
         // A NaN serializes to JSON `null`, which the canonical stage hasher refuses, and
         // re-parsing that `null` would discard the whole document -- so scrub masks as a *typed*
         // value. Only when one is present: `sanitized()` also truncates (one document-wide brush
@@ -501,15 +500,14 @@ impl DevelopDoc {
         // adding to a stroke.
         if stage_id == MASKS && has_null(&value) {
             if let Some(masks) = (params as &dyn std::any::Any).downcast_ref::<MaskParams>() {
-                value = serde_json::to_value(masks.sanitized()).expect("mask params serialize");
+                value = crate::params_value(&masks.sanitized());
             }
         }
-        let effective = serde_json::to_value(self.stage_params::<T>(stage_id))
-            .expect("a coat params struct always serializes");
+        let effective = crate::params_value(&self.stage_params::<T>(stage_id));
         if value == effective {
             return None;
         }
-        let default = serde_json::to_value(T::default()).expect("a coat params struct serializes");
+        let default = crate::params_value(&T::default());
         let entry = if value == default {
             None
         } else {
@@ -616,6 +614,8 @@ impl DevelopDoc {
 
     /// Cache key of the neutral render AI masks infer on (see `build_graph`'s `NEUTRAL` node):
     /// what a bake key chains from, so a finished alpha is only ever reused for the same photo.
+    // `build_graph` always contains NEUTRAL (pinned by the tapetum spine tests).
+    #[allow(clippy::expect_used)]
     pub fn neutral_key(&self) -> blake3::Hash {
         self.graph
             .cache_key(NEUTRAL)
@@ -725,6 +725,9 @@ impl DevelopDoc {
     /// document recorded; on failure the profile is left off and [`Self::profile_error`] says why.
     /// AI removals' patches are not persisted: `doc` keeps their recipes, and the heal tool re-runs
     /// them from those (#324, `heal_tool::rerun_missing_removals`). The undo history starts empty.
+    // The only `expect` here applies the identity to a document with no stages, with the registry
+    // that covers every graph node: a static invariant, not user data.
+    #[allow(clippy::expect_used)]
     pub fn load_real_frame(
         &mut self,
         frame: Arc<LinearFrame>,
@@ -749,7 +752,7 @@ impl DevelopDoc {
         self.ai_alphas.clear();
         self.upright_guides.clear();
         self.upright_guide_mode = false;
-        self.frame_key = u64::from_le_bytes(identity.as_bytes()[..8].try_into().expect("8 bytes"));
+        self.frame_key = crate::first_u64(&identity);
         self.show_before = false;
         self.reload_profiles();
         if !self.looks_discovered {
@@ -979,6 +982,11 @@ impl DevelopEngine {
     /// Uses `document`'s edits, unless [`Self::show_before`] is set, in which case every stage
     /// renders at its default -- the same "no entry -> default" fallback `apply_document` already
     /// gives a document with no entry for a stage, just applied to the whole document at once.
+    // The `expect`s below are the static graph/registry invariants and the synthetic frame's own
+    // extent. `apply_document` can also refuse a document whose params the canonical hasher rejects
+    // (a hand-edited `null`), which this signature (a texture, not a `Result`) cannot report: making
+    // `render` fallible is tracked in the #749 follow-up.
+    #[allow(clippy::expect_used)]
     pub fn render(&mut self, dv: &mut DevelopDoc) -> Arc<FrameTexture> {
         let mut doc = if dv.show_before {
             EditDocument::default()
@@ -999,11 +1007,10 @@ impl DevelopEngine {
                 let kept = d.stages.remove(CROP).and_then(|mut entry| {
                     let crop: CropParams = nicti_tapetum::coat::parse(&entry.params);
                     let upright = crop.upright.filter(|u| !u.is_noop())?;
-                    entry.params = serde_json::to_value(CropParams {
+                    entry.params = crate::params_value(&CropParams {
                         upright: Some(upright),
                         ..CropParams::default()
-                    })
-                    .expect("CropParams serializes");
+                    });
                     Some(entry)
                 });
                 if let (true, Some(entry)) = (dv.uncropped_keeps_upright, kept) {
@@ -1387,7 +1394,7 @@ fn fit_loaded_crop(doc: &mut EditDocument, extent: (f32, f32)) {
     let mut crop = before;
     crop.fit_to_rotated(extent);
     if crop != before {
-        entry.params = serde_json::to_value(crop).expect("a coat params struct always serializes");
+        entry.params = crate::params_value(&crop);
     }
 }
 

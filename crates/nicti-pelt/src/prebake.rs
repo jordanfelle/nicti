@@ -78,7 +78,7 @@ type DecodeOutcome = Result<Vec<(blake3::Hash, Slot<MaskBakeOutcome>)>, String>;
 
 fn frame_key(identity: &blake3::Hash) -> u64 {
     // The same derivation as `DevelopView::frame_key`.
-    u64::from_le_bytes(identity.as_bytes()[..8].try_into().expect("8 bytes"))
+    crate::first_u64(identity)
 }
 
 fn spec(kind: JobKind) -> JobSpec {
@@ -152,7 +152,7 @@ impl ChunkedJob for PlanJob {
     /// Never `Err`: Pounce would drop the job without touching the slot.
     fn step(&mut self) -> Result<Step, JobError> {
         let outcome = catch_unwind(AssertUnwindSafe(|| self.run())).unwrap_or(None);
-        *self.slot.lock().unwrap() = Some(outcome);
+        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
         self.done = true;
         Ok(Step::Done)
     }
@@ -234,7 +234,7 @@ impl ChunkedJob for DecodeJob {
     fn step(&mut self) -> Result<Step, JobError> {
         let outcome = catch_unwind(AssertUnwindSafe(|| self.run()))
             .unwrap_or_else(|_| Err("decode panicked".to_owned()));
-        *self.slot.lock().unwrap() = Some(outcome);
+        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
         self.done = true;
         Ok(Step::Done)
     }
@@ -440,7 +440,7 @@ impl PrebakeService {
     ) -> Option<Stage> {
         match stage {
             Stage::Planning { asset_id, slot } => {
-                let outcome = slot.lock().unwrap().take();
+                let outcome = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
                 let Some(outcome) = outcome else {
                     return Some(Stage::Planning { asset_id, slot });
                 };
@@ -476,7 +476,7 @@ impl PrebakeService {
                 })
             }
             Stage::Decoding { asset_id, slot } => {
-                let outcome = slot.lock().unwrap().take();
+                let outcome = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
                 let Some(outcome) = outcome else {
                     return Some(Stage::Decoding { asset_id, slot });
                 };
@@ -508,7 +508,9 @@ impl PrebakeService {
                 mut bakes,
             } => {
                 for bake in bakes.iter_mut().filter(|b| !b.resolved) {
-                    if let Some(outcome) = bake.slot.lock().unwrap().take() {
+                    if let Some(outcome) =
+                        bake.slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+                    {
                         bake.resolved = true;
                         bake.cancelled =
                             outcome.result.as_ref().err().map(String::as_str) == Some(CANCELLED);

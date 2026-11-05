@@ -128,11 +128,12 @@ impl MetaWorker {
                     }
                 }
             })
-            .expect("spawn the marking writer thread");
+            // A thread that can't start leaves the writer dead, which `is_dead` already reports.
+            .ok();
         MetaWorker {
             tx: Some(tx),
             rx,
-            thread: Some(thread),
+            thread,
         }
     }
 

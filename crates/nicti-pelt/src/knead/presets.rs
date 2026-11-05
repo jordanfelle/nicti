@@ -64,7 +64,7 @@ fn backup_path_for(path: &Path) -> PathBuf {
     (1u32..)
         .map(|n| with(&format!(".bad{n}")))
         .find(|p| !p.exists())
-        .expect("an unused backup name exists")
+        .unwrap_or(first)
 }
 
 impl PresetStore {

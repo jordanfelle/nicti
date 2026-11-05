@@ -324,7 +324,7 @@ impl MaskBakeService {
         let done = self
             .install
             .as_ref()
-            .and_then(|h| h.result.lock().unwrap().take())?;
+            .and_then(|h| h.result.lock().unwrap_or_else(|e| e.into_inner()).take())?;
         self.install = None;
         if done.is_ok() {
             // The files on disk may have just been replaced (a repair): drop any backend built over
@@ -486,14 +486,15 @@ impl MaskBakeService {
         self.fetched.retain(|(photo, _)| *photo == open);
         let mut events = Vec::new();
         let mut fetched_back = Vec::new();
-        self.fetching
-            .retain(|slot| match slot.lock().unwrap().take() {
+        self.fetching.retain(
+            |slot| match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(outcome) => {
                     fetched_back.push(outcome);
                     false
                 }
                 None => true,
-            });
+            },
+        );
         for outcome in fetched_back {
             let id = (outcome.image_key, outcome.bake_key);
             self.pending_keys.remove(&id);
@@ -516,14 +517,15 @@ impl MaskBakeService {
             }
         }
         let mut finished = Vec::new();
-        self.pending
-            .retain(|slot| match slot.lock().unwrap().take() {
+        self.pending.retain(
+            |slot| match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(outcome) => {
                     finished.push(outcome);
                     false
                 }
                 None => true,
-            });
+            },
+        );
         for outcome in finished {
             let id = (outcome.image_key, outcome.bake_key);
             self.pending_keys.remove(&id);

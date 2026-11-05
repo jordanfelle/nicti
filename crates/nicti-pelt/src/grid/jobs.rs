@@ -76,7 +76,7 @@ impl ChunkedJob for SnapshotJob {
             .store
             .hunt_ids(&self.filter, self.sort)
             .map_err(|e| e.to_string());
-        *self.result.lock().unwrap() = Some(outcome);
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
         self.done = true;
         Ok(Step::Done)
     }
@@ -184,7 +184,7 @@ impl ThumbBatchJob {
     }
 
     fn finish(&self) {
-        self.out.lock().unwrap().done = true;
+        self.out.lock().unwrap_or_else(|e| e.into_inner()).done = true;
     }
 }
 
@@ -285,7 +285,7 @@ impl ChunkedJob for ThumbBatchJob {
         self.next = end;
         let finished = self.next >= self.ids.len();
         {
-            let mut out = self.out.lock().unwrap();
+            let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
             out.ready.extend(results);
             out.done = finished;
         }

@@ -331,7 +331,12 @@ impl LoupeSession {
         self.poll_t2(pounce);
         let mut finished = Vec::new();
         for (&asset_id, inflight) in &self.inflight {
-            if let Some(result) = inflight.slot.lock().unwrap().take() {
+            if let Some(result) = inflight
+                .slot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
                 finished.push((asset_id, inflight.cache_key, result));
             }
         }
@@ -369,7 +374,12 @@ impl LoupeSession {
         };
         let mut finished = Vec::new();
         for (&asset_id, inflight) in &t2.inflight {
-            if let Some(outcome) = inflight.slot.lock().unwrap().take() {
+            if let Some(outcome) = inflight
+                .slot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
                 finished.push((asset_id, inflight.identity, outcome));
             }
         }
@@ -384,7 +394,7 @@ impl LoupeSession {
         let compaction_result = t2
             .compaction
             .as_ref()
-            .and_then(|slot| slot.lock().unwrap().take());
+            .and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
         if let Some(result) = compaction_result {
             t2.compaction = None;
             if result.is_err() {
