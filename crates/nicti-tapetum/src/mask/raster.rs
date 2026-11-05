@@ -408,14 +408,19 @@ pub fn rasterize_brush_guided(
                 if dabs.is_empty() {
                     continue;
                 }
+                // Dabs from the hard stroke with its `erase` kept (the engine does the same: build-up
+                // flow is only boosted for an add stroke), painted as an add from an empty field.
                 let hard = Stroke {
                     feather: 0.0,
-                    erase: false,
                     ..stroke.clone()
                 };
                 let hard_dabs = dabs_for_stroke(&hard, width, height, remaining);
+                let as_add = Stroke {
+                    erase: false,
+                    ..hard
+                };
                 let mut painted = Field::new(width, height, 0.0);
-                splat_stroke(&mut painted, &hard, &hard_dabs, width, height);
+                splat_stroke(&mut painted, &as_add, &hard_dabs, width, height);
                 let refined = super::guided::guided_refine(
                     &painted,
                     guide,
@@ -1002,5 +1007,35 @@ mod tests {
         .unwrap();
         // The last (brightest) pixel is selected, the first (darkest) is not.
         assert!(bright.get(3, 3) > 0.99 && bright.get(0, 0) < 0.01);
+    }
+
+    #[test]
+    #[ignore = "timing measurement, run with --release -- --ignored --nocapture"]
+    fn auto_mask_refine_cost() {
+        let (w, h) = (320usize, 213usize);
+        let guide = Field {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .map(|i| if (i % w) > w / 2 { 0.6 } else { 0.1 })
+                .collect(),
+        };
+        for n in [1usize, 8, 64] {
+            let strokes: Vec<Stroke> = (0..n)
+                .map(|i| Stroke {
+                    points: vec![[0.1 + 0.01 * i as f32, 0.5], [0.4, 0.5]],
+                    radius: 0.1,
+                    feather: 0.05,
+                    flow: 1.0,
+                    erase: false,
+                    pressure: Vec::new(),
+                    buildup: false,
+                    auto_mask: true,
+                })
+                .collect();
+            let t = std::time::Instant::now();
+            let _ = rasterize_brush_guided(&strokes, w, h, Some(&guide));
+            eprintln!("{n} auto strokes at {w}x{h}: {:?}", t.elapsed());
+        }
     }
 }

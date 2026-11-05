@@ -1457,7 +1457,15 @@ mod tests {
         let mut build = stroke(&[[0.6, 0.2], [0.8, 0.4]], false);
         build.buildup = true;
         build.auto_mask = true;
+        let mut erase_build = stroke(&[[0.2, 0.5], [0.8, 0.5]], true);
+        erase_build.radius = 0.1;
+        erase_build.buildup = true;
+        erase_build.auto_mask = true;
         let cases: Vec<(&str, Vec<Stroke>)> = vec![
+            (
+                "auto erase with build-up over a plain fill",
+                vec![fill.clone(), erase_build],
+            ),
             ("one feathered auto add", vec![wide.clone()]),
             (
                 "auto erase over a plain fill",

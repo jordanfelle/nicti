@@ -1135,7 +1135,9 @@ fn draw_overlay(
     if mask.show_overlay {
         let need_thumb = MaskUi::needs_thumb(params, mask.selected);
         let thumb = need_thumb.then(|| mask.thumb_for(develop));
-        let key = preview_key(c, develop, develop.frame_key(), thumb.is_some());
+        // The lens-aware key: the thumbnail is rebuilt when a lens option changes, so the overlay
+        // measured on it must be too (#698; range masks had the same stale overlay).
+        let key = preview_key(c, develop, develop.lensed_frame_key(), thumb.is_some());
         if mask.overlay.as_ref().is_none_or(|o| o.key != key) {
             let (w, h) = preview_extent(source, OVERLAY_LONG_EDGE);
             let field = preview_field(c, w, h, develop, thumb.as_deref());
