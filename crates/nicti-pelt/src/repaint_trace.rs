@@ -72,7 +72,10 @@ fn trace() -> Option<&'static Trace> {
 }
 
 fn bit(wake: Wake) -> u32 {
-    1 << WAKES.iter().position(|(w, _)| *w == wake).unwrap()
+    WAKES
+        .iter()
+        .position(|(w, _)| *w == wake)
+        .map_or(0, |i| 1 << i)
 }
 
 /// How long after a wake the frame runs. Non-zero on purpose, see [`request`].
@@ -103,14 +106,18 @@ pub(crate) fn frame(ctx: &egui::Context) {
     }
     let asked = t.asked.swap(0, Ordering::Relaxed);
     t.frames.fetch_add(1, Ordering::Relaxed);
-    let gap = std::mem::replace(&mut *t.last_frame.lock().unwrap(), Instant::now()).elapsed();
+    let gap = std::mem::replace(
+        &mut *t.last_frame.lock().unwrap_or_else(|e| e.into_inner()),
+        Instant::now(),
+    )
+    .elapsed();
     if asked == 0 {
         t.unattributed.fetch_add(1, Ordering::Relaxed);
-        let mut gaps = t.gaps_ms.lock().unwrap();
+        let mut gaps = t.gaps_ms.lock().unwrap_or_else(|e| e.into_inner());
         if gaps.len() < 8 {
             gaps.push(gap.as_millis() as u64);
         }
-        let mut causes = t.causes.lock().unwrap();
+        let mut causes = t.causes.lock().unwrap_or_else(|e| e.into_inner());
         for cause in ctx.repaint_causes() {
             let text = cause.to_string();
             if causes.len() < 12 && !causes.contains(&text) {
@@ -123,7 +130,7 @@ pub(crate) fn frame(ctx: &egui::Context) {
             t.per_source[i].fetch_add(1, Ordering::Relaxed);
         }
     }
-    let mut start = t.window_start.lock().unwrap();
+    let mut start = t.window_start.lock().unwrap_or_else(|e| e.into_inner());
     if start.elapsed() >= Duration::from_secs(1) {
         let mut line = format!(
             "repaint-trace: frames={} relayout={} elapsed_ms={}",
@@ -140,9 +147,9 @@ pub(crate) fn frame(ctx: &egui::Context) {
         );
         line += &format!(
             " unattributed_gaps_ms={:?}",
-            std::mem::take(&mut *t.gaps_ms.lock().unwrap())
+            std::mem::take(&mut *t.gaps_ms.lock().unwrap_or_else(|e| e.into_inner()))
         );
-        for cause in std::mem::take(&mut *t.causes.lock().unwrap()) {
+        for cause in std::mem::take(&mut *t.causes.lock().unwrap_or_else(|e| e.into_inner())) {
             line += &format!("\n  cause: {cause}");
         }
         eprintln!("{line}");

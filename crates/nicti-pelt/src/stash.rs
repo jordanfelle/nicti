@@ -157,7 +157,7 @@ impl ChunkedJob for AlphaFetchJob {
     /// Never returns `Err`: a failure is a miss in the slot, so a poller is never left waiting.
     fn step(&mut self) -> Result<Step, JobError> {
         let alpha = catch_unwind(AssertUnwindSafe(|| self.run())).unwrap_or(None);
-        *self.slot.lock().unwrap() = Some(self.outcome(alpha));
+        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.outcome(alpha));
         self.done = true;
         Ok(Step::Done)
     }

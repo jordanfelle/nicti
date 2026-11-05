@@ -107,7 +107,7 @@ fn rotated(doc: &EditDocument, mode: Mode, degrees: f32) -> Option<EditDocument>
             CROP.to_string(),
             StageEntry {
                 schema_version: entry.map_or(1, |e| e.schema_version),
-                params: serde_json::to_value(crop).expect("a coat params struct always serializes"),
+                params: crate::params_value(&crop),
             },
         );
     }

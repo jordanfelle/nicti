@@ -172,7 +172,7 @@ enum Phase {
 
 impl RunInner {
     fn end(&self, report: ExportReport) {
-        let mut phase = self.phase.lock().unwrap();
+        let mut phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(*phase, Phase::Planning) {
             *phase = Phase::Ended(report);
         }
@@ -257,7 +257,11 @@ impl ExportRun {
     /// `(prepared, total)` while the photos are still being read from the catalog and their file
     /// names planned; `None` once the export itself is running or has ended.
     pub fn preparing(&self) -> Option<(usize, usize)> {
-        matches!(*self.inner.phase.lock().unwrap(), Phase::Planning).then(|| {
+        matches!(
+            *self.inner.phase.lock().unwrap_or_else(|e| e.into_inner()),
+            Phase::Planning
+        )
+        .then(|| {
             (
                 self.inner.prepared.load(Ordering::Relaxed),
                 self.inner.ids_total,
@@ -268,19 +272,23 @@ impl ExportRun {
     /// Drives the pipeline (a backstop: jobs normally chain themselves) and returns the final
     /// report once every photo has settled. Call once per frame.
     pub fn poll(&self) -> Option<ExportReport> {
-        let shared = match &*self.inner.phase.lock().unwrap() {
+        let shared = match &*self.inner.phase.lock().unwrap_or_else(|e| e.into_inner()) {
             Phase::Planning => return None,
             Phase::Ended(report) => return Some(report.clone()),
             Phase::Running(shared) => Arc::clone(shared),
         };
         shared.advance();
-        let report = shared.report_slot.lock().unwrap().clone();
+        let report = shared
+            .report_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         report
     }
 
     /// `(settled, total)` photos, lock-free once the pipeline runs; `(0, total)` while planning.
     pub fn progress(&self) -> (usize, usize) {
-        match &*self.inner.phase.lock().unwrap() {
+        match &*self.inner.phase.lock().unwrap_or_else(|e| e.into_inner()) {
             Phase::Planning => (0, self.inner.ids_total),
             Phase::Running(shared) => (shared.settled.load(Ordering::Relaxed), shared.total),
             Phase::Ended(report) => (report.settled(), report.total),
@@ -291,7 +299,7 @@ impl ExportRun {
     /// cancelled. A decode or an encode can't be interrupted, so this can take a moment.
     pub fn cancel(&self) {
         self.inner.cancelled.store(true, Ordering::SeqCst);
-        let shared = match &*self.inner.phase.lock().unwrap() {
+        let shared = match &*self.inner.phase.lock().unwrap_or_else(|e| e.into_inner()) {
             Phase::Running(shared) => Some(Arc::clone(shared)),
             _ => None,
         };
@@ -323,10 +331,11 @@ impl PlanJob {
     /// Reads one photo from the catalog into `prepared` (or records why it can't be exported). A
     /// catalog failure aborts the whole run.
     fn prepare_one(&mut self, id: i64) -> Result<(), StartError> {
-        let env = self
-            .env
-            .as_ref()
-            .expect("env is present until planning ends");
+        let Some(env) = self.env.as_ref() else {
+            return Err(StartError::Catalog(
+                "internal error: the export plan was used after planning ended".into(),
+            ));
+        };
         let catalog_err = |e: nicti_lair::CatalogError| StartError::Catalog(e.to_string());
         let Some(asset) = env.store.get_asset(id).map_err(catalog_err)? else {
             self.warnings
@@ -363,7 +372,11 @@ impl PlanJob {
                         .collect(),
                 );
             }
-            let names = self.keyword_names.as_ref().expect("filled above");
+            let Some(names) = self.keyword_names.as_ref() else {
+                return Err(StartError::Catalog(
+                    "internal error: the keyword names were not loaded".into(),
+                ));
+            };
             nicti_lair::scent_sync::name_paths(&tagged, names)
                 .into_iter()
                 .collect()
@@ -432,11 +445,11 @@ impl PlanJob {
         if self.prepared.is_empty() && self.failed_up_front.is_empty() {
             return Err(StartError::NothingToExport);
         }
-        let env = self.env.take().expect("env is present until planning ends");
-        let spec = self
-            .spec
-            .take()
-            .expect("spec is present until planning ends");
+        let (Some(env), Some(spec)) = (self.env.take(), self.spec.take()) else {
+            return Err(StartError::Catalog(
+                "internal error: the export plan was finished twice".into(),
+            ));
+        };
         let prepared = std::mem::take(&mut self.prepared);
         let plan_items: Vec<PlanItem> = prepared.iter().map(|p| p.plan_item.clone()).collect();
         let plan = plan_batch(&plan_items, &spec, self.extension, &FsProbe)?;
@@ -494,13 +507,13 @@ impl PlanJob {
             report_slot: Arc::new(Mutex::new(None)),
         });
         {
-            let mut st = shared.state.lock().unwrap();
+            let mut st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
             for (id, why) in failed_up_front {
                 shared.record_locked(&mut st, Outcome::Failed(id, why));
             }
         }
         {
-            let mut phase = self.inner.phase.lock().unwrap();
+            let mut phase = self.inner.phase.lock().unwrap_or_else(|e| e.into_inner());
             if !matches!(*phase, Phase::Planning) {
                 return Ok(());
             }
@@ -663,7 +676,7 @@ impl Shared {
     }
 
     fn with_state<R>(&self, f: impl FnOnce(&mut RunState) -> R) -> R {
-        f(&mut self.state.lock().unwrap())
+        f(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Records one photo's outcome and publishes the report when the last one settles.
@@ -677,7 +690,7 @@ impl Shared {
         self.settled.store(st.report.settled(), Ordering::Relaxed);
         if st.report.settled() >= self.total && !st.published {
             st.published = true;
-            *self.report_slot.lock().unwrap() = Some(st.report.clone());
+            *self.report_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(st.report.clone());
         }
     }
 
@@ -692,7 +705,7 @@ impl Shared {
         // Queued stage outputs dropped after the lock is released (their tickets re-lock it).
         let mut discarded: (Vec<Ready>, Vec<Rendered>) = (Vec::new(), Vec::new());
         {
-            let mut st = self.state.lock().unwrap();
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.published {
                 return;
             }
@@ -729,13 +742,16 @@ impl Shared {
                     && !st.ready.is_empty()
                     && st.rendered.len() + st.encoding < MAX_ENCODE_SLOTS
                 {
-                    let ready = st.ready.pop_front().expect("checked non-empty");
-                    st.rendering = true;
-                    launches.push(Launch::Render(ready));
+                    if let Some(ready) = st.ready.pop_front() {
+                        st.rendering = true;
+                        launches.push(Launch::Render(ready));
+                    }
                 }
                 // Encode.
                 while st.encoding < MAX_ENCODING && !st.rendered.is_empty() {
-                    let rendered = st.rendered.pop_front().expect("checked non-empty");
+                    let Some(rendered) = st.rendered.pop_front() else {
+                        break;
+                    };
                     st.encoding += 1;
                     launches.push(Launch::Encode(rendered));
                 }
@@ -994,7 +1010,11 @@ impl RenderJob {
 
     /// Returns the batch's kernels for the next photo.
     fn give_back(&self, ctx: ExportRenderer) {
-        *self.shared.render_ctx.lock().unwrap() = Some(ctx);
+        *self
+            .shared
+            .render_ctx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(ctx);
     }
 
     /// First step: build the live suffix for the whole frame and plan the crop-sized tile grid.
@@ -1012,7 +1032,7 @@ impl RenderJob {
         let mut ctx = shared
             .render_ctx
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .take()
             .unwrap_or_else(|| ExportRenderer::new(&shared.gpu));
 
@@ -1136,7 +1156,9 @@ impl ChunkedJob for RenderJob {
             return Ok(Step::Done);
         };
         if shared.is_cancelled() {
-            let phase = self.phase.take().expect("checked Some");
+            let Some(phase) = self.phase.take() else {
+                return Ok(Step::Done);
+            };
             self.give_back(phase.ctx);
             shared.with_state(|st| st.rendering = false);
             self.finished = true;
@@ -1160,14 +1182,17 @@ impl ChunkedJob for RenderJob {
             return Ok(Step::Yield);
         }
 
-        let RenderPhase {
+        let Some(RenderPhase {
             ticket,
             exif,
             ctx,
             live,
             sink,
             ..
-        } = self.phase.take().expect("checked Some");
+        }) = self.phase.take()
+        else {
+            return Ok(Step::Done);
+        };
         drop(live);
         self.give_back(ctx);
         self.finished = true;

@@ -248,7 +248,7 @@ impl RowIndex {
             header_height
         };
         self.first
-            .push(u32::try_from(open.start).expect("fewer than 2^32 photos"));
+            .push(u32::try_from(open.start).unwrap_or(u32::MAX));
         self.top.push(self.y);
         self.height.push(h);
         self.header.push(open.header);

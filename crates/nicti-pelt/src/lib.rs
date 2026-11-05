@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! The `nicti-pelt` app shell (#241): one eframe window whose wgpu device *is* Tapetum's
 //! `GpuContext` (ADR-0016's "one shared device for compute and display"), a Tapetum-rendered
 //! frame painted via `egui_wgpu::CallbackTrait` (ADR-0068), placeholder library/loupe/develop view
@@ -7,6 +11,19 @@
 //!
 //! The Library view's virtualized thumbnail grid is `grid` (#30); its filter bar is `filter_bar`
 //! (#242); culling -- marking keys, undo, survey/compare and delete -- is `cull` (#32).
+
+/// A typed stage-params struct as JSON. These are derive-`Serialize` structs of numbers, strings
+/// and enums, which cannot fail to serialize (a NaN becomes `null`, not an error); `Null` is the
+/// total fallback, and `stage_edit` already treats a `null` as the value to scrub.
+pub(crate) fn params_value<T: serde::Serialize>(value: &T) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+}
+
+/// The first eight bytes of a hash as a little-endian `u64` (total: no slicing).
+pub(crate) fn first_u64(hash: &blake3::Hash) -> u64 {
+    let bytes = hash.as_bytes();
+    u64::from_le_bytes(std::array::from_fn(|i| bytes[i]))
+}
 
 mod activity;
 mod app;
@@ -114,4 +131,23 @@ pub fn run_with(version: &str, control: Option<ControlOptions>) -> eframe::Resul
             )))
         }),
     )
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    #[test]
+    fn first_u64_is_the_little_endian_prefix_of_the_hash() {
+        let h = blake3::hash(b"nicti");
+        let want = u64::from_le_bytes(h.as_bytes()[..8].try_into().unwrap());
+        assert_eq!(super::first_u64(&h), want);
+    }
+
+    #[test]
+    fn params_value_serialises_a_params_struct_like_serde_json() {
+        let crop = nicti_tapetum::coat::CropParams::default();
+        assert_eq!(
+            super::params_value(&crop),
+            serde_json::to_value(crop).unwrap()
+        );
+    }
 }

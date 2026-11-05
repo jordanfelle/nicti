@@ -165,7 +165,8 @@ impl LrcImportJob {
         }
         self.finished = true;
         self.report.assets_tagged = self.tagged.len() as u64;
-        *self.result.lock().unwrap() = Some(std::mem::take(&mut self.report));
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(std::mem::take(&mut self.report));
     }
 
     fn set_progress(&mut self, total: Option<u64>, done: u64) {
@@ -282,9 +283,9 @@ impl LrcImportJob {
         after: i64,
         fold_map: Option<HashMap<String, i64>>,
     ) -> Result<Step, StrayError> {
-        let local_root_id = self.roots[root]
-            .local_root_id
-            .expect("existing roots are registered");
+        let local_root_id = self.roots[root].local_root_id.ok_or_else(|| {
+            StrayError::Refused("internal error: an imported root was never registered".into())
+        })?;
         let fold_map = match fold_map {
             Some(m) => m,
             None => {

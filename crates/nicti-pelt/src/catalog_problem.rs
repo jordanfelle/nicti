@@ -147,6 +147,9 @@ pub struct Launcher {
 }
 
 impl Launcher {
+    // The app is only ever started with eframe's wgpu renderer (`main` selects it), so a missing
+    // render state is a startup configuration error, not something to limp past.
+    #[allow(clippy::expect_used)]
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         version: String,

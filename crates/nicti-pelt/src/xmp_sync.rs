@@ -115,7 +115,7 @@ impl XmpWriter {
         let status = Arc::new(Mutex::new(Status::default()));
         let (flag, st) = (autowrite.clone(), status.clone());
         let writer_store = store.clone();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("nicti-xmp-writer".into())
             .spawn(move || {
                 while let Ok(first) = rx.recv() {
@@ -186,8 +186,11 @@ impl XmpWriter {
                         }
                     }
                 }
-            })
-            .expect("spawn the XMP writer thread");
+            });
+        if let Err(e) = spawned {
+            lock_status(&status).last_error =
+                Some(format!("Couldn't start the sidecar writer thread: {e}"));
+        }
         XmpWriter {
             tx,
             store,
@@ -298,7 +301,9 @@ impl XmpMeta {
                 }
             });
         }
-        let leaf = leaf.expect("path is non-empty");
+        let Some(leaf) = leaf else {
+            return Ok(None);
+        };
         // Chunked like the marker writes (`cull::worker::CHUNK`): one transaction holds the catalog
         // mutex, which stalls the grid's reads on a huge selection. Queue what landed even if a
         // later chunk fails, so those sidecars still follow the catalog.

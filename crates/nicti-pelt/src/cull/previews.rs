@@ -111,7 +111,7 @@ impl TilePreviews {
     pub fn poll(&mut self) {
         let mut finished = Vec::new();
         for (&id, (_, slot)) in &self.t2_jobs {
-            if let Some(outcome) = slot.lock().unwrap().take() {
+            if let Some(outcome) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 finished.push((id, outcome));
             }
         }
@@ -174,7 +174,7 @@ impl TilePreviews {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         if let Some(slot) = self.sidecar_fetch.get(&id) {
-            let outcome = slot.lock().unwrap().take();
+            let outcome = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(bytes) = outcome {
                 self.sidecar_fetch.remove(&id);
                 // Never downgrade: T2 may have been installed while the sidecar read ran.

@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! Lightroom Classic catalog import (#62, ADR-0061/0156/0158) -- a stray cat taken into a new home.
 //!
 //! Reads a **closed `.lrcat` backup** read-only (`open.rs`, promoted from `spikes/shed`) and brings

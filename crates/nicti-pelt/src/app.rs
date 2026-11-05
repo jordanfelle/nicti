@@ -603,7 +603,7 @@ impl PeltApp {
     /// retrying on the very next poll rather than waiting for unrelated further edits.
     fn poll_backup(&mut self) {
         if let Some(result) = self.pending_backup_result.clone() {
-            if let Some(report) = result.lock().unwrap().take() {
+            if let Some(report) = result.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 if matches!(report.outcome, BackupOutcome::Verified(_)) {
                     if let Some(changes) = self.pending_backup_changes {
                         self.nine_lives.record_ran(changes);
@@ -658,7 +658,7 @@ impl PeltApp {
     /// Folds a finished `MoveJob`'s report into `last_move_summary` (#26).
     fn poll_move(&mut self) {
         if let Some(slot) = self.pending_move_result.clone() {
-            if let Some(outcome) = slot.lock().unwrap().take() {
+            if let Some(outcome) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 self.last_move_summary = Some(summarize_move(&outcome));
                 self.pending_move_result = None;
             }
@@ -672,7 +672,7 @@ impl PeltApp {
         let Some(slot) = self.pending_recovery_result.clone() else {
             return;
         };
-        let Some(resumed) = slot.lock().unwrap().take() else {
+        let Some(resumed) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
             return;
         };
         self.pending_recovery_result = None;
@@ -3205,7 +3205,9 @@ impl PeltApp {
             self.loupe_pan = [0.0, 0.0];
         }
 
-        let loupe = self.loupe.as_mut().expect("checked Some above");
+        let Some(loupe) = self.loupe.as_mut() else {
+            return;
+        };
         let Some(asset_id) = loupe.current_asset_id() else {
             return; // is_empty() already checked above; unreachable in practice
         };
@@ -3244,7 +3246,9 @@ impl PeltApp {
             }
         });
         if retry_clicked {
-            let loupe = self.loupe.as_mut().expect("checked Some above");
+            let Some(loupe) = self.loupe.as_mut() else {
+                return;
+            };
             loupe.retry(asset_id);
             // retry() only clears the error -- request_prefetch has to actually run again to
             // resubmit it, same as any other cursor-move-triggered prefetch.
@@ -3682,7 +3686,7 @@ impl PeltApp {
         // A sidecar read for this photo finished on a worker.
         if let Some((id, slot)) = &self.loupe_t0_fetch {
             let id = *id;
-            let outcome = slot.lock().unwrap().take();
+            let outcome = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
             if id != asset_id {
                 self.loupe_t0_fetch = None;
             } else if let Some(bytes) = outcome {

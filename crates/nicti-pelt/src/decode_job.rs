@@ -97,7 +97,7 @@ impl ChunkedJob for DecodeJob {
             .decode_linear(&self.path)
             .map(Arc::new)
             .map_err(|e| e.to_string());
-        *self.result.lock().unwrap() = Some(outcome);
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
         self.done = true;
         Ok(Step::Done)
     }

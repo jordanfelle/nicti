@@ -163,7 +163,10 @@ impl DeleteFlow {
         let removed = self.removed.clone();
         let shred = Shred::new(store, mode, ids, trasher).on_removed(move |gone| {
             purge_previews(larder.as_ref(), gone);
-            removed.lock().unwrap().extend_from_slice(gone);
+            removed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(gone);
         });
         let (job, slot) = DeleteJob::new(shred);
         pounce.submit(Box::new(job));
@@ -178,11 +181,13 @@ impl DeleteFlow {
         // chunk's ids (and the caller would never forget them). Draining first can't lose any --
         // an id pushed after the drain is picked up on the next call.
         let mut finished = false;
-        let outcome = self
-            .pending
-            .as_ref()
-            .and_then(|(slot, mode)| slot.lock().unwrap().take().map(|o| (o, *mode)));
-        let removed = std::mem::take(&mut *self.removed.lock().unwrap());
+        let outcome = self.pending.as_ref().and_then(|(slot, mode)| {
+            slot.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .map(|o| (o, *mode))
+        });
+        let removed = std::mem::take(&mut *self.removed.lock().unwrap_or_else(|e| e.into_inner()));
         if let Some((outcome, mode)) = outcome {
             self.last_summary = Some(summarize(mode, &outcome));
             finished = true;

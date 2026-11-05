@@ -114,7 +114,7 @@ impl LrcImportUi {
     /// Folds a finished job's report in. Call once per frame.
     pub fn poll(&mut self) {
         if let Some(slot) = self.pending.clone() {
-            if let Some(report) = slot.lock().unwrap().take() {
+            if let Some(report) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 self.note = Some(report.summary());
                 self.last_report = Some(report);
                 self.pending = None;

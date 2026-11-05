@@ -18,11 +18,11 @@ impl Gate {
         Gate(Arc::new((Mutex::new(true), Condvar::new())))
     }
     fn set(&self, open: bool) {
-        *self.0 .0.lock().unwrap() = open;
+        *self.0 .0.lock().unwrap_or_else(|e| e.into_inner()) = open;
         self.0 .1.notify_all();
     }
     fn wait_open(&self) {
-        let mut open = self.0 .0.lock().unwrap();
+        let mut open = self.0 .0.lock().unwrap_or_else(|e| e.into_inner());
         while !*open {
             open = self.0 .1.wait(open).unwrap();
         }
@@ -57,10 +57,13 @@ impl FakeStore {
         })
     }
     fn row(&self, id: i64) -> AssetMeta {
-        self.rows.lock().unwrap()[&id].clone()
+        self.rows.lock().unwrap_or_else(|e| e.into_inner())[&id].clone()
     }
     fn put(&self, id: i64, meta: AssetMeta) {
-        self.rows.lock().unwrap().insert(id, meta);
+        self.rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, meta);
     }
 }
 
@@ -71,7 +74,7 @@ impl MetaStore for FakeStore {
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err("catalog is locked".into());
         }
-        let rows = self.rows.lock().unwrap();
+        let rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         Ok(ids
             .iter()
             .filter_map(|id| rows.get(id).map(|m| (*id, m.clone())))
@@ -93,10 +96,10 @@ impl MetaStore for FakeStore {
             return Err("disk is on fire".into());
         }
         self.write_calls.fetch_add(1, Ordering::SeqCst);
-        let mut rows = self.rows.lock().unwrap();
+        let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         self.written
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .extend(items.iter().map(|(id, _)| *id));
         for (id, m) in items {
             if let Some(slot) = rows.get_mut(id) {
@@ -341,7 +344,11 @@ fn a_mark_that_changes_nothing_leaves_no_undo_entry() {
     cull.mark(vec![1], CullAction::SetRating(Some(3))); // changes nothing
     cull.settle_all();
     assert_eq!(
-        store.written.lock().unwrap().len(),
+        store
+            .written
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len(),
         1,
         "a no-op mark writes nothing to the catalog"
     );
@@ -402,8 +409,16 @@ fn forgetting_deleted_photos_removes_them_from_undo() {
 
     // Photo 1 is deleted. Undo must not even ATTEMPT to write it (a real catalog would ignore
     // the missing row, which is why this checks the attempts, not the resulting rows).
-    store.written.lock().unwrap().clear();
-    store.rows.lock().unwrap().remove(&1);
+    store
+        .written
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    store
+        .rows
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&1);
     cull.forget(&[1]);
     assert_eq!(cull.meta(1), None);
     cull.undo();
@@ -411,7 +426,7 @@ fn forgetting_deleted_photos_removes_them_from_undo() {
         c.meta(2) == Some(&AssetMeta::default())
     });
     assert_eq!(
-        *store.written.lock().unwrap(),
+        *store.written.lock().unwrap_or_else(|e| e.into_inner()),
         vec![2],
         "only photo 2 was restored"
     );
@@ -954,7 +969,14 @@ fn a_big_mark_is_written_in_chunks() {
     let mut cull = state(&store);
     cull.mark((0..n).collect(), CullAction::SetRating(Some(2)));
     cull.settle_all();
-    assert_eq!(store.written.lock().unwrap().len(), n as usize);
+    assert_eq!(
+        store
+            .written
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len(),
+        n as usize
+    );
     assert_eq!(
         store.write_calls.load(Ordering::SeqCst),
         3,
