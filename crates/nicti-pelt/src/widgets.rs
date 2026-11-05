@@ -117,13 +117,22 @@ pub fn enabled(ctx: &egui::Context) -> bool {
 
 /// Records `rect` under `name` for this frame. A no-op while the channel is off.
 pub fn register(ctx: &egui::Context, name: &str, rect: Rect) {
-    let Some(w) = handle(ctx) else { return };
+    store(ctx, name, rect);
+}
+
+/// [`register`], returning whether the widget was actually stored: a bad name, a non-finite rect
+/// or a full registry store nothing (and so must not make its egui id keyboard-activatable).
+fn store(ctx: &egui::Context, name: &str, rect: Rect) -> bool {
+    let Some(w) = handle(ctx) else { return false };
     if !valid_name(name) || !rect.is_finite() {
-        return;
+        return false;
     }
     let mut st = w.lock();
     if st.current.len() < MAX_WIDGETS {
         st.current.insert(name.to_owned(), rect);
+        true
+    } else {
+        false
     }
 }
 
@@ -135,10 +144,14 @@ pub fn reg(ctx: &egui::Context, name: &str, response: &egui::Response) {
 /// [`reg`] for a widget whose clickable rect is not its response's (a grid cell, clipped to what is
 /// on screen): the egui `id` is what keyboard focus names, so Enter and Space may activate it.
 pub fn register_widget(ctx: &egui::Context, name: &str, rect: Rect, id: egui::Id) {
-    register(ctx, name, rect);
+    // Only a widget that was really stored (valid name, finite rect, room in the registry) can be
+    // activated from the keyboard by an injected Enter or Space.
+    if !store(ctx, name, rect) {
+        return;
+    }
     if let Some(w) = handle(ctx) {
         let mut st = w.lock();
-        if valid_name(name) && st.ids_current.len() < MAX_WIDGETS {
+        if st.ids_current.len() < MAX_WIDGETS {
             st.ids_current.insert(id);
         }
     }
@@ -856,6 +869,29 @@ mod tests {
     fn focus(rig: &mut Rig, id: Option<egui::Id>) {
         rig.ctx.memory_mut(|m| m.request_focus(id.unwrap()));
         rig.frame();
+    }
+
+    #[test]
+    fn a_widget_that_was_not_stored_cannot_be_activated_from_the_keyboard() {
+        let ctx = egui::Context::default();
+        let _w = install(&ctx, false);
+        let ok = egui::Id::unique("ok");
+        let bad_name = egui::Id::unique("bad name");
+        let bad_rect = egui::Id::unique("bad rect");
+        register_widget(&ctx, "button:ok", screen(), ok);
+        register_widget(&ctx, "Not A Name", screen(), bad_name);
+        let nan = Rect::from_min_size(Pos2::new(f32::NAN, 0.0), egui::vec2(10.0, 10.0));
+        register_widget(&ctx, "button:nan", nan, bad_rect);
+        let ids = handle(&ctx).unwrap().lock().ids_current.clone();
+        assert!(ids.contains(&ok));
+        assert!(
+            !ids.contains(&bad_name),
+            "an invalid name is not registered"
+        );
+        assert!(
+            !ids.contains(&bad_rect),
+            "a non-finite rect is not registered"
+        );
     }
 
     #[test]
