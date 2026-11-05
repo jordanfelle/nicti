@@ -27,9 +27,16 @@ impl<T: Send + 'static> Pending<T> {
         std::thread::Builder::new()
             .name("nicti-pending-worker".into())
             .spawn(move || {
-                let value = work();
-                let wake = wake(&value);
-                let _ = tx.send(value);
+                // A panic in `work` drops `tx` (the consumer sees `Disconnected`); wake the UI so it
+                // notices on this frame rather than whenever the next input event arrives (#740).
+                let wake = match nicti_pounce::guard::catch_panic(work) {
+                    Ok(value) => {
+                        let wake = wake(&value);
+                        let _ = tx.send(value);
+                        wake
+                    }
+                    Err(_) => true,
+                };
                 if wake {
                     crate::repaint_trace::request(&ctx, crate::repaint_trace::Wake::Pending);
                 }

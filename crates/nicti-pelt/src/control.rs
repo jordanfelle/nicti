@@ -649,20 +649,25 @@ fn start_with(
                 if stop_flag.load(Ordering::SeqCst) {
                     return;
                 }
-                let Ok(stream) = stream else {
-                    // Out of file descriptors etc.: don't spin on it.
-                    thread::sleep(Duration::from_millis(50));
-                    continue;
-                };
-                // Belt and braces: the socket is bound to loopback, but never serve anything else.
-                if !stream.peer_addr().is_ok_and(|a| a.ip().is_loopback()) {
-                    continue;
-                }
-                let shared = shared.clone();
-                let _ = thread::Builder::new()
-                    .name("nicti-control-conn".into())
-                    .stack_size(256 * 1024)
-                    .spawn(move || serve_guarded(stream, &shared));
+                // A panic handling one accepted socket must not end the accept loop and leave
+                // the control server silently dead (#740).
+                let handled = nicti_pounce::guard::catch_panic(|| {
+                    let Ok(stream) = stream else {
+                        // Out of file descriptors etc.: don't spin on it.
+                        thread::sleep(Duration::from_millis(50));
+                        return;
+                    };
+                    // Belt and braces: the socket is bound to loopback, but never serve anything else.
+                    if !stream.peer_addr().is_ok_and(|a| a.ip().is_loopback()) {
+                        return;
+                    }
+                    let shared = shared.clone();
+                    let _ = thread::Builder::new()
+                        .name("nicti-control-conn".into())
+                        .stack_size(256 * 1024)
+                        .spawn(move || serve_guarded(stream, &shared));
+                });
+                drop(handled);
             }
         })
         .map_err(|e| format!("can't start the control thread: {e}"))?;

@@ -169,6 +169,8 @@ struct Source<T> {
     stale: Arc<AtomicBool>,
     /// A result has arrived at least once.
     loaded: bool,
+    /// The most recent read died without a result (its worker panicked) (#740).
+    failed: bool,
     /// The last value that landed, so a re-read that comes back identical can skip waking the UI
     /// (#512): the panel already shows it, and the `CACHE_TTL` repaint timer picks the result up.
     last: Option<T>,
@@ -181,6 +183,7 @@ impl<T> Default for Source<T> {
             at: None,
             stale: Arc::new(AtomicBool::new(false)),
             loaded: false,
+            failed: false,
             last: None,
         }
     }
@@ -200,12 +203,13 @@ impl<T: Send + Clone + PartialEq + 'static> Source<T> {
                 Ok(None) => return None,
                 Ok(Some(v)) => {
                     self.loaded = true;
+                    self.failed = false;
                     self.last = Some(v.clone());
                     landed = Some(v);
                 }
                 // The worker panicked: keep the old value (`loaded` stays as it was) and retry on the
                 // normal cadence.
-                Err(_) => {}
+                Err(_) => self.failed = true,
             }
             self.job = None;
             self.at = Some(std::time::Instant::now());
@@ -279,6 +283,12 @@ impl Cache {
     /// nothing was read, not because there are no folders.
     pub fn loaded(&self) -> bool {
         self.catalog.loaded
+    }
+
+    /// The catalog read died without a result and nothing has loaded yet, so the panel can say
+    /// so instead of showing "Reading folders" forever (#740).
+    pub fn failed(&self) -> bool {
+        !self.catalog.loaded && self.catalog.failed
     }
 
     /// Swaps in finished reads and starts the next ones when due; never blocks. The catalog read
