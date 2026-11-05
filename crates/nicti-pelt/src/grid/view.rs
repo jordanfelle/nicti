@@ -451,6 +451,15 @@ fn show_cell(
 ) {
     let id = session.ids()[index];
     let response = ui.interact(rect, ui.scope_id().with(("cell", index)), Sense::click());
+    // For the control channel (#649): `cell:<photo id>`, the part of the cell that is on screen
+    // (a cell scrolled half out of view is clicked in its visible half).
+    if crate::widgets::enabled(ui.ctx()) {
+        crate::widgets::register(
+            ui.ctx(),
+            &format!("cell:{id}"),
+            rect.intersect(ui.clip_rect()),
+        );
+    }
     // Cells are custom-painted, so without this they have no accessibility node: a
     // screen reader (and the headless UI harness, `swat/`) couldn't find them.
     // Only evaluated while AccessKit is on.

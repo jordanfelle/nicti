@@ -308,3 +308,50 @@ replaced, clash policy decided by the channel, GPS off) and unit-tested. Known a
 the default `UniqueSuffix` policy repeated `export.run` calls keep adding files (no byte quota; the
 operator owns the folder and the disk), and a local process that can write to the export folder can
 still race the check (a link planted between check and write).
+
+## Slice 2b as built (#649): widgets by name, injected input, settle, dialog gating
+
+- **`crates/nicti-pelt/src/widgets.rs`.** The registry lives in egui's context data, installed only
+  when the channel starts (`widgets::install`), so with the channel off a `reg(...)` is one failed
+  lookup and grid cells check `widgets::enabled` before building a name. Names are `kind:name`,
+  lower-case ASCII, at most 80 characters, at most 1024 per frame. The frame being drawn replaces the
+  last one at `begin_frame`, so `ui.widgets` always lists a complete recent frame. Registered today:
+  the Library toolbar (`button:select-all`, `survey`, `compare`, `export`), the Library controls
+  (`button:import`, `sync`, `open-in-loupe`) and every visible grid cell as `cell:<photo id>` (the
+  on-screen part of the cell is what gets clicked).
+- **Commands:** `ui.widgets` (Read), `ui.click {widget, button?, modifiers?}`, `ui.key {key,
+  modifiers?}`, `ui.drag {widget, dx, dy}` (Mutate) and `ui.settle {timeout_ms?, jobs?}` (Read).
+  Input is queued as steps of real `egui::Event`s and handed to egui from `eframe::App::raw_input_hook`,
+  one step per frame: a click is move+press, then release a frame later; a key is press then release; a
+  drag is press, 8 intermediate moves, release. **A click can only name a registered widget** (no
+  coordinates) and **there is no text entry**, so a path field cannot be typed into. A request is
+  refused with a reason when the window has not painted a frame in 2 s ("not visible"), the widget is
+  unknown (the error lists similar names), it is off screen, or 64 steps are already queued.
+- **`ui.settle`** replies once nothing is queued and two frames have drawn since the last delivery
+  (and, with `jobs: true`, no Pounce job is queued or running). The reply is *deferred* in the
+  `CommandQueue` and re-checked on every drain, with a deadline (default 5 s, 50 ms to 30 s): a timeout
+  answers `{settled: false, reason}` rather than leaving the client to the transport's 30 s cap, a
+  client that gave up is dropped, and the app keeps painting while one waits. Never a fixed sleep.
+- **The confirm-dialog boundary, two layers.** (1) *Naming:* widgets that confirm something
+  destructive are registered with `reg_destructive`, which records nothing unless the channel was
+  started with `--control-allow-destructive`: the delete dialog's three buttons, the Export dialog's
+  Export and Cancel, and the toolbar's Delete. (2) *Opening:* naming alone is not enough (a registered
+  widget behind a modal can share a position with a dialog button, and Enter or Space can activate a
+  focused one), so while the delete or Export dialog is open `ui.click/key/drag` are refused outright,
+  steps already queued are discarded at delivery, **and the frame's injected events are scrubbed back
+  out of egui's input at the top of `ui`** using the live dialog state. That last step closes a real
+  hole found writing the tests: the input hook runs *before* the frame's commands, so a command that
+  opens the dialog in the same frame would otherwise let an Enter or click delivered a moment earlier
+  land on it. Only events the hook itself injected are removed, never a person's. `ui.inspect` reports
+  `input_blocked`, the count discarded.
+- `export.open` is not nameable-from-input-only: opening the dialog by clicking `button:export` is
+  allowed (it only opens a dialog), after which the channel can do nothing in it without the flag;
+  `export.run` remains the headless route.
+- **Not built:** screenshot (3a) and the MCP shim (3b) are separate PRs of this ticket.
+
+### Slice 2b review hardening (#649)
+
+- The hook drains waiting commands before it reads the live dialog state, so a command that opens the delete or Export dialog is seen by the gate before that frame's input is delivered.
+- At most one step is carried while no `ui` pass has run (hidden or minimised window), so the scrub always covers everything carried.
+- `scrub_injected` removes key events only; egui builds pointer state before `ui`, so the gate relies on delivery-time refusal for the mouse. A press cannot confirm a dialog on its own (the release is a separate step and is discarded).
+- Out of scope, stated plainly: Tab then Enter/Space can activate any focusable button, and only the delete and Export dialogs are gated. Other confirm-style buttons (purge previews, clear positions, repair thumbnails/models, "Use file") are reachable by keys with `--control` on. The channel is loopback + token only.

@@ -906,6 +906,21 @@ mod tests {
         fn export_status(&self) -> Value {
             json!({"running": false})
         }
+        fn widgets_list(&self) -> Result<Value, String> {
+            Ok(json!([]))
+        }
+        fn ui_click(&mut self, _: &str, _: &str, _: &[String]) -> Result<Value, String> {
+            Err("none".into())
+        }
+        fn ui_key(&mut self, _: &str, _: &[String]) -> Result<Value, String> {
+            Err("none".into())
+        }
+        fn ui_drag(&mut self, _: &str, _: f32, _: f32) -> Result<Value, String> {
+            Err("none".into())
+        }
+        fn ui_settled(&self, _: bool) -> bool {
+            true
+        }
     }
 
     /// A running channel plus a thread standing in for the UI thread that drains its queue.

@@ -65,6 +65,7 @@ mod update;
 mod verify_ui;
 mod view_orient;
 mod viewport;
+mod widgets;
 mod xmp_sync;
 
 use std::sync::Arc;
