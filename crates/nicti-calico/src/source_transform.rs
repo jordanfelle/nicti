@@ -157,14 +157,20 @@ impl SourceTransforms {
 
     fn entry_for(&self, icc: Option<&[u8]>) -> Entry {
         let key = icc.map(|b| (b.len(), self.hasher.hash_one(b)));
-        if let Some(e) = self.cache.lock().unwrap().get(&key) {
+        // A poisoned lock still holds a valid cache (an entry is inserted whole): use it.
+        if let Some(e) = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
             return e.clone();
         }
         // Built outside the lock: a profile build can take milliseconds and other workers
         // converting already-cached profiles shouldn't wait on it. A duplicate build on a race
         // is harmless.
         let built = self.build(icc);
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if cache.len() >= MAX_CACHED {
             cache.clear();
         }

@@ -197,7 +197,7 @@ fn big_table_decode(encoded: &str) -> Result<Vec<u8>, BigTableError> {
         return Err(BigTableError::TooShort);
     }
 
-    let declared_size = u32::from_le_bytes(binary[0..4].try_into().unwrap());
+    let declared_size = u32::from_le_bytes([binary[0], binary[1], binary[2], binary[3]]);
 
     if declared_size > MAX_DECOMPRESSED_SIZE {
         return Err(BigTableError::DeclaredSizeTooLarge {
@@ -254,25 +254,25 @@ impl<'a> StreamReader<'a> {
         Ok(())
     }
 
+    /// The next `N` bytes, or an error when the stream is shorter.
+    fn take<const N: usize>(&mut self) -> Result<[u8; N], BigTableError> {
+        self.need(N)?;
+        let mut out = [0u8; N];
+        out.copy_from_slice(&self.data[self.pos..self.pos + N]);
+        self.pos += N;
+        Ok(out)
+    }
+
     fn u32(&mut self) -> Result<u32, BigTableError> {
-        self.need(4)?;
-        let v = u32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
-        self.pos += 4;
-        Ok(v)
+        Ok(u32::from_le_bytes(self.take::<4>()?))
     }
 
     fn f32(&mut self) -> Result<f32, BigTableError> {
-        self.need(4)?;
-        let v = f32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
-        self.pos += 4;
-        Ok(v)
+        Ok(f32::from_le_bytes(self.take::<4>()?))
     }
 
     fn f64(&mut self) -> Result<f64, BigTableError> {
-        self.need(8)?;
-        let v = f64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
-        self.pos += 8;
-        Ok(v)
+        Ok(f64::from_le_bytes(self.take::<8>()?))
     }
 
     fn remaining(&self) -> usize {
@@ -310,19 +310,19 @@ fn parse_look_table_stream(raw: &[u8]) -> Result<DecodedLookTable, BigTableError
         .checked_mul(sat_divisions)
         .and_then(|v| v.checked_mul(val_divisions));
 
-    if !(1..=MAX_HUE_SAMPLES).contains(&hue_divisions)
-        || !(1..=MAX_SAT_SAMPLES).contains(&sat_divisions)
-        || !(1..=MAX_VAL_SAMPLES).contains(&val_divisions)
-        || total.is_none_or(|t| t > MAX_TOTAL_SAMPLES)
-    {
-        return Err(BigTableError::DimensionsOutOfRange {
-            hue: hue_divisions,
-            sat: sat_divisions,
-            val: val_divisions,
-        });
-    }
-
-    let count = total.unwrap() as usize;
+    let in_range = (1..=MAX_HUE_SAMPLES).contains(&hue_divisions)
+        && (1..=MAX_SAT_SAMPLES).contains(&sat_divisions)
+        && (1..=MAX_VAL_SAMPLES).contains(&val_divisions);
+    let count = match total {
+        Some(t) if in_range && t <= MAX_TOTAL_SAMPLES => t as usize,
+        _ => {
+            return Err(BigTableError::DimensionsOutOfRange {
+                hue: hue_divisions,
+                sat: sat_divisions,
+                val: val_divisions,
+            })
+        }
+    };
     let mut data = Vec::with_capacity(count);
     for _ in 0..count {
         let hue_shift = r.f32()?;
@@ -449,7 +449,12 @@ fn md5(input: &[u8]) -> [u8; 16] {
     for chunk in msg.chunks_exact(64) {
         let mut m = [0u32; 16];
         for (i, word) in m.iter_mut().enumerate() {
-            *word = u32::from_le_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
+            *word = u32::from_le_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
         }
 
         let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
@@ -703,8 +708,9 @@ pub mod testing {
 
     pub fn big_table_encode(raw: &[u8]) -> String {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(raw).unwrap();
-        let compressed = encoder.finish().unwrap();
+        // Writing into a `Vec` cannot fail.
+        let _ = encoder.write_all(raw);
+        let compressed = encoder.finish().unwrap_or_default();
 
         let mut binary = Vec::new();
         binary.extend_from_slice(&(raw.len() as u32).to_le_bytes());

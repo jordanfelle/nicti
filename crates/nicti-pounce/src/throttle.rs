@@ -42,16 +42,16 @@ impl Throttle {
     /// Blocks until a permit is available. Callers that must never block (a worker loop that also
     /// needs to notice shutdown) should use [`Throttle::try_acquire`] instead.
     pub fn acquire(&self) -> Permit<'_> {
-        let mut in_use = self.in_use.lock().unwrap();
+        let mut in_use = crate::lock(&self.in_use);
         while *in_use >= self.limit.load(Ordering::SeqCst) {
-            in_use = self.cond.wait(in_use).unwrap();
+            in_use = self.cond.wait(in_use).unwrap_or_else(|e| e.into_inner());
         }
         *in_use += 1;
         Permit { throttle: self }
     }
 
     pub fn try_acquire(&self) -> Option<Permit<'_>> {
-        let mut in_use = self.in_use.lock().unwrap();
+        let mut in_use = crate::lock(&self.in_use);
         if *in_use >= self.limit.load(Ordering::SeqCst) {
             return None;
         }
@@ -60,7 +60,7 @@ impl Throttle {
     }
 
     pub fn in_use(&self) -> usize {
-        *self.in_use.lock().unwrap()
+        *crate::lock(&self.in_use)
     }
 
     pub fn limit(&self) -> usize {
@@ -80,7 +80,7 @@ impl Throttle {
 
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
-        let mut in_use = self.throttle.in_use.lock().unwrap();
+        let mut in_use = crate::lock(&self.throttle.in_use);
         *in_use = in_use.saturating_sub(1);
         self.throttle.cond.notify_one();
     }
@@ -147,5 +147,22 @@ mod tests {
         );
         throttle.set_limit(2);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn a_panic_while_holding_the_lock_does_not_wedge_the_throttle() {
+        let throttle = Arc::new(Throttle::new(2));
+        let poisoner = throttle.clone();
+        let _ = thread::spawn(move || {
+            let _guard = poisoner.in_use.lock();
+            panic!("poison the mutex");
+        })
+        .join();
+        assert!(throttle.in_use.is_poisoned());
+        let permit = throttle.try_acquire();
+        assert!(permit.is_some(), "a poisoned lock must stay usable");
+        assert_eq!(throttle.in_use(), 1);
+        drop(permit);
+        assert_eq!(throttle.in_use(), 0);
     }
 }

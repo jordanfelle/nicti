@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! Export engine (ADR-0019 §7/§8, ADR-0056, #57).
 //!
 //! [`Exporter`] is the extension point (identity/versioning via `Module`, plus the format-specific

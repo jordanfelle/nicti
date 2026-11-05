@@ -72,6 +72,8 @@ pub(crate) fn mat_try_invert(m: &Mat3) -> Option<Mat3> {
 
 /// [`mat_try_invert`] for matrices built from fixed constants (primaries), where a singular one
 /// is a programming error worth surfacing loudly.
+#[allow(clippy::expect_used)] // Genuine invariant: only fixed primaries/constants reach this, and the
+                              // tests invert every built-in space; a user-supplied matrix goes through `mat_try_invert`.
 pub(crate) fn mat_invert(m: &Mat3) -> Mat3 {
     mat_try_invert(m).expect("matrix is singular")
 }
