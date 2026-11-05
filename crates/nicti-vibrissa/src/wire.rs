@@ -111,7 +111,23 @@ impl TokenInfo {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // The directory matters as much as the file: anyone who can write it can rename a
+            // planted file over this one. It must be owned by the file's owner and not
+            // group/world-writable (so `/tmp`, sticky or not, is refused).
+            let dir = path
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let dmeta = std::fs::metadata(dir)
+                .map_err(|e| format!("can't inspect {}: {e}", dir.display()))?;
+            if dmeta.permissions().mode() & 0o022 != 0 || dmeta.uid() != meta.uid() {
+                return Err(format!(
+                    "{} is writable by other users or owned by someone else: a planted token \
+                     file could replace the real one; keep it in a private directory",
+                    dir.display()
+                ));
+            }
             if meta.permissions().mode() & 0o077 != 0 {
                 return Err(format!(
                     "{shown} is readable by other users (mode {:o}); the app creates it 0600",
@@ -262,6 +278,18 @@ mod tests {
         assert!(TokenInfo::read(&d)
             .unwrap_err()
             .contains("not a regular file"));
+        // A world-writable directory is refused even with a private file inside.
+        let open_dir = d.join("open");
+        std::fs::create_dir(&open_dir).unwrap();
+        let inner = open_dir.join("t.json");
+        std::fs::write(&inner, body).unwrap();
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&open_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(TokenInfo::read(&inner)
+            .unwrap_err()
+            .contains("writable by other users"));
+        std::fs::set_permissions(&open_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(TokenInfo::read(&inner).is_ok());
         let big = d.join("big.json");
         std::fs::write(&big, vec![b' '; 5000]).unwrap();
         std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o600)).unwrap();

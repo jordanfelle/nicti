@@ -1092,6 +1092,11 @@ mod tests {
         let fake = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = fake.local_addr().unwrap().port();
         let dir = tempfile_dir("impostor");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let tf = dir.join("nicti-control-1.json");
         std::fs::write(
             &tf,
