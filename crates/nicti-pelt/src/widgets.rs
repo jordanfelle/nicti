@@ -46,6 +46,10 @@ struct State {
     current: BTreeMap<String, Rect>,
     /// Registrations of the last finished frame: what commands see.
     last: BTreeMap<String, Rect>,
+    /// egui ids of the widgets registered by name (by [`reg`] / [`register_widget`]) in the frame
+    /// being drawn, or, between frames (when the input hook runs), in the frame that just
+    /// finished: the only widgets an injected Enter or Space may activate by keyboard focus (#717).
+    ids_current: std::collections::HashSet<egui::Id>,
     steps: VecDeque<Vec<Event>>,
     frame: u64,
     last_frame_at: Option<Instant>,
@@ -76,6 +80,7 @@ pub fn install(ctx: &egui::Context, allow_destructive: bool) -> Widgets {
         allow_destructive,
         current: BTreeMap::new(),
         last: BTreeMap::new(),
+        ids_current: Default::default(),
         steps: VecDeque::new(),
         frame: 0,
         last_frame_at: None,
@@ -112,19 +117,44 @@ pub fn enabled(ctx: &egui::Context) -> bool {
 
 /// Records `rect` under `name` for this frame. A no-op while the channel is off.
 pub fn register(ctx: &egui::Context, name: &str, rect: Rect) {
-    let Some(w) = handle(ctx) else { return };
+    store(ctx, name, rect);
+}
+
+/// [`register`], returning whether the widget was actually stored: a bad name, a non-finite rect
+/// or a full registry store nothing (and so must not make its egui id keyboard-activatable).
+fn store(ctx: &egui::Context, name: &str, rect: Rect) -> bool {
+    let Some(w) = handle(ctx) else { return false };
     if !valid_name(name) || !rect.is_finite() {
-        return;
+        return false;
     }
     let mut st = w.lock();
     if st.current.len() < MAX_WIDGETS {
         st.current.insert(name.to_owned(), rect);
+        true
+    } else {
+        false
     }
 }
 
 /// [`register`] for a widget's response.
 pub fn reg(ctx: &egui::Context, name: &str, response: &egui::Response) {
-    register(ctx, name, response.rect);
+    register_widget(ctx, name, response.rect, response.id);
+}
+
+/// [`reg`] for a widget whose clickable rect is not its response's (a grid cell, clipped to what is
+/// on screen): the egui `id` is what keyboard focus names, so Enter and Space may activate it.
+pub fn register_widget(ctx: &egui::Context, name: &str, rect: Rect, id: egui::Id) {
+    // Only a widget that was really stored (valid name, finite rect, room in the registry) can be
+    // activated from the keyboard by an injected Enter or Space.
+    if !store(ctx, name, rect) {
+        return;
+    }
+    if let Some(w) = handle(ctx) {
+        let mut st = w.lock();
+        if st.ids_current.len() < MAX_WIDGETS {
+            st.ids_current.insert(id);
+        }
+    }
 }
 
 /// Like [`reg`], for widgets that confirm something destructive (a delete dialog's buttons, the
@@ -142,6 +172,9 @@ pub fn begin_frame(ctx: &egui::Context) {
     let Some(w) = handle(ctx) else { return };
     let mut st = w.lock();
     st.last = std::mem::take(&mut st.current);
+    // Cleared here, at the start of a frame's `ui`, and refilled as its widgets register, so when the
+    // next frame's input hook runs it holds exactly the frame that just finished.
+    st.ids_current.clear();
     st.frame += 1;
     st.last_frame_at = Some(Instant::now());
 }
@@ -174,11 +207,39 @@ pub fn deliver(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         return;
     }
     if let Some(events) = st.steps.pop_front() {
+        // Enter and Space activate whatever has keyboard focus, and Tab can move focus to any
+        // button, including ones that purge, clear or repair something (#717). Without
+        // `--control-allow-destructive` they are delivered only while focus is on a widget the
+        // channel registered by name (or on nothing, where they are app shortcuts).
+        if !st.allow_destructive && activates(&events) && focus_is_unregistered(ctx, &st) {
+            st.discarded += 1;
+            return;
+        }
         st.awaiting_ui = true;
         st.injected_now = events.clone();
         raw_input.events.extend(events);
         st.last_injected_frame = st.frame;
     }
+}
+
+/// Whether `events` hold an Enter or Space key event (the keys that activate a focused button).
+fn activates(events: &[Event]) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            Event::Key {
+                key: Key::Enter | Key::Space,
+                ..
+            }
+        )
+    })
+}
+
+/// Whether egui's keyboard focus (as the last frame left it) is on a widget the channel did not
+/// register. No focus at all is not "unregistered": nothing there can be activated.
+fn focus_is_unregistered(ctx: &egui::Context, st: &State) -> bool {
+    ctx.memory(|m| m.focused())
+        .is_some_and(|id| !st.ids_current.contains(&id))
 }
 
 /// Takes this frame's injected events back out of egui's input if a destructive dialog is open
@@ -411,6 +472,15 @@ mod tests {
         w: Widgets,
         go_clicks: usize,
         delete_clicks: usize,
+        /// Clicks on a button the channel never registered (a stand-in for "Purge all previews").
+        purge_clicks: usize,
+        go_id: Option<egui::Id>,
+        purge_id: Option<egui::Id>,
+        /// A registered button that exists only while `show_late` is set (it appears mid-session).
+        show_late: bool,
+        /// Give the late button keyboard focus in the very frame it first appears.
+        focus_late_now: bool,
+        late_clicks: usize,
         keys_seen: Vec<Key>,
         destructive_open: bool,
     }
@@ -424,6 +494,12 @@ mod tests {
                 w,
                 go_clicks: 0,
                 delete_clicks: 0,
+                purge_clicks: 0,
+                go_id: None,
+                purge_id: None,
+                show_late: false,
+                focus_late_now: false,
+                late_clicks: 0,
                 keys_seen: Vec::new(),
                 destructive_open: false,
             }
@@ -435,7 +511,11 @@ mod tests {
                 ..Default::default()
             };
             deliver(&self.ctx, &mut raw);
-            let (mut go, mut del) = (0, 0);
+            let (mut go, mut del, mut purge) = (0, 0, 0);
+            let (mut go_id, mut purge_id) = (None, None);
+            let mut late = 0;
+            let (show_late, focus_late_now) = (self.show_late, self.focus_late_now);
+            self.focus_late_now = false;
             let mut keys = Vec::new();
             let destructive_open = self.destructive_open;
             let mut out = self.ctx.run_ui(raw, |ui| {
@@ -458,6 +538,29 @@ mod tests {
                 if del_resp.clicked() {
                     del += 1;
                 }
+                // Never registered: reachable only by keyboard focus.
+                let purge_resp = ui.put(
+                    Rect::from_min_size(Pos2::new(20.0, 140.0), egui::vec2(100.0, 30.0)),
+                    egui::Button::new("Purge"),
+                );
+                if purge_resp.clicked() {
+                    purge += 1;
+                }
+                go_id = Some(go_resp.id);
+                purge_id = Some(purge_resp.id);
+                if show_late {
+                    let late_resp = ui.put(
+                        Rect::from_min_size(Pos2::new(20.0, 200.0), egui::vec2(100.0, 30.0)),
+                        egui::Button::new("Late"),
+                    );
+                    reg(ui.ctx(), "button:late", &late_resp);
+                    if focus_late_now {
+                        ui.memory_mut(|m| m.request_focus(late_resp.id));
+                    }
+                    if late_resp.clicked() {
+                        late += 1;
+                    }
+                }
                 ui.input(|i| {
                     for e in &i.events {
                         if let Event::Key {
@@ -472,6 +575,10 @@ mod tests {
             out.textures_delta.clear();
             self.go_clicks += go;
             self.delete_clicks += del;
+            self.purge_clicks += purge;
+            self.late_clicks += late;
+            self.go_id = go_id;
+            self.purge_id = purge_id;
             self.keys_seen.extend(keys);
         }
 
@@ -757,5 +864,133 @@ mod tests {
         assert!(parse_key("NotAKey").is_err());
         assert_eq!(parse_button("right"), Ok(PointerButton::Secondary));
         assert!(parse_button("fourth").is_err());
+    }
+
+    fn focus(rig: &mut Rig, id: Option<egui::Id>) {
+        rig.ctx.memory_mut(|m| m.request_focus(id.unwrap()));
+        rig.frame();
+    }
+
+    #[test]
+    fn a_widget_that_was_not_stored_cannot_be_activated_from_the_keyboard() {
+        let ctx = egui::Context::default();
+        let _w = install(&ctx, false);
+        let ok = egui::Id::unique("ok");
+        let bad_name = egui::Id::unique("bad name");
+        let bad_rect = egui::Id::unique("bad rect");
+        register_widget(&ctx, "button:ok", screen(), ok);
+        register_widget(&ctx, "Not A Name", screen(), bad_name);
+        let nan = Rect::from_min_size(Pos2::new(f32::NAN, 0.0), egui::vec2(10.0, 10.0));
+        register_widget(&ctx, "button:nan", nan, bad_rect);
+        let ids = handle(&ctx).unwrap().lock().ids_current.clone();
+        assert!(ids.contains(&ok));
+        assert!(
+            !ids.contains(&bad_name),
+            "an invalid name is not registered"
+        );
+        assert!(
+            !ids.contains(&bad_rect),
+            "a non-finite rect is not registered"
+        );
+    }
+
+    #[test]
+    fn enter_and_space_activate_only_registered_widgets_unless_destructive_is_allowed() {
+        let mut rig = Rig::new(false);
+        rig.frames(2);
+        // Keyboard focus on a button the channel never registered (Tab can get there): Enter and
+        // Space are not delivered, and nothing is clicked.
+        let id = rig.purge_id;
+        focus(&mut rig, id);
+        rig.w.key(Key::Enter, Modifiers::NONE).unwrap();
+        rig.w.key(Key::Space, Modifiers::NONE).unwrap();
+        rig.frames(8);
+        assert_eq!(
+            rig.purge_clicks, 0,
+            "an unregistered button must not be activated"
+        );
+        assert!(
+            rig.w.discarded() >= 4,
+            "press and release of both keys were dropped"
+        );
+        assert!(!rig.keys_seen.contains(&Key::Enter) && !rig.keys_seen.contains(&Key::Space));
+        // Focus on a registered widget: Enter activates it.
+        let id = rig.go_id;
+        focus(&mut rig, id);
+        rig.w.key(Key::Enter, Modifiers::NONE).unwrap();
+        rig.frames(4);
+        assert_eq!(rig.go_clicks, 1);
+        // Moving focus (Tab) is never blocked.
+        rig.w.key(Key::Tab, Modifiers::NONE).unwrap();
+        rig.frames(4);
+        assert!(rig.keys_seen.contains(&Key::Tab));
+        // With nothing focused Enter is delivered (an app shortcut, nothing to activate).
+        rig.ctx.memory_mut(|m| m.stop_text_input());
+        let id = rig.ctx.memory(|m| m.focused());
+        if let Some(id) = id {
+            rig.ctx.memory_mut(|m| m.surrender_focus(id));
+        }
+        rig.frame();
+        let before = rig.w.discarded();
+        let enters = rig.keys_seen.iter().filter(|k| **k == Key::Enter).count();
+        assert!(
+            rig.ctx.memory(|m| m.focused()).is_none(),
+            "nothing is focused"
+        );
+        rig.w.key(Key::Enter, Modifiers::NONE).unwrap();
+        rig.frames(4);
+        assert_eq!(rig.w.discarded(), before, "no focus: nothing to guard");
+        assert_eq!(
+            rig.keys_seen.iter().filter(|k| **k == Key::Enter).count(),
+            enters + 1,
+            "the Enter reached egui"
+        );
+    }
+
+    #[test]
+    fn tab_then_enter_cannot_press_a_button_the_channel_never_registered() {
+        // End to end through the real focus order (Go, Delete, Purge): no hand-set focus.
+        let mut rig = Rig::new(false);
+        rig.frames(2);
+        for _ in 0..3 {
+            rig.w.key(Key::Tab, Modifiers::NONE).unwrap();
+            rig.frames(3);
+        }
+        assert_eq!(
+            rig.ctx.memory(|m| m.focused()),
+            rig.purge_id,
+            "three Tabs reach the unregistered button"
+        );
+        rig.w.key(Key::Enter, Modifiers::NONE).unwrap();
+        rig.frames(4);
+        assert_eq!(rig.purge_clicks, 0);
+        assert!(rig.w.discarded() >= 2);
+    }
+
+    #[test]
+    fn a_registered_widget_that_appears_and_takes_focus_in_one_frame_can_be_activated_at_once() {
+        // The guard must look at the registrations of the frame that just finished, not an older
+        // one: a dialog button that first shows up focused is a registered widget.
+        let mut rig = Rig::new(false);
+        rig.frames(2);
+        rig.show_late = true;
+        rig.focus_late_now = true;
+        rig.frame();
+        rig.w.key(Key::Enter, Modifiers::NONE).unwrap();
+        rig.frames(4);
+        assert_eq!(rig.late_clicks, 1);
+        assert_eq!(rig.w.discarded(), 0);
+    }
+
+    #[test]
+    fn the_operator_who_allowed_destructive_can_press_enter_on_any_focused_button() {
+        let mut rig = Rig::new(true);
+        rig.frames(2);
+        let id = rig.purge_id;
+        focus(&mut rig, id);
+        rig.w.key(Key::Enter, Modifiers::NONE).unwrap();
+        rig.frames(4);
+        assert_eq!(rig.purge_clicks, 1);
+        assert_eq!(rig.w.discarded(), 0);
     }
 }
