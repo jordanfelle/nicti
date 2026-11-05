@@ -260,7 +260,10 @@ impl Carry {
                 archived,
                 renamed,
             } => self.settle_step(pending, archived, renamed),
-            Phase::Finished => panic!("Carry::step called again after it already finished"),
+            // Nothing is left to undo once finished (the journal is closed); report the misuse.
+            Phase::Finished => Some(CarryOutcome::Failed(
+                "internal error: Carry::step called again after it already finished".into(),
+            )),
         }
     }
 
@@ -314,7 +317,12 @@ impl Carry {
     }
 
     fn export_step(&mut self, mut pending: VecDeque<crate::Asset>) -> Option<CarryOutcome> {
-        let move_id = self.move_id.expect("journal is open before export");
+        let Some(move_id) = self.move_id else {
+            // Nothing has been copied yet, so there is no destination to discard.
+            return Some(CarryOutcome::Failed(
+                "internal error: the move journal was not open before export".into(),
+            ));
+        };
         // An AVIF encode is ~250 ms, so one per step keeps cancel/progress latency low; JPEG is a
         // byte copy.
         let per_step = if self.opts.sidecar_codec == crate::thumb_sidecar::SidecarCodec::Avif {
@@ -373,11 +381,12 @@ impl Carry {
                 Ok(e) => e,
                 Err(e) => return Some(self.abort_failed(format!("walking source: {e}"))),
             };
-            let rel = entry
-                .path()
-                .strip_prefix(&self.src)
-                .expect("walkdir entries are under the walked root")
-                .to_path_buf();
+            let Ok(rel) = entry.path().strip_prefix(&self.src).map(Path::to_path_buf) else {
+                return Some(self.abort_failed(format!(
+                    "walking source: {} is not under the source folder",
+                    entry.path().display()
+                )));
+            };
             let ft = entry.file_type();
             if ft.is_symlink() {
                 return Some(self.abort_refused(format!(
@@ -553,7 +562,7 @@ impl Carry {
         let final_path = self.dest.join(&rel);
         let mut partial_name = final_path
             .file_name()
-            .expect("a walked file has a name")
+            .ok_or_else(|| format!("{} has no file name", rel.display()))?
             .to_os_string();
         partial_name.push(PARTIAL_SUFFIX);
         let partial = final_path.with_file_name(partial_name);
@@ -664,7 +673,14 @@ impl Carry {
         dirs: Vec<PathBuf>,
         renamed: bool,
     ) -> Option<CarryOutcome> {
-        let move_id = self.move_id.expect("journal is open before commit");
+        let Some(move_id) = self.move_id else {
+            // Never `abort_failed` here: after a rename the destination is the only copy of the
+            // user's files, and `discard_dest` would delete it. Report and leave everything.
+            return Some(CarryOutcome::Failed(
+                "internal error: the move journal was not open before commit; nothing was removed"
+                    .into(),
+            ));
+        };
         let mut hashes = Vec::new();
         if !renamed {
             let by_rel: HashMap<String, &str> = done
@@ -1014,12 +1030,13 @@ impl ResumeMoves {
     pub fn step(&mut self, store: &dyn CatalogStore) -> bool {
         if let Some(c) = self.cleanup.as_mut() {
             if let Some(leftover_count) = c.step() {
-                let c = self.cleanup.take().expect("just stepped it");
-                let _ = store.finish_root_move(c.journal_id);
-                self.out.push(Resumed::CleanedUp {
-                    root_id: c.root_id,
-                    leftover_count,
-                });
+                if let Some(c) = self.cleanup.take() {
+                    let _ = store.finish_root_move(c.journal_id);
+                    self.out.push(Resumed::CleanedUp {
+                        root_id: c.root_id,
+                        leftover_count,
+                    });
+                }
                 self.rows_done += 1;
             }
         } else if let Some(m) = self.pending.pop_front() {
@@ -1247,7 +1264,10 @@ fn cleanup_matching(src: &Path, dest: &Path) -> u64 {
 /// Deletes `file` (under `src`) if its twin under `dest` has identical content; `true` if it is
 /// gone.
 fn remove_if_matching(file: &Path, src: &Path, dest: &Path) -> bool {
-    let rel = file.strip_prefix(src).expect("under src");
+    // A file outside `src` is not ours to delete.
+    let Ok(rel) = file.strip_prefix(src) else {
+        return false;
+    };
     let twin = dest.join(rel);
     let same = match (hash_file(file), hash_file(&twin)) {
         (Some(a), Some(b)) => a == b,
@@ -1319,7 +1339,10 @@ fn dest_covered_by_src(src: &Path, dest: &Path) -> bool {
         {
             continue;
         }
-        let rel = entry.path().strip_prefix(dest).expect("under dest");
+        // Not under `dest` (cannot happen for a walk of `dest`): treat as uncovered, the safe answer.
+        let Ok(rel) = entry.path().strip_prefix(dest) else {
+            return false;
+        };
         let same = match (fs::metadata(entry.path()), fs::metadata(src.join(rel))) {
             (Ok(a), Ok(b)) => a.len() == b.len(),
             _ => false,
@@ -1405,6 +1428,28 @@ mod tests {
             },
             1,
         )
+    }
+
+    #[test]
+    fn a_commit_without_an_open_journal_reports_and_never_deletes_the_destination() {
+        // After a rename the destination is the only copy of the user's files. If the journal id
+        // were ever missing at commit, the old code panicked (Drop recovery then repointed the
+        // catalog); the replacement must not run `discard_dest`, which would delete that copy.
+        let f = fixture();
+        let mut c = carry(&f, false);
+        let dest = f.dest_parent.join("event-2026");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("a.NEF"), b"the only copy").unwrap();
+        c.move_id = None;
+        c.phase = Phase::Commit {
+            done: Vec::new(),
+            dirs: Vec::new(),
+            renamed: true,
+        };
+        c.dest = dest.clone();
+        let outcome = c.step().expect("commit reports immediately");
+        assert!(matches!(outcome, CarryOutcome::Failed(m) if m.contains("nothing was removed")));
+        assert_eq!(fs::read(dest.join("a.NEF")).unwrap(), b"the only copy");
     }
 
     fn run(c: &mut Carry) -> CarryOutcome {

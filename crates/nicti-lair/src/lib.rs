@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! Catalog store extension point (ADR-0019 §7/§8) and its real implementation (#22): the schema
 //! ADR-0067/0103/0071/0021 settled (see `schema.rs`), a `rusqlite`-backed `CatalogStore`
 //! (`sqlite.rs`), the Scruff import/ingest pipeline (`scruff.rs`) that scans a folder, fingerprints

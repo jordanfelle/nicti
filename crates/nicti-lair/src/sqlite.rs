@@ -404,6 +404,8 @@ fn set_column_for_assets(
 /// The empty `EditDocument` shape (`{ stages: BTreeMap<String, StageEntry> }`, ADR-0021),
 /// serialized from the real `nicti_pawprint::EditDocument` (#45 promoted it from `spikes/pawprint`)
 /// rather than a hand-written literal, so this can never drift from that type's actual shape.
+// A derive(Serialize) struct with a `Default` always serializes; there is no input to fail on.
+#[allow(clippy::expect_used)]
 fn empty_edit_document() -> String {
     serde_json::to_string(&nicti_pawprint::EditDocument::default())
         .expect("EditDocument always serializes")
@@ -423,6 +425,14 @@ const BULK_META_ROWS: usize = 1000;
 const BULK_META_CACHE_KIB: i64 = 256 * 1024;
 
 impl SqliteCatalog {
+    /// The connection, recovering it if a thread panicked while holding the lock: SQLite state is
+    /// owned by the database (an open transaction is rolled back when its guard unwinds), not by
+    /// this mutex, so a poisoned flag must not turn one panic into every later catalog call
+    /// panicking too.
+    fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// One index-ordered scan of every asset a `hunt` with this `Filter`/`Sort` would return, in the
     /// same order, mapping each row from `columns`. Kept generic so a second scan shape can share
     /// `hunt_ids`' order and scoping.
@@ -446,7 +456,7 @@ impl SqliteCatalog {
         let conn: &Connection = match &reader {
             Some(reader) => reader,
             None => {
-                guard = self.conn.lock().unwrap();
+                guard = self.lock_conn();
                 &guard
             }
         };
@@ -483,7 +493,7 @@ impl SqliteCatalog {
         if self.path.is_some() {
             f(&self.open_snapshot_reader()?)
         } else {
-            f(&self.conn.lock().unwrap())
+            f(&self.lock_conn())
         }
     }
 
@@ -680,7 +690,7 @@ impl SqliteCatalog {
         n: usize,
         previews: Option<(&Preview, usize)>,
     ) -> Result<(), CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         {
             let mut insert = tx.prepare(
@@ -740,13 +750,13 @@ impl SqliteCatalog {
     /// the last backup this session" apart from "a previous session crashed before backing up its
     /// own changes" (see `ninelives::NineLives::due`'s own doc comment).
     pub fn change_counter(&self) -> u64 {
-        self.conn.lock().unwrap().total_changes()
+        self.lock_conn().total_changes()
     }
 
     /// The full-file BLAKE3 (hex) a verified folder move (#26) recorded for this asset; `None`
     /// for an asset that has never been moved.
     pub fn content_hash(&self, asset_id: i64) -> Result<Option<String>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Ok(conn
             .query_row(
                 "SELECT content_hash FROM asset WHERE id = ?1",
@@ -762,7 +772,7 @@ impl SqliteCatalog {
     /// always carries the source's schema version, so a mismatch would mean something read a
     /// different file than it meant to, not a real migration race).
     pub fn user_version(&self) -> Result<i64, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
     }
 
@@ -771,7 +781,7 @@ impl SqliteCatalog {
     /// live catalog is reported rather than silently backed up over yesterday's still-good copies.
     /// `Ok(None)` means healthy; `Ok(Some(msg))` carries the first problem SQLite reported.
     pub fn quick_check(&self) -> Result<Option<String>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         match first_check_problem(&conn, "quick_check") {
             // Sufficiently damaged pages make SQLite fail the pragma itself rather than list a
             // problem row -- that's still "the live catalog is corrupt", not an I/O hiccup, and
@@ -809,7 +819,7 @@ impl SqliteCatalog {
     /// test can assert that a code path does *not* need it (`ninelives::snapshot_into`).
     #[cfg(test)]
     pub(crate) fn lock_conn_for_test(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap()
+        self.lock_conn()
     }
 
     /// Runs `VACUUM INTO ?1` (bound, never interpolated) on the *locked* main connection --
@@ -818,7 +828,7 @@ impl SqliteCatalog {
     /// (that path uses `open_snapshot_reader` instead, precisely to avoid holding this lock for
     /// the duration of a multi-second vacuum).
     pub(crate) fn vacuum_into_locked(&self, target: &Path) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let target_str = target
             .to_str()
             .ok_or_else(|| CatalogError::Io("backup target path is not valid UTF-8".into()))?;
@@ -831,7 +841,7 @@ impl SqliteCatalog {
     /// Inherent, not on `CatalogStore`: a plain count has no per-backend variation worth an
     /// extension-point method yet, unlike the trait's other queries.
     pub fn asset_count(&self) -> Result<u64, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM asset", [], |row| row.get(0))?;
         Ok(count as u64)
     }
@@ -897,7 +907,7 @@ impl SqliteCatalog {
         if asset_ids.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         for chunk in asset_ids.chunks(MAX_IDS_PER_STATEMENT) {
             let ph = vec!["?"; chunk.len()].join(",");
@@ -950,7 +960,7 @@ impl CatalogStore for SqliteCatalog {
         marker_uuid: Option<&str>,
         now_unix: i64,
     ) -> Result<i64, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let existing: Option<(i64, Option<String>)> = conn
             .query_row(
                 "SELECT id, marker_uuid FROM volume WHERE identity_key = ?1",
@@ -988,7 +998,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn ensure_root(&self, volume_id: i64, rel_path: &str) -> Result<i64, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO root (volume_id, rel_path) VALUES (?1, ?2) \
              ON CONFLICT(volume_id, rel_path) DO NOTHING",
@@ -1002,7 +1012,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn reassign_root_volume(&self, root_id: i64, volume_id: i64) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let tx = conn.unchecked_transaction()?;
         let old_volume: i64 = tx
             .query_row("SELECT volume_id FROM root WHERE id = ?1", [root_id], |r| {
@@ -1064,7 +1074,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn list_roots(&self) -> Result<Vec<Root>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt =
             conn.prepare("SELECT id, volume_id, rel_path, archived FROM root ORDER BY id")?;
         let rows = stmt.query_map([], |row| {
@@ -1084,7 +1094,7 @@ impl CatalogStore for SqliteCatalog {
         dest_path: &str,
         now_unix: i64,
     ) -> Result<i64, CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let (volume_id, src_path): (i64, String) = tx
             .query_row(
@@ -1125,7 +1135,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn set_root_archived(&self, root_id: i64, archived: bool) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE root SET archived = ?1 WHERE id = ?2",
             params![archived as i64, root_id],
@@ -1139,7 +1149,7 @@ impl CatalogStore for SqliteCatalog {
         hashes: &[(i64, String)],
         archived: Option<bool>,
     ) -> Result<(), CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let (root_id, dest_path, state): (i64, String, String) = tx
             .query_row(
@@ -1187,7 +1197,7 @@ impl CatalogStore for SqliteCatalog {
                 ))
             }
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE root_move SET state = ?1 WHERE id = ?2 AND state != 'committed'",
             params![name, move_id],
@@ -1196,13 +1206,13 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn finish_root_move(&self, move_id: i64) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM root_move WHERE id = ?1", params![move_id])?;
         Ok(())
     }
 
     fn open_root_moves(&self) -> Result<Vec<RootMove>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn
             .prepare("SELECT id, root_id, src_path, dest_path, state FROM root_move ORDER BY id")?;
         let rows = stmt.query_map([], |row| {
@@ -1227,7 +1237,7 @@ impl CatalogStore for SqliteCatalog {
         root_id: i64,
         rel_path: &str,
     ) -> Result<Option<Asset>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Ok(conn
             .query_row(
                 &format!("SELECT {ASSET_COLUMNS} FROM asset WHERE root_id = ?1 AND rel_path = ?2"),
@@ -1238,7 +1248,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn get_asset(&self, id: i64) -> Result<Option<Asset>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Ok(conn
             .query_row(
                 &format!("SELECT {ASSET_COLUMNS} FROM asset WHERE id = ?1"),
@@ -1252,7 +1262,7 @@ impl CatalogStore for SqliteCatalog {
         &self,
         asset_id: i64,
     ) -> Result<Option<nicti_pawprint::EditDocument>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Self::read_master_edit(&conn, asset_id)
     }
 
@@ -1261,7 +1271,7 @@ impl CatalogStore for SqliteCatalog {
         asset_ids: &[i64],
     ) -> Result<Vec<(i64, Option<nicti_pawprint::EditDocument>)>, CatalogError> {
         // One lock for the whole batch: the mutex already keeps every writer out meanwhile.
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         asset_ids
             .iter()
             .map(|&id| Ok((id, Self::read_master_edit(&conn, id)?)))
@@ -1275,7 +1285,7 @@ impl CatalogStore for SqliteCatalog {
     ) -> Result<(), CatalogError> {
         let json = nicti_pawprint::to_canonical_json(doc)
             .map_err(|e| CatalogError::Document(e.to_string()))?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         // Upsert on the (asset_id, name) key ingest also uses, so an asset whose master row is
         // somehow missing still gets one. A nonexistent asset trips the FK and errors.
         conn.execute(
@@ -1301,7 +1311,7 @@ impl CatalogStore for SqliteCatalog {
                     .map_err(|e| CatalogError::Document(e.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare_cached(
@@ -1341,7 +1351,7 @@ impl CatalogStore for SqliteCatalog {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         for (item, doc) in items.iter().zip(&docs) {
             let existing: Option<(i64, Option<String>, Option<String>, i64)> = tx
@@ -1542,7 +1552,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn lrc_provenance(&self, image_global: &str) -> Result<Option<LrcProvenance>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let row = conn
             .query_row(
                 "SELECT lrc_image_local, import_hash, process_version, develop_text, has_masks, \
@@ -1582,7 +1592,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn variant_names(&self, asset_id: i64) -> Result<Vec<String>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT name FROM edit_variant WHERE asset_id = ?1 ORDER BY is_master DESC, id",
         )?;
@@ -1597,7 +1607,7 @@ impl CatalogStore for SqliteCatalog {
         asset_id: i64,
         name: &str,
     ) -> Result<Option<nicti_pawprint::EditDocument>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let json: Option<String> = conn
             .query_row(
                 "SELECT document FROM edit_variant WHERE asset_id = ?1 AND name = ?2",
@@ -1612,7 +1622,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn get_root_path(&self, root_id: i64) -> Result<Option<String>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Ok(conn
             .query_row(
                 "SELECT rel_path FROM root WHERE id = ?1",
@@ -1623,7 +1633,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn find_by_fingerprint(&self, fingerprint: &str) -> Result<Vec<Asset>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {ASSET_COLUMNS} FROM asset WHERE fingerprint = ?1 ORDER BY id ASC"
         ))?;
@@ -1639,7 +1649,7 @@ impl CatalogStore for SqliteCatalog {
         asset: &NewAsset,
         t0_preview: Option<&Preview>,
     ) -> Result<i64, CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         // `rating`/`flag`/`label` are never written here -- omitted from the column list means
         // they default to NULL on a fresh insert, and the ON CONFLICT branch below likewise never
@@ -1741,7 +1751,7 @@ impl CatalogStore for SqliteCatalog {
         size_bytes: u64,
         mtime_unix: i64,
     ) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE asset SET root_id = ?1, rel_path = ?2, rel_path_fold = ?3, \
                 content_hash = CASE WHEN size_bytes IS ?4 AND mtime_unix IS ?5 \
@@ -1774,7 +1784,7 @@ impl CatalogStore for SqliteCatalog {
         mtime_unix: i64,
         fingerprint: &str,
     ) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE asset SET content_hash = CASE WHEN size_bytes IS ?1 AND mtime_unix IS ?2 \
                     THEN content_hash ELSE NULL END, \
@@ -1790,7 +1800,7 @@ impl CatalogStore for SqliteCatalog {
         tier: PreviewTier,
         preview: &Preview,
     ) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO preview (asset_id, tier, width, height, bytes) VALUES (?1,?2,?3,?4,?5) \
              ON CONFLICT(asset_id, tier) DO UPDATE SET \
@@ -1811,7 +1821,7 @@ impl CatalogStore for SqliteCatalog {
         asset_id: i64,
         tier: PreviewTier,
     ) -> Result<Option<Preview>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Ok(conn
             .query_row(
                 "SELECT width, height, bytes FROM preview WHERE asset_id = ?1 AND tier = ?2",
@@ -1835,7 +1845,7 @@ impl CatalogStore for SqliteCatalog {
         // SQLite's default bound-parameter cap is 32766 (999 on very old builds); chunk well
         // under either so an arbitrarily long caller slice can't trip it.
         const CHUNK: usize = 500;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut out = Vec::with_capacity(asset_ids.len());
         for chunk in asset_ids.chunks(CHUNK) {
             let placeholders = vec!["?"; chunk.len()].join(",");
@@ -1866,7 +1876,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn clear_preview(&self, asset_id: i64, tier: PreviewTier) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM preview WHERE asset_id = ?1 AND tier = ?2",
             params![asset_id, tier.as_str()],
@@ -1875,7 +1885,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn facet_count(&self, model: Option<&str>, rating: Option<i64>) -> Result<u64, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let cnt: i64 = conn.query_row(
             "SELECT COALESCE(SUM(fc.cnt), 0) FROM facet_counts fc \
              JOIN volume v ON v.id = fc.volume_id \
@@ -1890,22 +1900,22 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn set_rating(&self, asset_ids: &[i64], rating: Option<i64>) -> Result<(), CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         set_column_for_assets(&mut conn, "rating", &rating, asset_ids)
     }
 
     fn set_flag(&self, asset_ids: &[i64], flag: Option<i64>) -> Result<(), CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         set_column_for_assets(&mut conn, "flag", &flag, asset_ids)
     }
 
     fn set_label(&self, asset_ids: &[i64], label: Option<&str>) -> Result<(), CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         set_column_for_assets(&mut conn, "label", &label, asset_ids)
     }
 
     fn list_assets_by_root(&self, root_id: i64) -> Result<Vec<Asset>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {ASSET_COLUMNS} FROM asset WHERE root_id = ?1 ORDER BY id ASC"
         ))?;
@@ -1916,7 +1926,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn set_orientation(&self, asset_id: i64, orientation: u8) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE asset SET orientation = ?1 WHERE id = ?2",
             params![i64::from(orientation.clamp(1, 8)), asset_id],
@@ -1930,7 +1940,7 @@ impl CatalogStore for SqliteCatalog {
         lens: Option<&str>,
         iso: Option<u32>,
     ) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE asset SET lens = ?1, iso = ?2, exif_extra_read = 1 WHERE id = ?3",
             params![lens, iso.map(i64::from), asset_id],
@@ -1944,7 +1954,7 @@ impl CatalogStore for SqliteCatalog {
         after_id: i64,
         limit: usize,
     ) -> Result<Vec<Asset>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {ASSET_COLUMNS} FROM asset \
              WHERE root_id = ?1 AND exif_extra_read = 0 AND missing_since IS NULL \
@@ -1962,7 +1972,7 @@ impl CatalogStore for SqliteCatalog {
         after_id: i64,
         limit: usize,
     ) -> Result<Vec<Asset>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {ASSET_COLUMNS} FROM asset \
              WHERE root_id = ?1 AND orientation IS NULL AND id > ?2 ORDER BY id ASC LIMIT ?3"
@@ -1974,7 +1984,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn content_hashes_by_root(&self, root_id: i64) -> Result<Vec<(i64, String)>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, content_hash FROM asset \
              WHERE root_id = ?1 AND content_hash IS NOT NULL ORDER BY id ASC",
@@ -1990,7 +2000,7 @@ impl CatalogStore for SqliteCatalog {
         root_id: i64,
         entries: &[(i64, u64, i64, String)],
     ) -> Result<u64, CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let mut written = 0u64;
         {
@@ -2013,7 +2023,7 @@ impl CatalogStore for SqliteCatalog {
         asset_id: i64,
         missing_since: Option<i64>,
     ) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE asset SET missing_since = ?1 WHERE id = ?2",
             params![missing_since, asset_id],
@@ -2029,7 +2039,7 @@ impl CatalogStore for SqliteCatalog {
         if asset_ids.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         // No `ON DELETE CASCADE` on most of these foreign keys (schema.rs's `asset`/`edit_variant`
         // references are plain `REFERENCES`, and `PRAGMA foreign_keys = ON` only *enforces*
@@ -2064,7 +2074,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn get_meta(&self, asset_ids: &[i64]) -> Result<HashMap<i64, AssetMeta>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut out = HashMap::with_capacity(asset_ids.len());
         for chunk in asset_ids.chunks(MAX_IDS_PER_STATEMENT) {
             let ph = vec!["?"; chunk.len()].join(",");
@@ -2093,7 +2103,7 @@ impl CatalogStore for SqliteCatalog {
         if items.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         // A bulk mark rewrites entries across ~5 rating-keyed indexes; at library scale the
         // default ~2 MB page cache thrashes on them (#499). Borrow a bigger cache for the call.
         let prior_cache: Option<i64> = if items.len() >= BULK_META_ROWS {
@@ -2103,56 +2113,63 @@ impl CatalogStore for SqliteCatalog {
         } else {
             None
         };
-        let result = (|| -> Result<(), CatalogError> {
-            let tx = conn.transaction()?;
-            let bulk = items.len() >= BULK_META_ROWS;
-            let ids: Vec<i64> = if bulk {
-                items.iter().map(|(id, _)| *id).collect()
-            } else {
-                Vec::new()
-            };
-            let write = || -> Result<(), CatalogError> {
-                // One guarded statement per column (#499): SQLite rewrites every index containing a
-                // column in the SET list whether or not the value changed, and fires the facet
-                // trigger's row machinery on `rating`. Guarding with `IS NOT` makes an unchanged
-                // column (or a whole no-op rewrite) cost one PK lookup instead of index churn.
-                let mut rating = tx.prepare_cached(
-                    "UPDATE asset SET rating = ?1 WHERE id = ?2 AND rating IS NOT ?1",
-                )?;
-                let mut flag = tx.prepare_cached(
-                    "UPDATE asset SET flag = ?1 WHERE id = ?2 AND flag IS NOT ?1",
-                )?;
-                let mut label = tx.prepare_cached(
-                    "UPDATE asset SET label = ?1 WHERE id = ?2 AND label IS NOT ?1",
-                )?;
-                for (id, meta) in items {
-                    rating.execute(params![meta.rating, id])?;
-                    flag.execute(params![meta.flag, id])?;
-                    label.execute(params![meta.label, id])?;
+        // A panic in the batch must not leave the borrowed cache on this (recovered) connection
+        // for the rest of the process: restore it, then let the panic continue.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<(), CatalogError> {
+                let tx = conn.transaction()?;
+                let bulk = items.len() >= BULK_META_ROWS;
+                let ids: Vec<i64> = if bulk {
+                    items.iter().map(|(id, _)| *id).collect()
+                } else {
+                    Vec::new()
+                };
+                let write = || -> Result<(), CatalogError> {
+                    // One guarded statement per column (#499): SQLite rewrites every index containing a
+                    // column in the SET list whether or not the value changed, and fires the facet
+                    // trigger's row machinery on `rating`. Guarding with `IS NOT` makes an unchanged
+                    // column (or a whole no-op rewrite) cost one PK lookup instead of index churn.
+                    let mut rating = tx.prepare_cached(
+                        "UPDATE asset SET rating = ?1 WHERE id = ?2 AND rating IS NOT ?1",
+                    )?;
+                    let mut flag = tx.prepare_cached(
+                        "UPDATE asset SET flag = ?1 WHERE id = ?2 AND flag IS NOT ?1",
+                    )?;
+                    let mut label = tx.prepare_cached(
+                        "UPDATE asset SET label = ?1 WHERE id = ?2 AND label IS NOT ?1",
+                    )?;
+                    for (id, meta) in items {
+                        rating.execute(params![meta.rating, id])?;
+                        flag.execute(params![meta.flag, id])?;
+                        label.execute(params![meta.label, id])?;
+                    }
+                    Ok(())
+                };
+                // A bulk mark moves the facet counts in one aggregated step, not one trigger per row (#580).
+                if bulk {
+                    with_facet_delta(&tx, &ids, write)?;
+                } else {
+                    write()?;
                 }
+                tx.commit()?;
                 Ok(())
-            };
-            // A bulk mark moves the facet counts in one aggregated step, not one trigger per row (#580).
-            if bulk {
-                with_facet_delta(&tx, &ids, write)?;
-            } else {
-                write()?;
-            }
-            tx.commit()?;
-            Ok(())
-        })();
+            },
+        ));
         if let Some(prior) = prior_cache {
             // Give the memory back; best effort, so a failure here can't mask a committed batch.
             let _ = conn.pragma_update(None, "cache_size", prior);
         }
-        result
+        match outcome {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     fn begin_delete_items(&self, items: &[(i64, String)]) -> Result<(), CatalogError> {
         if items.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare_cached(
@@ -2180,7 +2197,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn open_delete_items(&self) -> Result<Vec<DeleteItem>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt =
             conn.prepare("SELECT asset_id, abs_path, state FROM delete_item ORDER BY asset_id")?;
         let rows = stmt.query_map([], |row| {
@@ -2199,7 +2216,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn sidecar_state(&self, asset_id: i64) -> Result<Option<SidecarState>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Ok(conn
             .query_row(
                 "SELECT path, last_seen_hash, last_seen_mtime_ms, last_written_hash, catalog_dirty_since_ms, needs_review \
@@ -2220,7 +2237,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn record_sidecar(&self, asset_id: i64, state: &SidecarState) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO asset_sidecar \
                  (asset_id, path, last_seen_hash, last_seen_mtime_ms, last_written_hash, \
@@ -2250,7 +2267,7 @@ impl CatalogStore for SqliteCatalog {
         &self,
         asset_ids: &[i64],
     ) -> Result<HashMap<i64, nicti_scent::gpx::Gps>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut out = HashMap::new();
         for chunk in asset_ids.chunks(MAX_IDS_PER_STATEMENT) {
             let ph = vec!["?"; chunk.len()].join(",");
@@ -2281,7 +2298,7 @@ impl CatalogStore for SqliteCatalog {
         asset_id: i64,
         gps: Option<nicti_scent::gpx::Gps>,
     ) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         match gps {
             None => {
                 conn.execute("DELETE FROM asset_gps WHERE asset_id = ?1", [asset_id])?;
@@ -2305,7 +2322,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn sidecar_review_assets(&self) -> Result<Vec<i64>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT asset_id FROM asset_sidecar WHERE needs_review = 1 ORDER BY asset_id",
         )?;
@@ -2314,7 +2331,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn sidecar_dirty_assets(&self) -> Result<Vec<i64>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT asset_id FROM asset_sidecar \
              WHERE catalog_dirty_since_ms IS NOT NULL AND needs_review = 0 ORDER BY asset_id",
@@ -2324,7 +2341,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn create_keyword(&self, parent_id: Option<i64>, name: &str) -> Result<i64, CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let name_fold = fold_keyword_name(name);
         let parent_path: Option<String> = match parent_id {
@@ -2354,7 +2371,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn rename_keyword(&self, keyword_id: i64, new_name: &str) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let name_fold = fold_keyword_name(new_name);
         conn.execute(
             "UPDATE keyword SET name = ?1, name_fold = ?2 WHERE id = ?3",
@@ -2368,7 +2385,7 @@ impl CatalogStore for SqliteCatalog {
         keyword_id: i64,
         new_parent_id: Option<i64>,
     ) -> Result<(), CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
 
         let old_path: String = tx.query_row(
@@ -2431,7 +2448,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn delete_keyword(&self, keyword_id: i64) -> Result<(), CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let path: String = tx.query_row(
             "SELECT path FROM keyword WHERE id = ?1",
@@ -2453,7 +2470,7 @@ impl CatalogStore for SqliteCatalog {
         if asset_ids.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         for asset_id in asset_ids {
             tx.execute(
@@ -2470,7 +2487,7 @@ impl CatalogStore for SqliteCatalog {
         if asset_ids.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         for asset_id in asset_ids {
             tx.execute(
@@ -2483,7 +2500,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn keywords_for(&self, asset_id: i64) -> Result<Vec<Keyword>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT k.id, k.parent_id, k.name, k.path FROM keyword k \
              JOIN asset_keyword ak ON ak.keyword_id = k.id \
@@ -2499,7 +2516,7 @@ impl CatalogStore for SqliteCatalog {
         &self,
         asset_id: i64,
     ) -> Result<std::collections::HashMap<i64, String>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT DISTINCT a.id, a.name FROM keyword a \
              JOIN keyword k ON k.path GLOB a.path || '*' \
@@ -2518,7 +2535,7 @@ impl CatalogStore for SqliteCatalog {
         meta: &AssetMeta,
         keyword_ids: &[i64],
     ) -> Result<(), CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let n = tx.execute(
             "UPDATE asset SET rating = ?1, flag = ?2, label = ?3 WHERE id = ?4",
@@ -2555,7 +2572,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn list_keywords(&self) -> Result<Vec<Keyword>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, parent_id, name, path FROM keyword ORDER BY name_fold ASC, id ASC",
         )?;
@@ -2566,7 +2583,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn list_collections(&self) -> Result<Vec<Collection>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, parent_id, kind, name FROM collection ORDER BY name_fold ASC, id ASC",
         )?;
@@ -2585,7 +2602,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn keyword_by_path(&self, segments: &[&str]) -> Result<Option<Keyword>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut parent_id: Option<i64> = None;
         let mut found: Option<Keyword> = None;
         for segment in segments {
@@ -2610,7 +2627,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn hunt(&self, filter: &Filter, sort: Sort, page: &Page) -> Result<Vec<i64>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let filter_sql = build_filter_sql(&conn, filter)?;
         let mut where_parts = vec![filter_sql.where_clause];
         let mut all_params: Vec<Box<dyn ToSql>> = filter_sql.params;
@@ -2669,7 +2686,7 @@ impl CatalogStore for SqliteCatalog {
     fn layout_items(&self, ids: &[i64]) -> Result<Vec<LayoutItem>, CatalogError> {
         // SQLite's default variable limit is 999 (32766 on newer builds): stay under the old one.
         const IN_LIMIT: usize = 900;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut out = Vec::with_capacity(ids.len());
         for chunk in ids.chunks(IN_LIMIT) {
             let marks = vec!["?"; chunk.len()].join(",");
@@ -2714,7 +2731,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn hunt_count(&self, filter: &Filter) -> Result<u64, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let filter_sql = build_filter_sql(&conn, filter)?;
         let sql = format!(
             "SELECT COUNT(*) FROM asset a \
@@ -2733,7 +2750,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn collection(&self, collection_id: i64) -> Result<Option<Collection>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Ok(conn
             .query_row(
                 "SELECT id, parent_id, kind, name FROM collection WHERE id = ?1",
@@ -2749,7 +2766,7 @@ impl CatalogStore for SqliteCatalog {
         name: &str,
         kind: CollectionKind,
     ) -> Result<i64, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let name_fold = fold_keyword_name(name);
         conn.execute(
             "INSERT INTO collection (parent_id, kind, name, name_fold) VALUES (?1, ?2, ?3, ?4)",
@@ -2759,7 +2776,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn rename_collection(&self, collection_id: i64, new_name: &str) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let name_fold = fold_keyword_name(new_name);
         conn.execute(
             "UPDATE collection SET name = ?1, name_fold = ?2 WHERE id = ?3",
@@ -2773,7 +2790,7 @@ impl CatalogStore for SqliteCatalog {
         collection_id: i64,
         new_parent_id: Option<i64>,
     ) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
 
         // Unlike `keyword`, a collection has no materialized path to check with a single string
         // comparison -- walk the `parent_id` chain from the proposed new parent upward instead,
@@ -2811,7 +2828,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn delete_collection(&self, collection_id: i64) -> Result<(), CatalogError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         // Collections form a small tree too (organizational nesting), same subtree-delete shape
         // as `delete_keyword` -- walked in Rust rather than a recursive CTE, since the tree is
@@ -2856,7 +2873,7 @@ impl CatalogStore for SqliteCatalog {
         if asset_ids.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let mut next_position: f64 = tx.query_row(
             "SELECT COALESCE(MAX(position), 0) FROM collection_asset WHERE collection_id = ?1",
@@ -2883,7 +2900,7 @@ impl CatalogStore for SqliteCatalog {
         if asset_ids.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         for asset_id in asset_ids {
             tx.execute(
@@ -2896,7 +2913,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn collection_assets(&self, collection_id: i64) -> Result<Vec<i64>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT asset_id FROM collection_asset WHERE collection_id = ?1 ORDER BY position ASC",
         )?;
@@ -2907,7 +2924,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn set_smart_rule(&self, collection_id: i64, filter: &Filter) -> Result<(), CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let rule = SmartRule {
             v: 1,
             filter: filter.clone(),
@@ -2922,7 +2939,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     fn collection_filter(&self, collection_id: i64) -> Result<Option<Filter>, CatalogError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let rule_json: Option<String> = conn
             .query_row(
                 "SELECT rule_json FROM collection WHERE id = ?1",
@@ -2945,6 +2962,21 @@ impl CatalogStore for SqliteCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panic_while_holding_the_connection_does_not_poison_the_catalog() {
+        let cat = std::sync::Arc::new(SqliteCatalog::open_in_memory().unwrap());
+        let held = cat.clone();
+        let result = std::thread::spawn(move || {
+            let _conn = held.lock_conn();
+            panic!("simulated crash while holding the catalog connection");
+        })
+        .join();
+        assert!(result.is_err());
+        assert!(cat.conn.is_poisoned());
+        // The catalog still answers: the connection state lives in SQLite, not in the lock.
+        assert!(cat.list_roots().is_ok());
+    }
 
     #[test]
     fn empty_edit_document_matches_the_on_disk_shape_adr_0021_documents() {

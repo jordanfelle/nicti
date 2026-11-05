@@ -24,6 +24,13 @@ use crate::trail::{self, GeotagReport};
 use crate::verify::{Baseline, BaselineReport, Verify, VerifyReport};
 use crate::{CatalogStore, SqliteCatalog};
 
+/// What a job's `step` reports when Pounce steps it again after it already returned `Done` (which
+/// Pounce never does); an error instead of a panic. (Pounce already contains a panicking `step` as
+/// a `Failed` job, so this changes the message, not the outcome.)
+fn after_done() -> JobError {
+    JobError::new("the job was stepped again after it already reported Done")
+}
+
 /// A shared slot a caller can poll for the final report once a job reaches `Done`. Stays `None`
 /// if the job was cancelled or failed instead -- check the activity panel's own
 /// `nicti_pounce::JobState` for that; this slot only ever holds a *successful* report.
@@ -78,10 +85,7 @@ impl ChunkedJob for IngestJob {
     }
 
     fn step(&mut self) -> Result<Step, JobError> {
-        let ingest = self
-            .ingest
-            .as_mut()
-            .expect("IngestJob::step called again after it already reported Done");
+        let ingest = self.ingest.as_mut().ok_or_else(after_done)?;
         let more = ingest
             .step(self.store.as_ref())
             .map_err(|e| JobError::new(e.to_string()))?;
@@ -92,8 +96,8 @@ impl ChunkedJob for IngestJob {
         if more {
             Ok(Step::Yield)
         } else {
-            let report = self.ingest.take().unwrap().into_report();
-            *self.result.lock().unwrap() = Some(report);
+            let report = self.ingest.take().ok_or_else(after_done)?.into_report();
+            *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
             Ok(Step::Done)
         }
     }
@@ -148,10 +152,7 @@ impl ChunkedJob for SyncJob {
     }
 
     fn step(&mut self) -> Result<Step, JobError> {
-        let sync = self
-            .sync
-            .as_mut()
-            .expect("SyncJob::step called again after it already reported Done");
+        let sync = self.sync.as_mut().ok_or_else(after_done)?;
         let had_total = self.progress.total.is_some();
         let more = sync
             .step(self.store.as_ref())
@@ -177,8 +178,8 @@ impl ChunkedJob for SyncJob {
         if more {
             Ok(Step::Yield)
         } else {
-            let report = self.sync.take().unwrap().into_report();
-            *self.result.lock().unwrap() = Some(report);
+            let report = self.sync.take().ok_or_else(after_done)?.into_report();
+            *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
             Ok(Step::Done)
         }
     }
@@ -239,7 +240,7 @@ impl BackupJob {
     }
 
     fn finish(&mut self, outcome: BackupOutcome, pruned: u64) -> Step {
-        *self.result.lock().unwrap() = Some(BackupReport {
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(BackupReport {
             outcome,
             stale_partials_removed: self.stale_partials_removed,
             pruned,
@@ -298,10 +299,7 @@ impl ChunkedJob for BackupJob {
     /// only advances its own "last backup" bookkeeping from a *resolved* report (see
     /// `NineLives::due`'s doc comment and `app.rs::poll_backup`).
     fn step(&mut self) -> Result<Step, JobError> {
-        let phase = self
-            .phase
-            .take()
-            .expect("BackupJob::step called again after it already reported Done");
+        let phase = self.phase.take().ok_or_else(after_done)?;
         match phase {
             BackupPhase::QuickCheck => {
                 let stale_partials_removed = match ninelives::cleanup_stale_partials(&self.policy) {
@@ -433,7 +431,7 @@ impl ChunkedJob for MoveJob {
         self.progress = Progress { done, total };
         match outcome {
             Some(o) => {
-                *self.result.lock().unwrap() = Some(o);
+                *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(o);
                 Ok(Step::Done)
             }
             None => Ok(Step::Yield),
@@ -505,7 +503,7 @@ impl ChunkedJob for DeleteJob {
         self.progress = Progress { done, total };
         match outcome {
             Some(o) => {
-                *self.result.lock().unwrap() = Some(o);
+                *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(o);
                 Ok(Step::Done)
             }
             None => Ok(Step::Yield),
@@ -576,10 +574,7 @@ impl ChunkedJob for VerifyJob {
     }
 
     fn step(&mut self) -> Result<Step, JobError> {
-        let verify = self
-            .verify
-            .as_mut()
-            .expect("VerifyJob::step called again after it already reported Done");
+        let verify = self.verify.as_mut().ok_or_else(after_done)?;
         let more = verify.step(self.store.as_ref());
         let (done, total) = verify.progress();
         self.progress = Progress {
@@ -589,8 +584,8 @@ impl ChunkedJob for VerifyJob {
         if more {
             Ok(Step::Yield)
         } else {
-            let report = self.verify.take().unwrap().into_report();
-            *self.result.lock().unwrap() = Some(report);
+            let report = self.verify.take().ok_or_else(after_done)?.into_report();
+            *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
             Ok(Step::Done)
         }
     }
@@ -657,10 +652,7 @@ impl ChunkedJob for BaselineJob {
     }
 
     fn step(&mut self) -> Result<Step, JobError> {
-        let baseline = self
-            .baseline
-            .as_mut()
-            .expect("BaselineJob::step called again after it already reported Done");
+        let baseline = self.baseline.as_mut().ok_or_else(after_done)?;
         let more = baseline.step(self.store.as_ref());
         let (done, total) = baseline.progress();
         self.progress = Progress {
@@ -670,8 +662,8 @@ impl ChunkedJob for BaselineJob {
         if more {
             Ok(Step::Yield)
         } else {
-            let report = self.baseline.take().unwrap().into_report();
-            *self.result.lock().unwrap() = Some(report);
+            let report = self.baseline.take().ok_or_else(after_done)?.into_report();
+            *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
             Ok(Step::Done)
         }
     }
@@ -741,10 +733,7 @@ impl ChunkedJob for ResumeMovesJob {
     }
 
     fn step(&mut self) -> Result<Step, JobError> {
-        let resume = self
-            .resume
-            .as_mut()
-            .expect("ResumeMovesJob::step called again after it already reported Done");
+        let resume = self.resume.as_mut().ok_or_else(after_done)?;
         let more = resume.step(self.store.as_ref());
         let (done, total) = resume.progress();
         self.progress = Progress {
@@ -754,8 +743,8 @@ impl ChunkedJob for ResumeMovesJob {
         if more {
             Ok(Step::Yield)
         } else {
-            let report = self.resume.take().unwrap().into_report();
-            *self.result.lock().unwrap() = Some(report);
+            let report = self.resume.take().ok_or_else(after_done)?.into_report();
+            *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
             Ok(Step::Done)
         }
     }
@@ -826,14 +815,11 @@ impl ChunkedJob for RightingJob {
     }
 
     fn step(&mut self) -> Result<Step, JobError> {
-        let righting = self
-            .righting
-            .as_mut()
-            .expect("RightingJob::step called again after it already reported Done");
+        let righting = self.righting.as_mut().ok_or_else(after_done)?;
         let more = match righting.step(self.store.as_ref()) {
             Ok(more) => more,
             Err(e) => {
-                let mut run = self.righting.take().unwrap().into_run();
+                let mut run = self.righting.take().ok_or_else(after_done)?.into_run();
                 run.total
                     .failed
                     .push((PathBuf::new(), format!("catalog error: {e}")));
@@ -848,7 +834,7 @@ impl ChunkedJob for RightingJob {
         if more {
             Ok(Step::Yield)
         } else {
-            let run = self.righting.take().unwrap().into_run();
+            let run = self.righting.take().ok_or_else(after_done)?.into_run();
             *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(run);
             Ok(Step::Done)
         }
@@ -919,14 +905,11 @@ impl ChunkedJob for CardCopyJob {
     }
 
     fn step(&mut self) -> Result<Step, JobError> {
-        let copy = self
-            .copy
-            .as_mut()
-            .expect("CardCopyJob::step called again after it already reported Done");
+        let copy = self.copy.as_mut().ok_or_else(after_done)?;
         let more = match copy.step(self.store.as_ref(), &|| false) {
             Ok(more) => more,
             Err(e) => {
-                let mut report = self.copy.take().unwrap().into_report();
+                let mut report = self.copy.take().ok_or_else(after_done)?.into_report();
                 report.ingest_error = Some(e.to_string());
                 *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
                 return Ok(Step::Done);
@@ -940,7 +923,7 @@ impl ChunkedJob for CardCopyJob {
         if more {
             Ok(Step::Yield)
         } else {
-            let report = self.copy.take().unwrap().into_report();
+            let report = self.copy.take().ok_or_else(after_done)?.into_report();
             *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
             Ok(Step::Done)
         }

@@ -348,10 +348,14 @@ impl Righting {
                 report: RightingReport::default(),
             });
         }
-        let cur = self.current.as_mut().expect("just set");
+        let Some(cur) = self.current.as_mut() else {
+            return Ok(true);
+        };
         for _ in 0..STEP_ASSETS {
             let Some(asset) = cur.assets.next() else {
-                let finished = self.current.take().expect("current");
+                let Some(finished) = self.current.take() else {
+                    return Ok(true);
+                };
                 self.run.visited_roots.push(finished.root_id);
                 if finished.report.can_mark_done() {
                     self.run.done_roots.push(finished.root_id);
