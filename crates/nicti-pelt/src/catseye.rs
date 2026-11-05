@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use nicti_tapetum::coat::{PointColorParams, PointColorSample, MAX_POINT_COLORS};
-use nicti_tapetum::frame::{read_frame_region, FrameTexture};
+use nicti_tapetum::frame::{try_read_frame_region, FrameTexture};
 use nicti_tapetum::gpu::GpuContext;
 use nicti_tapetum::oklab;
 use nicti_tapetum::stages::POINT_COLOR;
@@ -69,7 +69,8 @@ fn mean_rgb(pixels: &[[f32; 4]]) -> [f32; 3] {
 /// The rendered frame at normalized `(nx, ny)`, as linear working-space (ProPhoto) RGB.
 pub fn sample_rendered(gpu: &GpuContext, frame: &FrameTexture, nx: f32, ny: f32) -> [f32; 3] {
     let (x, y, w, h) = sample_window(frame.extent.width, frame.extent.height, nx, ny);
-    mean_rgb(&read_frame_region(gpu, frame, x, y, w, h))
+    // A failed readback samples as black rather than panicking the UI.
+    mean_rgb(&try_read_frame_region(gpu, frame, x, y, w, h).unwrap_or_default())
 }
 
 /// Which sample the Point Color section is editing (clamped by the caller to the live count).

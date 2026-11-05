@@ -101,6 +101,13 @@ fn hint_text(op: AutoOp, result: AutoApplied) -> Option<&'static str> {
             },
         ) => Some("Photo still loading"),
         (
+            _,
+            AutoApplied::Skipped {
+                reason: AutoReason::ReadbackFailed,
+                ..
+            },
+        ) => Some("GPU readback failed"),
+        (
             AutoOp::Straighten,
             AutoApplied::Skipped {
                 low_confidence: true,
@@ -1481,6 +1488,16 @@ mod auto_hint_tests {
             assert_eq!(
                 hint_text(op, skipped(AutoReason::DecodeIncomplete, false)),
                 Some("Photo still loading")
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_readback_says_so_for_every_op() {
+        for op in [AutoOp::Tone, AutoOp::Straighten, AutoOp::Upright] {
+            assert_eq!(
+                hint_text(op, skipped(AutoReason::ReadbackFailed, false)),
+                Some("GPU readback failed")
             );
         }
     }

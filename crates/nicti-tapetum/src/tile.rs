@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use crate::frame::{padded_bytes_per_row, read_frame, Extent, FrameTexture};
+use crate::frame::{padded_bytes_per_row, Extent, FrameTexture};
 use crate::geometry::Affine2D;
 use crate::gpu::GpuContext;
 use crate::renderer::GeometryExec;
@@ -285,10 +285,11 @@ impl<'a> TiledRender<'a> {
     /// Renders exactly one tile: retargets `geometry`'s transform to `base_transform` composed
     /// with this tile's own output-space origin (see [`compose_tile_transform`]), samples
     /// `padded` from `source`, reads it back, discards the halo, and writes only `core`'s pixels
-    /// into `sink`.
-    pub fn step(&mut self, sink: &mut dyn TileSink) -> TileStep {
+    /// into `sink`. A failed GPU readback is returned (nothing is written to `sink` for that tile)
+    /// so the caller can fail the render instead of exporting a hole.
+    pub fn step(&mut self, sink: &mut dyn TileSink) -> Result<TileStep, crate::gpu::ReadbackError> {
         let Some(&tile) = self.tiles.get(self.next) else {
-            return TileStep::Done;
+            return Ok(TileStep::Done);
         };
 
         let padded_extent = Extent {
@@ -313,7 +314,7 @@ impl<'a> TiledRender<'a> {
             .encode(&self.gpu, &mut encoder, self.source, &output);
         self.gpu.queue.submit(Some(encoder.finish()));
 
-        let padded_pixels = read_frame(&self.gpu, &output);
+        let padded_pixels = crate::frame::try_read_frame(&self.gpu, &output)?;
         let off_x = tile.core.x - tile.padded.x;
         let off_y = tile.core.y - tile.padded.y;
         let mut core_pixels = Vec::with_capacity((tile.core.width * tile.core.height) as usize);
@@ -326,17 +327,18 @@ impl<'a> TiledRender<'a> {
         sink.write_tile(tile.core, &core_pixels);
 
         self.next += 1;
-        if self.next >= self.tiles.len() {
+        Ok(if self.next >= self.tiles.len() {
             TileStep::Done
         } else {
             TileStep::Yield
-        }
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::read_frame;
 
     use crate::test_util::shared_test_gpu as test_gpu;
 
@@ -657,7 +659,7 @@ mod tests {
         );
         let mut sink = MemorySink::new(extent);
         loop {
-            if renderer.step(&mut sink) == TileStep::Done {
+            if renderer.step(&mut sink).unwrap() == TileStep::Done {
                 break;
             }
         }
@@ -763,7 +765,7 @@ mod tests {
             tiles,
         );
         let mut sink = MemorySink::new(out);
-        while renderer.step(&mut sink) != TileStep::Done {}
+        while renderer.step(&mut sink).unwrap() != TileStep::Done {}
 
         let mut worst = 0.0f32;
         for (a, b) in whole.iter().zip(sink.pixels.iter()) {

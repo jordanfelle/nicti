@@ -15,6 +15,8 @@ pub enum AutoReason {
     AtypicalInput,
     /// No complete decoded frame exists. Produced by the orchestration layer, never by a pure estimator.
     DecodeIncomplete,
+    /// The GPU readback the analysis needs failed (device lost, buffer unmappable).
+    ReadbackFailed,
 }
 
 /// What an automatic operation concluded.

@@ -240,7 +240,9 @@ fn main() -> anyhow::Result<()> {
                     vec![first_tile],
                 );
                 let mut sink = nicti_tapetum::tile::MemorySink::new(sink_extent);
-                tiled.step(&mut sink);
+                if let Err(e) = tiled.step(&mut sink) {
+                    eprintln!("knead: tile readback failed: {e}");
+                }
             });
             println!("{}", serde_json::to_string_pretty(&stats)?);
             Ok(())

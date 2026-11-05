@@ -76,7 +76,15 @@ pub(crate) fn padded_bytes_per_row(width: u32) -> u32 {
 /// pixels on the CPU (a golden-image comparison, an export encoder, `tile::TiledRender`'s own
 /// per-tile readback).
 pub fn read_frame(gpu: &GpuContext, frame: &FrameTexture) -> Vec<[f32; 4]> {
-    read_frame_region(gpu, frame, 0, 0, frame.extent.width, frame.extent.height)
+    crate::gpu::expect_readback(try_read_frame(gpu, frame))
+}
+
+/// [`read_frame`] that reports a failed readback instead of panicking.
+pub fn try_read_frame(
+    gpu: &GpuContext,
+    frame: &FrameTexture,
+) -> Result<Vec<[f32; 4]>, crate::gpu::ReadbackError> {
+    try_read_frame_region(gpu, frame, 0, 0, frame.extent.width, frame.extent.height)
 }
 
 /// [`read_frame`] for the `width x height` window at `(x, y)` only -- the copy and staging buffer
@@ -90,6 +98,18 @@ pub fn read_frame_region(
     width: u32,
     height: u32,
 ) -> Vec<[f32; 4]> {
+    crate::gpu::expect_readback(try_read_frame_region(gpu, frame, x, y, width, height))
+}
+
+/// [`read_frame_region`] that reports a failed readback instead of panicking.
+pub fn try_read_frame_region(
+    gpu: &GpuContext,
+    frame: &FrameTexture,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<Vec<[f32; 4]>, crate::gpu::ReadbackError> {
     use half::f16;
 
     assert!(
@@ -141,7 +161,7 @@ pub fn read_frame_region(
     );
     gpu.queue.submit(Some(encoder.finish()));
 
-    let raw = crate::gpu::read_mapped(gpu, &staging);
+    let raw = crate::gpu::read_mapped(gpu, &staging)?;
 
     let mut out = Vec::with_capacity((width * height) as usize);
     for row_index in 0..height {
@@ -157,7 +177,7 @@ pub fn read_frame_region(
             ]);
         }
     }
-    out
+    Ok(out)
 }
 
 /// Recycles `FrameTexture`s by extent so a stage that needs a fresh output texture doesn't pay a
