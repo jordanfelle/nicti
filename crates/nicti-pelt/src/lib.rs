@@ -23,6 +23,7 @@ mod color_mgmt;
 mod control;
 mod cull;
 mod decode_job;
+mod develop_controls;
 mod develop_panel;
 mod export;
 mod eyeshine;

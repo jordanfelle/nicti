@@ -375,3 +375,11 @@ still race the check (a link planted between check and write).
 - Review hardening: total (not per-read) deadlines, one request in flight per connection (an app refusal without an `id` is reported, a reply for another id is a protocol error), token file must be a private regular file, a discovering session re-looks the file up on reconnect (restart-safe), non-UTF-8 stdin gets a parse error instead of ending the process, `initialize` echoes only known protocol versions, colliding tool names keep the first. The handshake is not channel-bound and traffic is plaintext loopback, as for any local client of this socket.
 - Not verified against a real MCP client or a running window (headless host); the JSON-RPC layer and the socket client are covered by unit tests and an end-to-end test against the real server.
 - With this the ADR's slices 1-3 are built; the command palette (slice 4) and shortcut migration stay deferred.
+
+### Develop control registry as built (#556)
+
+- `nicti-pelt/src/develop_controls.rs`: `Control { id, stage, field, section, spec: &SliderSpec, optional, read/write }`, one per Basic-panel slider (white balance incl. the optional `temp_k`, exposure, tone x5, vibrance, presence x4). The specs are the panel's own consts (made `pub(crate)`), so ranges, labels and defaults cannot drift from the sliders.
+- `develop.set` validates the whole patch against the registry (unknown field, non-number, non-finite or out-of-range value are refused, `null` only for an optional field), then loads the stage's typed params once (`Draft`), writes every field and stores it back through `set_stage_params`: one typed round trip, one undo step, the path a slider edit takes. The old JSON merge (`merge_patch`, hard-coded `field_range`) is gone.
+- `develop.controls` (`Read`) lists the registry (`id, label, section, stage, field, min, max, default, optional`) so an agent can discover legal values.
+- Test: for every control a registry set and a panel-style edit leave byte-identical stage params, equal stage hashes and an equal document content hash (mutation-proved by misrouting a field).
+- Not covered yet (not one float per field, need explicit entries): Color Grading wheels, HSL bands, curves, Calibration, Lens, masks. Filed as a follow-up.
