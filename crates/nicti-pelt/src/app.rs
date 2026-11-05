@@ -1396,6 +1396,9 @@ impl eframe::App for PeltApp {
         let destructive_ui_open = self.destructive_ui_open();
         crate::widgets::scrub_injected(ui.ctx(), destructive_ui_open);
         crate::widgets::set_destructive_ui_open(ui.ctx(), destructive_ui_open);
+        // The palette takes its keys (arrows, Enter, Escape) before anything else reads the frame's
+        // input, so Escape closing it does not also drop the heal tool.
+        self.palette.consume_keys(ui.ctx());
         // A section toggled last frame: remember it across restarts. Best effort; the layout is
         // not worth a notice if the disk write fails.
         if let Some(states) = crate::fur::take_changed_section_states(ui.ctx()) {
@@ -2952,6 +2955,8 @@ impl PeltApp {
                     Ok(_) => palette.close(),
                     Err(e) => palette.fail(e),
                 }
+                // The command ran after the panels were drawn: show its effect now.
+                ctx.request_repaint();
             }
         }
         self.palette = palette;

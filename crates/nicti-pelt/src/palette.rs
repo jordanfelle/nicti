@@ -61,12 +61,40 @@ pub fn entries() -> Vec<Entry> {
         json!({"rating": null}),
     ));
     for c in develop_controls::CONTROLS {
+        // A defringe hue window is checked as a pair (low <= high), so resetting one end alone
+        // could be refused: its row resets both ends.
+        let label = if window_partner(c).is_some() {
+            format!(
+                "Develop: reset {} and the other end of its window ({})",
+                c.spec.label, c.id
+            )
+        } else {
+            format!("Develop: reset {} ({})", c.spec.label, c.id)
+        };
         v.push(Entry {
-            label: format!("Develop: reset {} ({})", c.spec.label, c.id),
+            label,
             action: Action::ResetControl(c),
         });
     }
     v
+}
+
+/// The other end of a defringe hue window (`purple_hue_lo` <-> `purple_hue_hi`), if `c` is one.
+fn window_partner(c: &Control) -> Option<&'static Control> {
+    let other = match c.field.strip_suffix("_hue_lo") {
+        Some(base) => format!("{base}_hue_hi"),
+        None => format!("{}_hue_lo", c.field.strip_suffix("_hue_hi")?),
+    };
+    develop_controls::find(c.stage, &other)
+}
+
+/// The value a reset sets: the slider's resting value, or `null` (as-shot) for an optional control.
+fn reset_value(c: &Control) -> Value {
+    if c.optional {
+        Value::Null
+    } else {
+        json!(c.spec.default)
+    }
 }
 
 /// How well `query` matches `label`: `None` when the query's letters do not all appear in order
@@ -116,12 +144,27 @@ pub fn rank(query: &str, entries: &[Entry]) -> Vec<usize> {
 /// `Ok` when the entry can run now, else the reason it cannot.
 pub fn status(host: &dyn CommandHost, e: &Entry) -> Result<(), String> {
     match &e.action {
-        Action::Command { id, .. } => cmd::COMMANDS
-            .iter()
-            .find(|c| c.id == *id)
-            .ok_or_else(|| format!("unknown command `{id}`"))
-            .and_then(|c| (c.enabled)(host)),
-        Action::ResetControl(_) => host.develop_ready(),
+        Action::Command { id, .. } => {
+            let c = cmd::COMMANDS
+                .iter()
+                .find(|c| c.id == *id)
+                .ok_or_else(|| format!("unknown command `{id}`"))?;
+            (c.enabled)(host)?;
+            // A rating acts on the selection (or the cursor): offer it only when there is one.
+            if *id == "photo.rate" && host.target_ids().is_empty() {
+                return Err("select a photo first".into());
+            }
+            Ok(())
+        }
+        Action::ResetControl(_) => {
+            host.develop_ready()?;
+            // Develop keeps the photo it loaded after you leave it: only offer a reset while you
+            // are in Develop looking at it, never while the grid shows another photo.
+            if host.view_name() != "develop" {
+                return Err("open the photo in Develop first".into());
+            }
+            Ok(())
+        }
     }
 }
 
@@ -133,17 +176,16 @@ pub fn run(host: &mut dyn CommandHost, e: &Entry) -> Result<Value, String> {
             let asset = host
                 .develop_asset()
                 .ok_or("no photo is loaded in Develop (open one in the loupe first)")?;
-            // `null` returns an optional control (white balance temperature) to as-shot.
-            let default = if c.optional {
-                Value::Null
-            } else {
-                json!(c.spec.default)
-            };
+            let mut set = serde_json::Map::new();
+            set.insert(c.field.to_owned(), reset_value(c));
+            if let Some(other) = window_partner(c) {
+                set.insert(other.field.to_owned(), reset_value(other));
+            }
             cmd::dispatch(
                 host,
                 Policy::default(),
                 "develop.set",
-                &json!({"stage": c.stage, "asset": asset, "set": {c.field: default}}),
+                &json!({"stage": c.stage, "asset": asset, "set": set}),
             )
         }
     }
@@ -158,6 +200,26 @@ pub struct Palette {
     selected: usize,
     error: Option<String>,
     entries: Vec<Entry>,
+    /// Keys taken from this frame's input by [`Self::consume_keys`] (at the top of `ui`).
+    keys: Option<Keys>,
+}
+
+/// The palette's keys for one frame.
+#[derive(Clone, Copy, Default)]
+struct Keys {
+    down: bool,
+    up: bool,
+    enter: bool,
+    escape: bool,
+}
+
+fn read_keys(ctx: &egui::Context) -> Keys {
+    ctx.input_mut(|i| Keys {
+        down: i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+        up: i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+        enter: i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+        escape: i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+    })
 }
 
 /// What the overlay asks the app to do.
@@ -194,6 +256,14 @@ impl Palette {
         self.entries.get(index).cloned()
     }
 
+    /// While open, takes the palette's keys out of the frame's input. Call it before anything
+    /// else reads the input, or Escape (for one) also reaches the tools that listen for it.
+    pub fn consume_keys(&mut self, ctx: &egui::Context) {
+        if self.open {
+            self.keys = Some(read_keys(ctx));
+        }
+    }
+
     /// The palette overlay. `host` supplies each row's availability. Returns the entry to run.
     pub fn show(&mut self, ctx: &egui::Context, host: &dyn CommandHost) -> Outcome {
         if !self.open {
@@ -201,13 +271,15 @@ impl Palette {
         }
         let matches = rank(&self.query, &self.entries);
         let mut outcome = Outcome::None;
-        let (mut down, mut up, mut enter, mut escape) = (false, false, false, false);
-        ctx.input_mut(|i| {
-            down = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
-            up = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
-            enter = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
-            escape = i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
-        });
+        let Keys {
+            down,
+            up,
+            enter,
+            escape,
+        } = self.keys.take().unwrap_or_else(|| read_keys(ctx));
+        if down || up {
+            self.error = None;
+        }
         if escape {
             self.open = false;
             return Outcome::None;
@@ -243,7 +315,7 @@ impl Palette {
                             if matches.is_empty() {
                                 ui.weak("No matching command");
                             }
-                            for (row, &i) in matches.iter().enumerate().take(60) {
+                            for (row, &i) in matches.iter().enumerate() {
                                 let entry = &self.entries[i];
                                 let state = status(host, entry);
                                 let text = if state.is_ok() {
@@ -426,7 +498,7 @@ mod tests {
     #[test]
     fn typing_then_enter_runs_the_best_match_and_the_arrows_and_escape_work() {
         let ctx = egui::Context::default();
-        let host = Mock::default();
+        let host = Mock::with_selection(1);
         let mut p = Palette::default();
         // Closed: nothing happens, even with Enter.
         assert!(matches!(
@@ -483,5 +555,120 @@ mod tests {
             "a greyed-out action must not run"
         );
         assert!(p.is_open(), "and the palette stays open to show why");
+    }
+
+    #[test]
+    fn every_fixed_action_dispatches_cleanly_on_a_host() {
+        // Not just "names a real command": each one is run through the table.
+        for e in entries() {
+            if let Action::Command { id, .. } = &e.action {
+                let mut host = Mock::with_selection(1);
+                run(&mut host, &e).unwrap_or_else(|err| panic!("{} ({id}): {err}", e.label));
+            }
+        }
+    }
+
+    #[test]
+    fn a_rating_is_offered_only_when_a_photo_is_selected() {
+        let es = entries();
+        let rate = es.iter().find(|e| e.label == "Rate 3 stars").unwrap();
+        assert_eq!(
+            status(&Mock::default(), rate).unwrap_err(),
+            "select a photo first"
+        );
+        assert!(status(&Mock::with_selection(5), rate).is_ok());
+        // The other fixed actions do not depend on a selection.
+        let go = es.iter().find(|e| e.label == "Go to the Library").unwrap();
+        assert!(status(&Mock::default(), go).is_ok());
+    }
+
+    #[test]
+    fn a_reset_is_offered_only_in_develop_and_runs_on_the_loaded_photo() {
+        let es = entries();
+        let reset = es
+            .iter()
+            .find(|e| e.label.starts_with("Develop: reset Exposure"))
+            .unwrap();
+        // Develop has a photo loaded but the Library is showing: not offered (the loaded photo is
+        // not the one on screen).
+        let library = Mock::with_develop("library");
+        assert_eq!(
+            status(&library, reset).unwrap_err(),
+            "open the photo in Develop first"
+        );
+        let mut develop = Mock::with_develop("develop");
+        assert!(status(&develop, reset).is_ok());
+        assert!(run(&mut develop, reset).is_ok());
+    }
+
+    #[test]
+    fn a_defringe_window_resets_as_a_pair() {
+        let es = entries();
+        let lo = develop_controls::find(nicti_tapetum::stages::DEFRINGE, "purple_hue_lo").unwrap();
+        let hi = develop_controls::find(nicti_tapetum::stages::DEFRINGE, "purple_hue_hi").unwrap();
+        assert_eq!(window_partner(lo).map(|c| c.field), Some("purple_hue_hi"));
+        assert_eq!(window_partner(hi).map(|c| c.field), Some("purple_hue_lo"));
+        assert!(window_partner(
+            develop_controls::find(nicti_tapetum::stages::DEFRINGE, "purple_amount").unwrap()
+        )
+        .is_none());
+        let row = es
+            .iter()
+            .find(|e| matches!(e.action, Action::ResetControl(c) if std::ptr::eq(c, lo)))
+            .unwrap();
+        assert!(
+            row.label.contains("other end of its window"),
+            "{}",
+            row.label
+        );
+    }
+
+    #[test]
+    fn holding_down_stops_on_the_last_drawn_row_and_enter_runs_what_is_highlighted() {
+        let ctx = egui::Context::default();
+        let host = Mock::with_develop("develop");
+        let mut p = Palette::default();
+        p.toggle();
+        frame(&ctx, &mut p, &host, vec![]);
+        for _ in 0..200 {
+            frame(&ctx, &mut p, &host, vec![key(egui::Key::ArrowDown)]);
+        }
+        let Outcome::Run(i) = frame(&ctx, &mut p, &host, vec![key(egui::Key::Enter)]) else {
+            panic!("the last row is available in Develop");
+        };
+        assert_eq!(
+            i,
+            entries().len() - 1,
+            "the highlight stops on the last row, which is drawn"
+        );
+    }
+
+    #[test]
+    fn escape_is_taken_before_other_readers_of_the_frame_see_it() {
+        let ctx = egui::Context::default();
+        let host = Mock::default();
+        let mut p = Palette::default();
+        p.toggle();
+        frame(&ctx, &mut p, &host, vec![]);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events: vec![key(egui::Key::Escape)],
+            ..Default::default()
+        };
+        let mut later_reader_saw_escape = true;
+        let mut full = ctx.run_ui(raw, |ui| {
+            p.consume_keys(ui.ctx());
+            later_reader_saw_escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            let _ = p.show(ui.ctx(), &host);
+        });
+        full.textures_delta.clear();
+        assert!(
+            !later_reader_saw_escape,
+            "a tool listening for Escape must not see the palette's"
+        );
+        assert!(!p.is_open(), "and the palette still closed");
     }
 }

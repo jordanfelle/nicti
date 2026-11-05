@@ -1056,10 +1056,10 @@ pub(crate) mod tests {
 
     #[derive(Default)]
     pub(crate) struct Mock {
-        view: &'static str,
+        pub(crate) view: &'static str,
         selected: Option<i64>,
         rated: Vec<(Vec<i64>, Option<i64>)>,
-        develop: bool,
+        pub(crate) develop: bool,
         opened_export: bool,
         export_dir: Option<std::path::PathBuf>,
         export_requests: Vec<ExportRequest>,
@@ -1067,6 +1067,25 @@ pub(crate) mod tests {
         shot_polls: u32,
         shot_gave_up: u32,
         settled: bool,
+    }
+
+    impl Mock {
+        /// A host with `id` selected in the grid.
+        pub(crate) fn with_selection(id: i64) -> Self {
+            Mock {
+                selected: Some(id),
+                ..Mock::default()
+            }
+        }
+
+        /// A host with a photo loaded in Develop, showing `view`.
+        pub(crate) fn with_develop(view: &'static str) -> Self {
+            Mock {
+                develop: true,
+                view,
+                ..Mock::default()
+            }
+        }
     }
 
     impl CommandHost for Mock {
