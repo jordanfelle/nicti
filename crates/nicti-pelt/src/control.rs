@@ -430,16 +430,7 @@ fn send_line(w: &mut impl Write, v: &Value) -> io::Result<()> {
     w.flush()
 }
 
-fn mac(token: &str, role: &str, nonce: &str, cnonce: &str) -> String {
-    let key = *blake3::hash(token.as_bytes()).as_bytes();
-    let mut msg = Vec::new();
-    for part in [role, nonce, cnonce] {
-        // Length-prefixed, so ("a","bc") and ("ab","c") can never collide.
-        msg.extend_from_slice(&(part.len() as u32).to_le_bytes());
-        msg.extend_from_slice(part.as_bytes());
-    }
-    blake3::keyed_hash(&key, &msg).to_hex().to_string()
-}
+use nicti_vibrissa::wire::mac;
 
 /// The client's `cnonce` when `first` is `{"auth":MAC,"cnonce":C}` answering `nonce` with the
 /// right MAC. Only a JSON *object* can pass: an HTTP request line or a bare string never parses
@@ -1072,6 +1063,66 @@ mod tests {
             ask(&mut s, &mut r, r#"{"id":2,"method":"ui.inspect"}"#)["ok"],
             true
         );
+    }
+
+    #[test]
+    fn the_mcp_clients_session_talks_to_the_real_server_and_rejects_an_impostor() {
+        use nicti_vibrissa::client::{Backend, Session, Source};
+        let rig = Rig::new();
+        let mut session = Session::new(Source {
+            token_file: rig.control.token_path().to_owned(),
+            port: None,
+        });
+        let list = session.call("commands", json!({})).unwrap();
+        assert!(list.as_array().is_some_and(|l| !l.is_empty()));
+        // The same session through the MCP layer: tools are generated from the real table.
+        let mut mcp = nicti_vibrissa::mcp::Server::new(session);
+        let r: Value =
+            serde_json::from_str(&mcp.handle(r#"{"id":1,"method":"tools/list"}"#).unwrap())
+                .unwrap();
+        let names: Vec<_> = r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(names.contains(&"ui_screenshot".to_owned()), "{names:?}");
+        // A server error comes back as an error, not a hang.
+        let mut session = Session::new(Source {
+            token_file: rig.control.token_path().to_owned(),
+            port: None,
+        });
+        assert!(session.call("no.such", json!({})).is_err());
+
+        // An impostor that bound the port first: right hello, `ok`, but it cannot forge the proof.
+        let fake = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = fake.local_addr().unwrap().port();
+        let dir = tempfile_dir("impostor");
+        let tf = dir.join("nicti-control-1.json");
+        std::fs::write(
+            &tf,
+            json!({"port": port, "token": rig.token, "pid": 1}).to_string(),
+        )
+        .unwrap();
+        let h = thread::spawn(move || {
+            let (mut s, _) = fake.accept().unwrap();
+            writeln!(
+                s,
+                r#"{{"hello":"nicti-control","protocol":{PROTOCOL},"nonce":"aa"}}"#
+            )
+            .unwrap();
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let _ = read_line_limited(&mut r, 4096);
+            writeln!(s, r#"{{"ok":true,"proof":"{}"}}"#, "00".repeat(32)).unwrap();
+        });
+        let mut bad = Session::new(Source {
+            token_file: tf,
+            port: None,
+        });
+        let e = bad.call("commands", json!({})).unwrap_err();
+        assert!(e.contains("proof is wrong"), "{e}");
+        h.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

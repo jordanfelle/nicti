@@ -3933,6 +3933,7 @@ dependencies = [
  "nicti-stalk",
  "nicti-stray",
  "nicti-tapetum",
+ "nicti-vibrissa",
  "raw-window-handle",
  "rfd",
  "rusqlite",
@@ -4089,6 +4090,15 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "wgpu",
+]
+
+[[package]]
+name = "nicti-vibrissa"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "getrandom 0.4.3",
+ "serde_json",
 ]
 
 [[package]]

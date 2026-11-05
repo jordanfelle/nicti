@@ -174,6 +174,7 @@ terse index: crate/spike → purpose → owning topic.
   packet patcher, sidecar/embedded I/O, conflict rule. Catalog glue is `nicti-lair`'s
   `scent_sync.rs` (hooked into `scruff.rs`), write-back + review panel is `nicti-pelt`'s
   `xmp_sync.rs` → [`xmp-interop`](.claude/rules/xmp-interop/REFERENCE.md)
+- **`crates/nicti-vibrissa`** (#649, ADR-0434 3b, layer 0, no GUI) — agent control channel client side: `wire` (handshake `mac`, token file, line reader), `client::Session`, `mcp::Server`, bin `nicti-mcp`. Guide `docs/agent-control.md`.
 - **`crates/nicti-stray`** (#62, ADR-0062) — Lightroom Classic catalog import: `LrcImportJob` (ingest →
   match → keywords/collections → markers/variants/develop translation → provenance); UI in
   `nicti-pelt`'s `lrc_import.rs` → [`lrc-migration`](.claude/rules/lrc-migration/REFERENCE.md)

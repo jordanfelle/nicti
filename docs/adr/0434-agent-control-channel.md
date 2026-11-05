@@ -364,3 +364,13 @@ still race the check (a link planted between check and write).
 - **`Read` risk, deliberately:** this is the first `Read` command that returns the library's pixels (plus any visible filename, metadata or dialog); loopback + token is the boundary. The reply line can be several MiB, so a reader must not apply the 1 MiB request cap to replies (the MCP shim must not).
 - **No `path` parameter yet.** The ADR's rule (write to a channel-supplied path only under `--control-allow-destructive`) is not built; bytes only.
 - Not verified against a real window (this host is headless): the egui/eframe screenshot path is exercised by the encoder and queue tests only.
+
+### MCP shim as built (#649, slice 3b)
+
+- New crate `nicti-vibrissa` (layer 0, depends on no workspace crate and no GUI; only `blake3`, `getrandom`, `serde_json`) with the `nicti-mcp` binary. `nicti-pelt` depends on it for the handshake `mac`, so the two ends cannot drift.
+- `tools/list` is the app's own `commands` reply (name = id with `.` -> `_`, description = label + risk + params doc + the "unavailable" reason); there are no fixed extra tools. A screenshot result becomes an MCP image block.
+- The client checks the server's proof (an impostor on the port fails; tested against the real server and a fake one). It reads replies up to 64 MiB (the 1 MiB cap is for requests only), reconnects lazily and re-reads the token file, and never repeats a sent request.
+- Token discovery: `--token-file`, `NICTI_CONTROL_TOKEN_FILE`, or the only `nicti-control-*.json` in the runtime directory; several is an error. `--port` overrides the file's port (for `ssh -L`).
+- Guide: `docs/agent-control.md`; client config example: `docs/agent-control.mcp.json`.
+- Not verified against a real MCP client or a running window (headless host); the JSON-RPC layer and the socket client are covered by unit tests and an end-to-end test against the real server.
+- With this the ADR's slices 1-3 are built; the command palette (slice 4) and shortcut migration stay deferred.
