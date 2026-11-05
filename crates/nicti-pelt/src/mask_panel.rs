@@ -124,17 +124,12 @@ impl MaskUi {
         t
     }
 
-    fn has_range_mask(params: &MaskParams, selected: Option<usize>) -> bool {
+    /// Whether the selected correction's overlay needs the photo thumbnail (a range mask measures
+    /// it, an Auto Mask stroke is refined against it).
+    fn needs_thumb(params: &MaskParams, selected: Option<usize>) -> bool {
         selected
             .and_then(|i| params.corrections.get(i))
-            .is_some_and(|c| {
-                c.mask.components.iter().any(|m| {
-                    matches!(
-                        m.source,
-                        MaskSource::LuminanceRange { .. } | MaskSource::ColorRange { .. }
-                    )
-                })
-            })
+            .is_some_and(crate::mask_edit::needs_thumb)
     }
 
     /// The last status/error line (tests and the panel read it).
@@ -1138,9 +1133,11 @@ fn draw_overlay(
     let painter = ui.painter_at(rect);
 
     if mask.show_overlay {
-        let need_thumb = MaskUi::has_range_mask(params, mask.selected);
+        let need_thumb = MaskUi::needs_thumb(params, mask.selected);
         let thumb = need_thumb.then(|| mask.thumb_for(develop));
-        let key = preview_key(c, develop, develop.frame_key(), thumb.is_some());
+        // The lens-aware key: the thumbnail is rebuilt when a lens option changes, so the overlay
+        // measured on it must be too (#698; range masks had the same stale overlay).
+        let key = preview_key(c, develop, develop.lensed_frame_key(), thumb.is_some());
         if mask.overlay.as_ref().is_none_or(|o| o.key != key) {
             let (w, h) = preview_extent(source, OVERLAY_LONG_EDGE);
             let field = preview_field(c, w, h, develop, thumb.as_deref());
