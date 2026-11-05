@@ -197,9 +197,12 @@ fn human_bytes(b: u64) -> String {
 
 type PlanMsg = Result<(Vec<PlannedCopy>, Vec<String>, Vec<String>), String>;
 
+/// The card-scan thread's answer: the cards found, or the panic message.
+type ScanSlot = Arc<Mutex<Option<Result<Vec<CardVolume>, String>>>>;
+
 pub struct CardCopyUi {
     cards: Vec<CardVolume>,
-    scan: Option<Arc<Mutex<Option<Vec<CardVolume>>>>>,
+    scan: Option<ScanSlot>,
     scan_started: Option<Instant>,
     scanned_at: Option<Instant>,
     /// The panel was open on the last frame: detection only runs then.
@@ -257,7 +260,9 @@ impl CardCopyUi {
         let spawned = std::thread::Builder::new()
             .name("card-scan".into())
             .spawn(move || {
-                let found = scan_cards(&default_mount_roots());
+                // A panic in the scan reports instead of timing out silently and re-panicking
+                // on every rescan (#740).
+                let found = nicti_pounce::guard::catch_panic(|| scan_cards(&default_mount_roots()));
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(found);
                 ctx.request_repaint();
             });
@@ -279,6 +284,13 @@ impl CardCopyUi {
             if let Some(found) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 self.scan = None;
                 self.scanned_at = Some(Instant::now());
+                let found = match found {
+                    Ok(found) => found,
+                    Err(panic) => {
+                        self.status = Some(format!("Couldn't scan for cards: {panic}"));
+                        Vec::new()
+                    }
+                };
                 if let Some(sel) = &self.selected {
                     if !found.iter().any(|c| &c.mount == sel) {
                         self.selected = None;

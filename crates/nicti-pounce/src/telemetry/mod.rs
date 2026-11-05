@@ -397,6 +397,23 @@ pub struct TelemetrySampler {
     handle: Option<JoinHandle<()>>,
 }
 
+/// Sleeps `min_interval` in small chunks rather than one `thread::sleep`, so dropping the sampler
+/// (which sets `stop`) doesn't have to wait out a whole interval before the thread notices and
+/// joins. Returns `false` if `stop` was set meanwhile.
+fn sleep_interval(stop: &AtomicBool, min_interval: Duration) -> bool {
+    let poll = Duration::from_millis(50);
+    let mut waited = Duration::ZERO;
+    while waited < min_interval {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        let chunk = poll.min(min_interval - waited);
+        thread::sleep(chunk);
+        waited += chunk;
+    }
+    true
+}
+
 impl TelemetrySampler {
     pub fn spawn(
         vram: Box<dyn VramSource>,
@@ -438,10 +455,23 @@ impl TelemetrySampler {
             let mut reported: Option<(Sample, Instant)> = None;
 
             while !stop_thread.load(Ordering::Relaxed) {
-                let sample = Sample {
+                // A panicking source (a driver/PDH call) must not end this thread and leave the
+                // last good sample frozen as if current, feeding admission control stale numbers
+                // (#740): drop the sample (readers see `None`, shown as "n/a") and try again next
+                // interval.
+                let sample = crate::guard::catch_panic(|| Sample {
                     host: host.sample(),
                     vram: vram.query(),
                     load: load.query(),
+                });
+                let Ok(sample) = sample else {
+                    *latest_thread
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                    if !sleep_interval(&stop_thread, min_interval) {
+                        return;
+                    }
+                    continue;
                 };
                 // Recovers from a poisoned lock rather than panicking: the mutex only ever
                 // guards a plain assignment (no invariant that could be left broken by a
@@ -462,18 +492,8 @@ impl TelemetrySampler {
                     on_sample();
                 }
 
-                // Sleep in small chunks rather than one `thread::sleep(min_interval)` so
-                // dropping the sampler (which sets `stop`) doesn't have to wait out a whole
-                // interval before the thread notices and joins.
-                let poll = Duration::from_millis(50);
-                let mut waited = Duration::ZERO;
-                while waited < min_interval {
-                    if stop_thread.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let chunk = poll.min(min_interval - waited);
-                    thread::sleep(chunk);
-                    waited += chunk;
+                if !sleep_interval(&stop_thread, min_interval) {
+                    return;
                 }
             }
         });
@@ -733,5 +753,36 @@ mod tests {
             took < Duration::from_secs(30),
             "drop took {took:?}, it must not wait out the {min_interval:?} interval"
         );
+    }
+
+    #[test]
+    fn a_panicking_source_drops_the_sample_instead_of_freezing_it_or_killing_the_thread() {
+        struct Flaky(Arc<AtomicUsize>);
+        impl VramSource for Flaky {
+            fn query(&self) -> Option<VramUsage> {
+                // Succeeds twice, panics on the third call, then recovers.
+                if self.0.fetch_add(1, Ordering::SeqCst) == 2 {
+                    panic!("simulated driver failure");
+                }
+                None
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sampler = TelemetrySampler::spawn(
+            Box::new(Flaky(Arc::clone(&calls))),
+            Box::new(UnavailableLoadSource),
+            Duration::from_millis(20),
+            || {},
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // The thread survived the panic if it kept sampling afterwards.
+        while calls.load(Ordering::SeqCst) < 6 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(calls.load(Ordering::SeqCst) >= 6, "the sampler thread died");
+        while sampler.sample().is_none() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(sampler.sample().is_some(), "sampling never resumed");
     }
 }
