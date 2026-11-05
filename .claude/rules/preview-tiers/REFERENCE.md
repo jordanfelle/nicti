@@ -84,8 +84,7 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
   `docs/adr/0029-preview-tier-strategy.md` for #29's.
 - **Tiered thumbnail storage (#72)** — `docs/adr/0072`: archive-drive folders keep T0 as
   `<raw>.thumb.jpg` sidecars (T0 JPEG bytes unchanged; WebP stays rejected per #143), active folders
-  in the catalog. Archive-drive role = path-prefix setting (`nicti-pelt/src/archive_drives.rs`) until
-  volume identity is wired in. `Carry` exports sidecars before the move (`CarryOptions::export_sidecars`),
+  in the catalog. Archive-drive role = path-prefix setting (`nicti-pelt/src/archive_drives.rs`); #392: a whole drive is flagged by volume identity (`archive_volumes`, survives a drive-letter change), folders and unidentifiable volumes (all non-Windows) keep the path rule. `Carry` exports sidecars before the move (`CarryOptions::export_sidecars`),
   flips `root.archived` in the commit txn, then a chunked `Settle` phase (`nicti-lair/src/tier.rs`)
   drops blobs / re-ingests sidecars; blob-only-dropped-if-sidecar-readable keeps it crash-safe.
   Readers use `tier::load_t0_by_id` (catalog, then sidecar).
