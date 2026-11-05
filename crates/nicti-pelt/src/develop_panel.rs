@@ -40,13 +40,19 @@ const CURVE_CHANNEL_COLORS: [egui::Color32; 5] = [
 
 /// Color Grading's wheel picker (#432).
 const GRADE_WHEELS: [&str; 4] = ["Shadows", "Midtones", "Highlights", "Global"];
-const GRADE_HUE: SliderSpec = SliderSpec::new("grade.hue", "Hue", 0.0, 360.0, 0.0)
+// The HSL sliders share one range for all eight bands; the panel adds the band's track colours.
+pub(crate) const HSL_HUE: SliderSpec = SliderSpec::bipolar("hsl.hue", "Hue");
+pub(crate) const HSL_SATURATION: SliderSpec = SliderSpec::bipolar("hsl.saturation", "Saturation");
+pub(crate) const HSL_LUMINANCE: SliderSpec = SliderSpec::bipolar("hsl.luminance", "Luminance");
+
+pub(crate) const GRADE_HUE: SliderSpec = SliderSpec::new("grade.hue", "Hue", 0.0, 360.0, 0.0)
     .step(1.0, 0)
     .unit("°");
-const GRADE_SAT: SliderSpec = SliderSpec::new("grade.sat", "Saturation", 0.0, 1.0, 0.0);
-const GRADE_LUM: SliderSpec = SliderSpec::bipolar("grade.lum", "Luminance");
-const GRADE_BLENDING: SliderSpec = SliderSpec::new("grade.blending", "Blending", 0.0, 1.0, 0.5);
-const GRADE_BALANCE: SliderSpec = SliderSpec::bipolar("grade.balance", "Balance");
+pub(crate) const GRADE_SAT: SliderSpec = SliderSpec::new("grade.sat", "Saturation", 0.0, 1.0, 0.0);
+pub(crate) const GRADE_LUM: SliderSpec = SliderSpec::bipolar("grade.lum", "Luminance");
+pub(crate) const GRADE_BLENDING: SliderSpec =
+    SliderSpec::new("grade.blending", "Blending", 0.0, 1.0, 0.5);
+pub(crate) const GRADE_BALANCE: SliderSpec = SliderSpec::bipolar("grade.balance", "Balance");
 
 const PC_HUE_SHIFT: SliderSpec = SliderSpec::bipolar("pc.hue_shift", "Hue Shift");
 const PC_SAT_SHIFT: SliderSpec = SliderSpec::bipolar("pc.sat_shift", "Saturation Shift");
@@ -199,10 +205,11 @@ pub(crate) const DEHAZE: SliderSpec = SliderSpec::bipolar("basic.dehaze", "Dehaz
 pub(crate) const VIBRANCE_AMOUNT: SliderSpec = SliderSpec::bipolar("basic.vibrance", "Vibrance");
 pub(crate) const SATURATION: SliderSpec = SliderSpec::bipolar("basic.saturation", "Saturation");
 
-const CURVE_SHADOWS: SliderSpec = SliderSpec::bipolar("curve.shadows", "Shadows");
-const CURVE_DARKS: SliderSpec = SliderSpec::bipolar("curve.darks", "Darks");
-const CURVE_LIGHTS: SliderSpec = SliderSpec::bipolar("curve.lights", "Lights");
-const CURVE_HIGHLIGHTS: SliderSpec = SliderSpec::bipolar("curve.highlights", "Highlights");
+pub(crate) const CURVE_SHADOWS: SliderSpec = SliderSpec::bipolar("curve.shadows", "Shadows");
+pub(crate) const CURVE_DARKS: SliderSpec = SliderSpec::bipolar("curve.darks", "Darks");
+pub(crate) const CURVE_LIGHTS: SliderSpec = SliderSpec::bipolar("curve.lights", "Lights");
+pub(crate) const CURVE_HIGHLIGHTS: SliderSpec =
+    SliderSpec::bipolar("curve.highlights", "Highlights");
 
 const ROTATION: SliderSpec = SliderSpec::new(
     "crop.rotation",
@@ -216,36 +223,42 @@ const ROTATION: SliderSpec = SliderSpec::new(
 .signed()
 .unit("\u{b0}");
 
-const SHARPEN_AMOUNT: SliderSpec =
+pub(crate) const SHARPEN_AMOUNT: SliderSpec =
     SliderSpec::new("sharpen.amount", "Sharpen Amount", 0.0, 1.5, 0.0);
-const SHARPEN_RADIUS: SliderSpec =
+pub(crate) const SHARPEN_RADIUS: SliderSpec =
     SliderSpec::new("sharpen.radius", "Sharpen Radius", 0.5, 3.0, 1.0);
-const SHARPEN_DETAIL: SliderSpec =
+pub(crate) const SHARPEN_DETAIL: SliderSpec =
     SliderSpec::new("sharpen.detail", "Sharpen Detail", 0.0, 1.0, 0.5);
-const NR_LUMINANCE: SliderSpec = SliderSpec::new("nr.luminance", "NR Luminance", 0.0, 1.0, 0.0);
-const NR_COLOR: SliderSpec = SliderSpec::new("nr.color", "NR Color", 0.0, 1.0, 0.0);
-const NR_DETAIL: SliderSpec = SliderSpec::new("nr.detail", "NR Detail", 0.0, 1.0, 0.0);
+pub(crate) const NR_LUMINANCE: SliderSpec =
+    SliderSpec::new("nr.luminance", "NR Luminance", 0.0, 1.0, 0.0);
+pub(crate) const NR_COLOR: SliderSpec = SliderSpec::new("nr.color", "NR Color", 0.0, 1.0, 0.0);
+pub(crate) const NR_DETAIL: SliderSpec = SliderSpec::new("nr.detail", "NR Detail", 0.0, 1.0, 0.0);
 
-const DEFRINGE_PURPLE_AMOUNT: SliderSpec =
+pub(crate) const DEFRINGE_PURPLE_AMOUNT: SliderSpec =
     SliderSpec::new("lens.defringe_purple", "Purple Amount", 0.0, 1.0, 0.0);
-const DEFRINGE_PURPLE_LO: SliderSpec =
+pub(crate) const DEFRINGE_PURPLE_LO: SliderSpec =
     SliderSpec::new("lens.defringe_purple_lo", "Purple Hue Lo", 0.0, 1.0, 0.3);
-const DEFRINGE_PURPLE_HI: SliderSpec =
+pub(crate) const DEFRINGE_PURPLE_HI: SliderSpec =
     SliderSpec::new("lens.defringe_purple_hi", "Purple Hue Hi", 0.0, 1.0, 0.7);
-const DEFRINGE_GREEN_AMOUNT: SliderSpec =
+pub(crate) const DEFRINGE_GREEN_AMOUNT: SliderSpec =
     SliderSpec::new("lens.defringe_green", "Green Amount", 0.0, 1.0, 0.0);
-const DEFRINGE_GREEN_LO: SliderSpec =
+pub(crate) const DEFRINGE_GREEN_LO: SliderSpec =
     SliderSpec::new("lens.defringe_green_lo", "Green Hue Lo", 0.0, 1.0, 0.4);
-const DEFRINGE_GREEN_HI: SliderSpec =
+pub(crate) const DEFRINGE_GREEN_HI: SliderSpec =
     SliderSpec::new("lens.defringe_green_hi", "Green Hue Hi", 0.0, 1.0, 0.6);
 
-const CAL_SHADOW_TINT: SliderSpec = SliderSpec::bipolar("cal.shadow_tint", "Shadows Tint");
-const CAL_RED_HUE: SliderSpec = SliderSpec::bipolar("cal.red_hue", "Red Primary Hue");
-const CAL_RED_SAT: SliderSpec = SliderSpec::bipolar("cal.red_sat", "Red Primary Saturation");
-const CAL_GREEN_HUE: SliderSpec = SliderSpec::bipolar("cal.green_hue", "Green Primary Hue");
-const CAL_GREEN_SAT: SliderSpec = SliderSpec::bipolar("cal.green_sat", "Green Primary Saturation");
-const CAL_BLUE_HUE: SliderSpec = SliderSpec::bipolar("cal.blue_hue", "Blue Primary Hue");
-const CAL_BLUE_SAT: SliderSpec = SliderSpec::bipolar("cal.blue_sat", "Blue Primary Saturation");
+pub(crate) const CAL_SHADOW_TINT: SliderSpec =
+    SliderSpec::bipolar("cal.shadow_tint", "Shadows Tint");
+pub(crate) const CAL_RED_HUE: SliderSpec = SliderSpec::bipolar("cal.red_hue", "Red Primary Hue");
+pub(crate) const CAL_RED_SAT: SliderSpec =
+    SliderSpec::bipolar("cal.red_sat", "Red Primary Saturation");
+pub(crate) const CAL_GREEN_HUE: SliderSpec =
+    SliderSpec::bipolar("cal.green_hue", "Green Primary Hue");
+pub(crate) const CAL_GREEN_SAT: SliderSpec =
+    SliderSpec::bipolar("cal.green_sat", "Green Primary Saturation");
+pub(crate) const CAL_BLUE_HUE: SliderSpec = SliderSpec::bipolar("cal.blue_hue", "Blue Primary Hue");
+pub(crate) const CAL_BLUE_SAT: SliderSpec =
+    SliderSpec::bipolar("cal.blue_sat", "Blue Primary Saturation");
 
 const VIGNETTE_AMOUNT: SliderSpec = SliderSpec::bipolar("fx.vignette_amount", "Amount");
 const VIGNETTE_MIDPOINT: SliderSpec =
@@ -451,11 +464,9 @@ pub fn show(
         let band_no = *hsl_band_selected as u8;
         let mut hsl: HslParams = develop.stage_params(HSL);
         let band: &mut HslBand = &mut hsl.bands[*hsl_band_selected];
-        let hue = SliderSpec::bipolar("hsl.hue", "Hue").track(Track::Hue { band: band_no });
-        let sat =
-            SliderSpec::bipolar("hsl.saturation", "Saturation").track(Track::Sat { band: band_no });
-        let lum =
-            SliderSpec::bipolar("hsl.luminance", "Luminance").track(Track::Lum { band: band_no });
+        let hue = HSL_HUE.track(Track::Hue { band: band_no });
+        let sat = HSL_SATURATION.track(Track::Sat { band: band_no });
+        let lum = HSL_LUMINANCE.track(Track::Lum { band: band_no });
         slider(ui, &hue, &mut band.hue);
         slider(ui, &sat, &mut band.saturation);
         slider(ui, &lum, &mut band.luminance);
