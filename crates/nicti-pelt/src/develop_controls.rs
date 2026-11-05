@@ -10,67 +10,98 @@
 //! presence). Grading wheels, HSL bands, curves and masks need explicit entries of their own
 //! (their params are not one float per field) and are not here yet.
 
-use nicti_tapetum::coat::{ExposureParams, PresenceParams, ToneParams, VibranceParams, WbParams};
-use nicti_tapetum::stages::{EXPOSURE, PRESENCE, TONE, VIBRANCE, WB};
+use nicti_tapetum::coat::{
+    CalibrationParams, ColorGradeParams, DefringeParams, ExposureParams, HslParams,
+    NoiseReductionParams, PresenceParams, SharpenParams, ToneCurveParams, ToneParams,
+    VibranceParams, WbParams,
+};
+use nicti_tapetum::stages::{
+    CALIBRATION, COLOR_GRADE, DEFRINGE, EXPOSURE, HSL, NOISE_REDUCTION, PRESENCE, SHARPEN, TONE,
+    TONE_CURVE, VIBRANCE, WB,
+};
 
 use crate::develop_panel::{
-    BLACKS, CLARITY, CONTRAST, DEHAZE, EXPOSURE_STOPS, HIGHLIGHTS, SATURATION, SHADOWS, TEMP,
-    TEXTURE, TINT, VIBRANCE_AMOUNT, WHITES,
+    BLACKS, CAL_BLUE_HUE, CAL_BLUE_SAT, CAL_GREEN_HUE, CAL_GREEN_SAT, CAL_RED_HUE, CAL_RED_SAT,
+    CAL_SHADOW_TINT, CLARITY, CONTRAST, CURVE_DARKS, CURVE_HIGHLIGHTS, CURVE_LIGHTS, CURVE_SHADOWS,
+    DEFRINGE_GREEN_AMOUNT, DEFRINGE_GREEN_HI, DEFRINGE_GREEN_LO, DEFRINGE_PURPLE_AMOUNT,
+    DEFRINGE_PURPLE_HI, DEFRINGE_PURPLE_LO, DEHAZE, EXPOSURE_STOPS, GRADE_BALANCE, GRADE_BLENDING,
+    GRADE_HUE, GRADE_LUM, GRADE_SAT, HIGHLIGHTS, HSL_HUE, HSL_LUMINANCE, HSL_SATURATION, NR_COLOR,
+    NR_DETAIL, NR_LUMINANCE, SATURATION, SHADOWS, SHARPEN_AMOUNT, SHARPEN_DETAIL, SHARPEN_RADIUS,
+    TEMP, TEXTURE, TINT, VIBRANCE_AMOUNT, WHITES,
 };
 use crate::fur::SliderSpec;
 use crate::render::DevelopDoc;
 
-/// One stage's typed params, loaded once so several fields can change in one typed write (one
-/// undo step) and stored back through `set_stage_params`.
-pub enum Draft {
-    Wb(WbParams),
-    Exposure(ExposureParams),
-    Tone(ToneParams),
-    Vibrance(VibranceParams),
-    Presence(PresenceParams),
+/// The stages' typed params, one variant per stage, generated so a stage appears once. A [`Draft`]
+/// holds one stage's params loaded from the document so several fields can change in one typed
+/// write (one undo step) and be stored back through `set_stage_params`.
+macro_rules! drafts {
+    ($($variant:ident($ty:ty) = $stage:expr),+ $(,)?) => {
+        pub enum Draft {
+            $($variant($ty)),+
+        }
+
+        impl Draft {
+            pub fn load(dev: &DevelopDoc, stage: &str) -> Option<Draft> {
+                $(if stage == $stage {
+                    return Some(Draft::$variant(dev.stage_params(stage)));
+                })+
+                None
+            }
+
+            /// Writes the draft back through the undo history (a no-op when nothing changed).
+            pub fn store(&self, dev: &mut DevelopDoc) {
+                match self {
+                    $(Draft::$variant(p) => dev.set_stage_params($stage, p)),+
+                }
+            }
+
+            /// The params as JSON (`develop.get`).
+            pub fn to_json(&self) -> serde_json::Value {
+                match self {
+                    $(Draft::$variant(p) => {
+                        serde_json::to_value(p).unwrap_or(serde_json::Value::Null)
+                    }),+
+                }
+            }
+
+            /// The stage's default params, with no document: lets the registry be checked without
+            /// a view.
+            #[cfg(test)]
+            fn default_for(stage: &str) -> Option<Draft> {
+                $(if stage == $stage {
+                    return Some(Draft::$variant(<$ty>::default()));
+                })+
+                None
+            }
+        }
+
+        /// The stages `develop.get/set` may touch.
+        pub const STAGES: &[&str] = &[$($stage),+];
+    };
 }
 
-impl Draft {
-    pub fn load(dev: &DevelopDoc, stage: &str) -> Option<Draft> {
-        Some(match stage {
-            WB => Draft::Wb(dev.stage_params(WB)),
-            EXPOSURE => Draft::Exposure(dev.stage_params(EXPOSURE)),
-            TONE => Draft::Tone(dev.stage_params(TONE)),
-            VIBRANCE => Draft::Vibrance(dev.stage_params(VIBRANCE)),
-            PRESENCE => Draft::Presence(dev.stage_params(PRESENCE)),
-            _ => return None,
-        })
-    }
-
-    /// The stage's default params, with no document: lets the registry be checked without a view.
-    #[cfg(test)]
-    fn default_for(stage: &str) -> Option<Draft> {
-        Some(match stage {
-            WB => Draft::Wb(WbParams::default()),
-            EXPOSURE => Draft::Exposure(ExposureParams::default()),
-            TONE => Draft::Tone(ToneParams::default()),
-            VIBRANCE => Draft::Vibrance(VibranceParams::default()),
-            PRESENCE => Draft::Presence(PresenceParams::default()),
-            _ => return None,
-        })
-    }
-
-    /// Writes the draft back through the undo history (a no-op when nothing changed).
-    pub fn store(&self, dev: &mut DevelopDoc) {
-        match self {
-            Draft::Wb(p) => dev.set_stage_params(WB, p),
-            Draft::Exposure(p) => dev.set_stage_params(EXPOSURE, p),
-            Draft::Tone(p) => dev.set_stage_params(TONE, p),
-            Draft::Vibrance(p) => dev.set_stage_params(VIBRANCE, p),
-            Draft::Presence(p) => dev.set_stage_params(PRESENCE, p),
-        }
-    }
+drafts! {
+    Wb(WbParams) = WB,
+    Exposure(ExposureParams) = EXPOSURE,
+    Tone(ToneParams) = TONE,
+    Vibrance(VibranceParams) = VIBRANCE,
+    Presence(PresenceParams) = PRESENCE,
+    ToneCurve(ToneCurveParams) = TONE_CURVE,
+    Hsl(HslParams) = HSL,
+    ColorGrade(ColorGradeParams) = COLOR_GRADE,
+    Calibration(CalibrationParams) = CALIBRATION,
+    Defringe(DefringeParams) = DEFRINGE,
+    Sharpen(SharpenParams) = SHARPEN,
+    NoiseReduction(NoiseReductionParams) = NOISE_REDUCTION,
 }
 
 pub struct Control {
-    /// The panel slider's id, for example `basic.exposure`.
+    /// A unique id: the panel slider's (`basic.exposure`), or `hsl.<band>.<field>` where the slider
+    /// is shared by several bands.
     pub id: &'static str,
-    /// The document stage and the field name inside its params (what `develop.get/set` use).
+    /// The document stage and the field's path inside its params, dotted for nested values
+    /// (`temp_k`, `bands.2.hue`, `shadows.sat`): what `develop.get/set` use.
     pub stage: &'static str,
     pub field: &'static str,
     /// The panel section it lives in.
@@ -124,22 +155,24 @@ impl Control {
     }
 }
 
+/// One control: `(stage, field path, id, section, panel spec, Draft variant, params path)`. The
+/// params path is the Rust access path inside the variant's struct (`bands[2].hue`).
 macro_rules! control {
-    ($stage:expr, $field:literal, $spec:expr, $variant:ident, $name:ident) => {
+    ($stage:expr, $field:literal, $id:expr, $section:literal, $spec:expr, $variant:ident, $($path:tt)+) => {
         Control {
-            id: $spec.id,
+            id: $id,
             stage: $stage,
             field: $field,
-            section: "basic",
+            section: $section,
             spec: &$spec,
             optional: false,
             read: |d| match d {
-                Draft::$variant(p) => Some(p.$name),
+                Draft::$variant(p) => Some(p.$($path)+),
                 _ => None,
             },
             write: |d, v| {
                 if let (Draft::$variant(p), Some(v)) = (d, v) {
-                    p.$name = v;
+                    p.$($path)+ = v;
                 }
             },
         }
@@ -164,18 +197,607 @@ pub static CONTROLS: &[Control] = &[
             }
         },
     },
-    control!(WB, "tint", TINT, Wb, tint),
-    control!(EXPOSURE, "stops", EXPOSURE_STOPS, Exposure, stops),
-    control!(TONE, "contrast", CONTRAST, Tone, contrast),
-    control!(TONE, "highlights", HIGHLIGHTS, Tone, highlights),
-    control!(TONE, "shadows", SHADOWS, Tone, shadows),
-    control!(TONE, "whites", WHITES, Tone, whites),
-    control!(TONE, "blacks", BLACKS, Tone, blacks),
-    control!(VIBRANCE, "amount", VIBRANCE_AMOUNT, Vibrance, amount),
-    control!(PRESENCE, "texture", TEXTURE, Presence, texture),
-    control!(PRESENCE, "clarity", CLARITY, Presence, clarity),
-    control!(PRESENCE, "dehaze", DEHAZE, Presence, dehaze),
-    control!(PRESENCE, "saturation", SATURATION, Presence, saturation),
+    control!(WB, "tint", TINT.id, "basic", TINT, Wb, tint),
+    control!(
+        EXPOSURE,
+        "stops",
+        EXPOSURE_STOPS.id,
+        "basic",
+        EXPOSURE_STOPS,
+        Exposure,
+        stops
+    ),
+    control!(
+        TONE,
+        "contrast",
+        CONTRAST.id,
+        "basic",
+        CONTRAST,
+        Tone,
+        contrast
+    ),
+    control!(
+        TONE,
+        "highlights",
+        HIGHLIGHTS.id,
+        "basic",
+        HIGHLIGHTS,
+        Tone,
+        highlights
+    ),
+    control!(TONE, "shadows", SHADOWS.id, "basic", SHADOWS, Tone, shadows),
+    control!(TONE, "whites", WHITES.id, "basic", WHITES, Tone, whites),
+    control!(TONE, "blacks", BLACKS.id, "basic", BLACKS, Tone, blacks),
+    control!(
+        VIBRANCE,
+        "amount",
+        VIBRANCE_AMOUNT.id,
+        "basic",
+        VIBRANCE_AMOUNT,
+        Vibrance,
+        amount
+    ),
+    control!(PRESENCE, "texture", TEXTURE.id, "basic", TEXTURE, Presence, texture),
+    control!(PRESENCE, "clarity", CLARITY.id, "basic", CLARITY, Presence, clarity),
+    control!(PRESENCE, "dehaze", DEHAZE.id, "basic", DEHAZE, Presence, dehaze),
+    control!(
+        PRESENCE,
+        "saturation",
+        SATURATION.id,
+        "basic",
+        SATURATION,
+        Presence,
+        saturation
+    ),
+    control!(
+        TONE_CURVE,
+        "shadows",
+        CURVE_SHADOWS.id,
+        "tone_curve",
+        CURVE_SHADOWS,
+        ToneCurve,
+        shadows
+    ),
+    control!(
+        TONE_CURVE,
+        "darks",
+        CURVE_DARKS.id,
+        "tone_curve",
+        CURVE_DARKS,
+        ToneCurve,
+        darks
+    ),
+    control!(
+        TONE_CURVE,
+        "lights",
+        CURVE_LIGHTS.id,
+        "tone_curve",
+        CURVE_LIGHTS,
+        ToneCurve,
+        lights
+    ),
+    control!(
+        TONE_CURVE,
+        "highlights",
+        CURVE_HIGHLIGHTS.id,
+        "tone_curve",
+        CURVE_HIGHLIGHTS,
+        ToneCurve,
+        highlights
+    ),
+    control!(
+        HSL,
+        "bands.0.hue",
+        "hsl.0.hue",
+        "hsl",
+        HSL_HUE,
+        Hsl,
+        bands[0].hue
+    ),
+    control!(
+        HSL,
+        "bands.0.saturation",
+        "hsl.0.saturation",
+        "hsl",
+        HSL_SATURATION,
+        Hsl,
+        bands[0].saturation
+    ),
+    control!(
+        HSL,
+        "bands.0.luminance",
+        "hsl.0.luminance",
+        "hsl",
+        HSL_LUMINANCE,
+        Hsl,
+        bands[0].luminance
+    ),
+    control!(
+        HSL,
+        "bands.1.hue",
+        "hsl.1.hue",
+        "hsl",
+        HSL_HUE,
+        Hsl,
+        bands[1].hue
+    ),
+    control!(
+        HSL,
+        "bands.1.saturation",
+        "hsl.1.saturation",
+        "hsl",
+        HSL_SATURATION,
+        Hsl,
+        bands[1].saturation
+    ),
+    control!(
+        HSL,
+        "bands.1.luminance",
+        "hsl.1.luminance",
+        "hsl",
+        HSL_LUMINANCE,
+        Hsl,
+        bands[1].luminance
+    ),
+    control!(
+        HSL,
+        "bands.2.hue",
+        "hsl.2.hue",
+        "hsl",
+        HSL_HUE,
+        Hsl,
+        bands[2].hue
+    ),
+    control!(
+        HSL,
+        "bands.2.saturation",
+        "hsl.2.saturation",
+        "hsl",
+        HSL_SATURATION,
+        Hsl,
+        bands[2].saturation
+    ),
+    control!(
+        HSL,
+        "bands.2.luminance",
+        "hsl.2.luminance",
+        "hsl",
+        HSL_LUMINANCE,
+        Hsl,
+        bands[2].luminance
+    ),
+    control!(
+        HSL,
+        "bands.3.hue",
+        "hsl.3.hue",
+        "hsl",
+        HSL_HUE,
+        Hsl,
+        bands[3].hue
+    ),
+    control!(
+        HSL,
+        "bands.3.saturation",
+        "hsl.3.saturation",
+        "hsl",
+        HSL_SATURATION,
+        Hsl,
+        bands[3].saturation
+    ),
+    control!(
+        HSL,
+        "bands.3.luminance",
+        "hsl.3.luminance",
+        "hsl",
+        HSL_LUMINANCE,
+        Hsl,
+        bands[3].luminance
+    ),
+    control!(
+        HSL,
+        "bands.4.hue",
+        "hsl.4.hue",
+        "hsl",
+        HSL_HUE,
+        Hsl,
+        bands[4].hue
+    ),
+    control!(
+        HSL,
+        "bands.4.saturation",
+        "hsl.4.saturation",
+        "hsl",
+        HSL_SATURATION,
+        Hsl,
+        bands[4].saturation
+    ),
+    control!(
+        HSL,
+        "bands.4.luminance",
+        "hsl.4.luminance",
+        "hsl",
+        HSL_LUMINANCE,
+        Hsl,
+        bands[4].luminance
+    ),
+    control!(
+        HSL,
+        "bands.5.hue",
+        "hsl.5.hue",
+        "hsl",
+        HSL_HUE,
+        Hsl,
+        bands[5].hue
+    ),
+    control!(
+        HSL,
+        "bands.5.saturation",
+        "hsl.5.saturation",
+        "hsl",
+        HSL_SATURATION,
+        Hsl,
+        bands[5].saturation
+    ),
+    control!(
+        HSL,
+        "bands.5.luminance",
+        "hsl.5.luminance",
+        "hsl",
+        HSL_LUMINANCE,
+        Hsl,
+        bands[5].luminance
+    ),
+    control!(
+        HSL,
+        "bands.6.hue",
+        "hsl.6.hue",
+        "hsl",
+        HSL_HUE,
+        Hsl,
+        bands[6].hue
+    ),
+    control!(
+        HSL,
+        "bands.6.saturation",
+        "hsl.6.saturation",
+        "hsl",
+        HSL_SATURATION,
+        Hsl,
+        bands[6].saturation
+    ),
+    control!(
+        HSL,
+        "bands.6.luminance",
+        "hsl.6.luminance",
+        "hsl",
+        HSL_LUMINANCE,
+        Hsl,
+        bands[6].luminance
+    ),
+    control!(
+        HSL,
+        "bands.7.hue",
+        "hsl.7.hue",
+        "hsl",
+        HSL_HUE,
+        Hsl,
+        bands[7].hue
+    ),
+    control!(
+        HSL,
+        "bands.7.saturation",
+        "hsl.7.saturation",
+        "hsl",
+        HSL_SATURATION,
+        Hsl,
+        bands[7].saturation
+    ),
+    control!(
+        HSL,
+        "bands.7.luminance",
+        "hsl.7.luminance",
+        "hsl",
+        HSL_LUMINANCE,
+        Hsl,
+        bands[7].luminance
+    ),
+    control!(
+        COLOR_GRADE,
+        "shadows.hue",
+        "grade.shadows.hue",
+        "color_grading",
+        GRADE_HUE,
+        ColorGrade,
+        shadows.hue
+    ),
+    control!(
+        COLOR_GRADE,
+        "shadows.sat",
+        "grade.shadows.sat",
+        "color_grading",
+        GRADE_SAT,
+        ColorGrade,
+        shadows.sat
+    ),
+    control!(
+        COLOR_GRADE,
+        "shadows.lum",
+        "grade.shadows.lum",
+        "color_grading",
+        GRADE_LUM,
+        ColorGrade,
+        shadows.lum
+    ),
+    control!(
+        COLOR_GRADE,
+        "midtones.hue",
+        "grade.midtones.hue",
+        "color_grading",
+        GRADE_HUE,
+        ColorGrade,
+        midtones.hue
+    ),
+    control!(
+        COLOR_GRADE,
+        "midtones.sat",
+        "grade.midtones.sat",
+        "color_grading",
+        GRADE_SAT,
+        ColorGrade,
+        midtones.sat
+    ),
+    control!(
+        COLOR_GRADE,
+        "midtones.lum",
+        "grade.midtones.lum",
+        "color_grading",
+        GRADE_LUM,
+        ColorGrade,
+        midtones.lum
+    ),
+    control!(
+        COLOR_GRADE,
+        "highlights.hue",
+        "grade.highlights.hue",
+        "color_grading",
+        GRADE_HUE,
+        ColorGrade,
+        highlights.hue
+    ),
+    control!(
+        COLOR_GRADE,
+        "highlights.sat",
+        "grade.highlights.sat",
+        "color_grading",
+        GRADE_SAT,
+        ColorGrade,
+        highlights.sat
+    ),
+    control!(
+        COLOR_GRADE,
+        "highlights.lum",
+        "grade.highlights.lum",
+        "color_grading",
+        GRADE_LUM,
+        ColorGrade,
+        highlights.lum
+    ),
+    control!(
+        COLOR_GRADE,
+        "global.hue",
+        "grade.global.hue",
+        "color_grading",
+        GRADE_HUE,
+        ColorGrade,
+        global.hue
+    ),
+    control!(
+        COLOR_GRADE,
+        "global.sat",
+        "grade.global.sat",
+        "color_grading",
+        GRADE_SAT,
+        ColorGrade,
+        global.sat
+    ),
+    control!(
+        COLOR_GRADE,
+        "global.lum",
+        "grade.global.lum",
+        "color_grading",
+        GRADE_LUM,
+        ColorGrade,
+        global.lum
+    ),
+    control!(
+        COLOR_GRADE,
+        "blending",
+        GRADE_BLENDING.id,
+        "color_grading",
+        GRADE_BLENDING,
+        ColorGrade,
+        blending
+    ),
+    control!(
+        COLOR_GRADE,
+        "balance",
+        GRADE_BALANCE.id,
+        "color_grading",
+        GRADE_BALANCE,
+        ColorGrade,
+        balance
+    ),
+    control!(
+        CALIBRATION,
+        "red_hue",
+        CAL_RED_HUE.id,
+        "calibration",
+        CAL_RED_HUE,
+        Calibration,
+        red_hue
+    ),
+    control!(
+        CALIBRATION,
+        "red_sat",
+        CAL_RED_SAT.id,
+        "calibration",
+        CAL_RED_SAT,
+        Calibration,
+        red_sat
+    ),
+    control!(
+        CALIBRATION,
+        "green_hue",
+        CAL_GREEN_HUE.id,
+        "calibration",
+        CAL_GREEN_HUE,
+        Calibration,
+        green_hue
+    ),
+    control!(
+        CALIBRATION,
+        "green_sat",
+        CAL_GREEN_SAT.id,
+        "calibration",
+        CAL_GREEN_SAT,
+        Calibration,
+        green_sat
+    ),
+    control!(
+        CALIBRATION,
+        "blue_hue",
+        CAL_BLUE_HUE.id,
+        "calibration",
+        CAL_BLUE_HUE,
+        Calibration,
+        blue_hue
+    ),
+    control!(
+        CALIBRATION,
+        "blue_sat",
+        CAL_BLUE_SAT.id,
+        "calibration",
+        CAL_BLUE_SAT,
+        Calibration,
+        blue_sat
+    ),
+    control!(
+        CALIBRATION,
+        "shadow_tint",
+        CAL_SHADOW_TINT.id,
+        "calibration",
+        CAL_SHADOW_TINT,
+        Calibration,
+        shadow_tint
+    ),
+    control!(
+        SHARPEN,
+        "amount",
+        SHARPEN_AMOUNT.id,
+        "detail",
+        SHARPEN_AMOUNT,
+        Sharpen,
+        amount
+    ),
+    control!(
+        SHARPEN,
+        "radius_px",
+        SHARPEN_RADIUS.id,
+        "detail",
+        SHARPEN_RADIUS,
+        Sharpen,
+        radius_px
+    ),
+    control!(
+        SHARPEN,
+        "detail",
+        SHARPEN_DETAIL.id,
+        "detail",
+        SHARPEN_DETAIL,
+        Sharpen,
+        detail
+    ),
+    control!(
+        NOISE_REDUCTION,
+        "luminance",
+        NR_LUMINANCE.id,
+        "detail",
+        NR_LUMINANCE,
+        NoiseReduction,
+        luminance
+    ),
+    control!(
+        NOISE_REDUCTION,
+        "color",
+        NR_COLOR.id,
+        "detail",
+        NR_COLOR,
+        NoiseReduction,
+        color
+    ),
+    control!(
+        NOISE_REDUCTION,
+        "detail",
+        NR_DETAIL.id,
+        "detail",
+        NR_DETAIL,
+        NoiseReduction,
+        detail
+    ),
+    control!(
+        DEFRINGE,
+        "purple_amount",
+        DEFRINGE_PURPLE_AMOUNT.id,
+        "lens",
+        DEFRINGE_PURPLE_AMOUNT,
+        Defringe,
+        purple_amount
+    ),
+    control!(
+        DEFRINGE,
+        "purple_hue_lo",
+        DEFRINGE_PURPLE_LO.id,
+        "lens",
+        DEFRINGE_PURPLE_LO,
+        Defringe,
+        purple_hue_lo
+    ),
+    control!(
+        DEFRINGE,
+        "purple_hue_hi",
+        DEFRINGE_PURPLE_HI.id,
+        "lens",
+        DEFRINGE_PURPLE_HI,
+        Defringe,
+        purple_hue_hi
+    ),
+    control!(
+        DEFRINGE,
+        "green_amount",
+        DEFRINGE_GREEN_AMOUNT.id,
+        "lens",
+        DEFRINGE_GREEN_AMOUNT,
+        Defringe,
+        green_amount
+    ),
+    control!(
+        DEFRINGE,
+        "green_hue_lo",
+        DEFRINGE_GREEN_LO.id,
+        "lens",
+        DEFRINGE_GREEN_LO,
+        Defringe,
+        green_hue_lo
+    ),
+    control!(
+        DEFRINGE,
+        "green_hue_hi",
+        DEFRINGE_GREEN_HI.id,
+        "lens",
+        DEFRINGE_GREEN_HI,
+        Defringe,
+        green_hue_hi
+    ),
 ];
 
 pub fn find(stage: &str, field: &str) -> Option<&'static Control> {
@@ -282,7 +904,7 @@ mod tests {
         for c in CONTROLS {
             assert!(DEVELOP_STAGES.contains(&c.stage), "{}", c.id);
             assert!(c.spec.min < c.spec.max && (c.spec.min..=c.spec.max).contains(&c.spec.default));
-            assert_eq!(c.id, c.spec.id);
+            assert!(!c.id.is_empty() && !c.section.is_empty());
         }
         assert!(find(WB, "temp_k").is_some_and(|c| c.optional));
         assert!(find(WB, "tint").is_some_and(|c| !c.optional));
@@ -294,7 +916,7 @@ mod tests {
         let (Some(mut by_registry), Some(mut by_panel)) = (develop(), develop()) else {
             return;
         };
-        for c in CONTROLS {
+        for c in CONTROLS.iter().filter(|c| c.section == "basic") {
             // A value inside the range that is not the default, so it really changes the document.
             let v = c.spec.min + (c.spec.max - c.spec.min) * 0.75;
             c.set(&mut by_registry, Some(f64::from(v))).unwrap();
@@ -331,39 +953,40 @@ mod tests {
             c.write(&mut d, Some(v));
             assert_eq!(c.read(&d), Some(v), "{} does not round-trip", c.id);
         }
-        // A new field on a params struct must get a control, or `develop.set` could never reach it.
-        let fields = |v: serde_json::Value| -> Vec<String> {
-            v.as_object().unwrap().keys().cloned().collect()
-        };
-        let mut serialized = std::collections::BTreeMap::new();
-        serialized.insert(
-            WB,
-            fields(serde_json::to_value(WbParams::default()).unwrap()),
-        );
-        serialized.insert(
-            EXPOSURE,
-            fields(serde_json::to_value(ExposureParams::default()).unwrap()),
-        );
-        serialized.insert(
-            TONE,
-            fields(serde_json::to_value(ToneParams::default()).unwrap()),
-        );
-        serialized.insert(
-            VIBRANCE,
-            fields(serde_json::to_value(VibranceParams::default()).unwrap()),
-        );
-        serialized.insert(
-            PRESENCE,
-            fields(serde_json::to_value(PresenceParams::default()).unwrap()),
-        );
-        for (stage, mut have) in serialized {
-            if stage == WB {
-                have.push("temp_k".to_owned()); // omitted while as-shot
+        // A new numeric field on any stage's params must get a control, or `develop.set` could
+        // never reach it: walk every stage's default params for numeric leaves (dotted paths, array
+        // indices as numbers), plus `temp_k`, which is omitted from the document while as-shot.
+        fn leaves(prefix: &str, v: &serde_json::Value, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Number(_) => out.push(prefix.to_owned()),
+                serde_json::Value::Object(o) => {
+                    for (k, v) in o {
+                        let p = if prefix.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{prefix}.{k}")
+                        };
+                        leaves(&p, v, out);
+                    }
+                }
+                serde_json::Value::Array(a) => {
+                    for (i, v) in a.iter().enumerate() {
+                        leaves(&format!("{prefix}.{i}"), v, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for stage in DEVELOP_STAGES {
+            let mut have = Vec::new();
+            leaves("", &Draft::default_for(stage).unwrap().to_json(), &mut have);
+            if *stage == WB {
+                have.push("temp_k".to_owned());
             }
             for f in &have {
                 assert!(find(stage, f).is_some(), "`{stage}`.`{f}` has no control");
             }
-            let n = CONTROLS.iter().filter(|c| c.stage == stage).count();
+            let n = CONTROLS.iter().filter(|c| c.stage == *stage).count();
             assert_eq!(
                 n,
                 have.len(),
@@ -379,6 +1002,99 @@ mod tests {
             .cloned()
             .unwrap();
         assert!(temp["default"].is_null() && temp["optional"] == true);
+    }
+
+    /// An edit that does not go through the registry's accessors: the stage's params as JSON, one
+    /// value set by its path, back through `set_stage_params`. A control wired to the wrong field
+    /// (or named differently from the serialized field) disagrees with it.
+    fn json_path_edit(dev: &mut DevelopView, c: &Control, v: f32) {
+        fn go<T>(dev: &mut DevelopView, c: &Control, v: f32)
+        where
+            T: serde::Serialize + serde::de::DeserializeOwned + Default + 'static,
+        {
+            let mut val = serde_json::to_value(dev.stage_params::<T>(c.stage)).unwrap();
+            let ptr = format!("/{}", c.field.replace('.', "/"));
+            *val.pointer_mut(&ptr)
+                .unwrap_or_else(|| panic!("no {ptr} in {}", c.stage)) = serde_json::json!(v);
+            let p: T = serde_json::from_value(val).unwrap();
+            dev.set_stage_params(c.stage, &p);
+        }
+        match c.stage {
+            TONE_CURVE => go::<ToneCurveParams>(dev, c, v),
+            HSL => go::<HslParams>(dev, c, v),
+            COLOR_GRADE => go::<ColorGradeParams>(dev, c, v),
+            CALIBRATION => go::<CalibrationParams>(dev, c, v),
+            DEFRINGE => go::<DefringeParams>(dev, c, v),
+            SHARPEN => go::<SharpenParams>(dev, c, v),
+            NOISE_REDUCTION => go::<NoiseReductionParams>(dev, c, v),
+            other => panic!("no JSON oracle for {other}"),
+        }
+    }
+
+    #[test]
+    fn the_other_controls_match_an_independent_json_path_edit_in_params_and_hash() {
+        let (Some(mut by_registry), Some(mut by_json)) = (develop(), develop()) else {
+            return;
+        };
+        let others: Vec<&Control> = CONTROLS.iter().filter(|c| c.section != "basic").collect();
+        assert!(others.len() > 50, "the non-Basic controls are present");
+        for c in others {
+            let v = c.spec.min + (c.spec.max - c.spec.min) * 0.75;
+            c.set(&mut by_registry, Some(f64::from(v))).unwrap();
+            json_path_edit(&mut by_json, c, v);
+            assert_eq!(
+                serde_json::to_string(&by_registry.document().stages.get(c.stage)).unwrap(),
+                serde_json::to_string(&by_json.document().stages.get(c.stage)).unwrap(),
+                "stage params of {}",
+                c.id
+            );
+            assert_eq!(c.get(&by_registry), Some(v), "{}", c.id);
+        }
+        assert_eq!(
+            by_registry.document().content_hash().ok(),
+            by_json.document().content_hash().ok(),
+            "whole-document content hash"
+        );
+        assert!(by_registry.document().content_hash().is_ok());
+    }
+
+    #[test]
+    fn nested_fields_are_set_by_dotted_path_in_one_undo_step() {
+        use crate::cmd::{develop_stage_get, develop_stage_set};
+        let Some(mut dev) = develop() else { return };
+        let out = develop_stage_set(
+            &mut dev,
+            HSL,
+            &serde_json::json!({"bands.2.hue": 0.3, "bands.2.saturation": -0.2}),
+        )
+        .unwrap();
+        assert_eq!(out["bands"][2]["hue"], f64::from(0.3f32));
+        let g = develop_stage_get(&dev, HSL).unwrap();
+        assert!((g["bands"][2]["saturation"].as_f64().unwrap() + 0.2).abs() < 1e-6);
+        assert_eq!(g["bands"][3]["hue"], 0.0, "other bands are untouched");
+        // Two fields, one undo step.
+        assert!(dev.undo());
+        assert_eq!(
+            develop_stage_get(&dev, HSL).unwrap()["bands"][2]["hue"],
+            0.0
+        );
+        // Out-of-range and unknown paths are refused before anything is written.
+        assert!(develop_stage_set(
+            &mut dev,
+            COLOR_GRADE,
+            &serde_json::json!({"shadows.hue": 361.0})
+        )
+        .is_err());
+        assert!(develop_stage_set(
+            &mut dev,
+            COLOR_GRADE,
+            &serde_json::json!({"shadows.hue": 200.0})
+        )
+        .is_ok());
+        assert!(
+            develop_stage_set(&mut dev, HSL, &serde_json::json!({"bands.8.hue": 0.1})).is_err()
+        );
+        assert!(develop_stage_set(&mut dev, HSL, &serde_json::json!({"bands": 1})).is_err());
     }
 
     #[test]

@@ -13,8 +13,7 @@
 
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use nicti_tapetum::coat::{ExposureParams, PresenceParams, ToneParams, VibranceParams, WbParams};
-use nicti_tapetum::stages::{EXPOSURE, PRESENCE, TONE, VIBRANCE, WB};
+use nicti_tapetum::stages::WB;
 use serde_json::{json, Map, Value};
 
 use crate::render::DevelopView;
@@ -967,7 +966,7 @@ impl CommandQueue {
 // ---- Develop get/set over a real `DevelopView` ----
 
 /// The stages `develop.get`/`develop.set` may touch, by id.
-pub const DEVELOP_STAGES: &[&str] = &[WB, EXPOSURE, TONE, VIBRANCE, PRESENCE];
+pub const DEVELOP_STAGES: &[&str] = crate::develop_controls::STAGES;
 
 fn check_stage(stage: &str) -> Result<(), String> {
     if DEVELOP_STAGES.contains(&stage) {
@@ -980,34 +979,23 @@ fn check_stage(stage: &str) -> Result<(), String> {
     }
 }
 
-fn read_typed<T>(dev: &DevelopView, stage: &str) -> Value
-where
-    T: serde::Serialize + serde::de::DeserializeOwned + Default,
-{
-    serde_json::to_value(dev.stage_params::<T>(stage)).expect("coat params always serialize")
-}
-
 /// A stage's current params as JSON (its default when the document has no entry).
 pub fn develop_stage_get(dev: &DevelopView, stage: &str) -> Result<Value, String> {
     check_stage(stage)?;
-    Ok(match stage {
-        WB => {
-            let mut v = read_typed::<WbParams>(dev, stage);
-            // `temp_k` is left out of the document while the white balance is as-shot; show it
-            // (from the registry's optional control, `null` = as-shot).
-            if let (Some(o), Some(temp)) = (
-                v.as_object_mut(),
-                crate::develop_controls::find(WB, "temp_k"),
-            ) {
-                o.insert("temp_k".to_owned(), json!(temp.get(dev)));
-            }
-            v
+    let draft = crate::develop_controls::Draft::load(dev, stage)
+        .ok_or_else(|| format!("stage `{stage}` is not available"))?;
+    let mut v = draft.to_json();
+    if stage == WB {
+        // `temp_k` is left out of the document while the white balance is as-shot; show it (from
+        // the registry's optional control, `null` = as-shot).
+        if let (Some(o), Some(temp)) = (
+            v.as_object_mut(),
+            crate::develop_controls::find(WB, "temp_k"),
+        ) {
+            o.insert("temp_k".to_owned(), json!(temp.get(dev)));
         }
-        EXPOSURE => read_typed::<ExposureParams>(dev, stage),
-        TONE => read_typed::<ToneParams>(dev, stage),
-        VIBRANCE => read_typed::<VibranceParams>(dev, stage),
-        _ => read_typed::<PresenceParams>(dev, stage),
-    })
+    }
+    Ok(v)
 }
 
 /// The writes a `develop.set` patch asks for, checked against the control registry (the panel's
@@ -1063,6 +1051,7 @@ pub fn develop_stage_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nicti_tapetum::stages::{EXPOSURE, TONE};
 
     #[derive(Default)]
     struct Mock {
