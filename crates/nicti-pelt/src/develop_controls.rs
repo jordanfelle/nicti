@@ -57,11 +57,35 @@ macro_rules! drafts {
             }
 
             /// The params as JSON (`develop.get`).
+            // (`validate` below checks relations between fields the per-field ranges cannot.)
             pub fn to_json(&self) -> serde_json::Value {
                 match self {
                     $(Draft::$variant(p) => {
                         serde_json::to_value(p).unwrap_or(serde_json::Value::Null)
                     }),+
+                }
+            }
+
+            /// Relations between fields that the per-field ranges cannot express. The renderer
+            /// repairs these silently at render time (`sanitized`), which would make `develop.get`
+            /// disagree with what is drawn, so a patch that breaks one is refused instead.
+            pub fn validate(&self) -> Result<(), String> {
+                match self {
+                    Draft::Defringe(p) => {
+                        for (colour, lo, hi) in [
+                            ("purple", p.purple_hue_lo, p.purple_hue_hi),
+                            ("green", p.green_hue_lo, p.green_hue_hi),
+                        ] {
+                            if lo > hi {
+                                return Err(format!(
+                                    "the {colour} hue window is inverted ({colour}_hue_lo {lo} > \
+                                     {colour}_hue_hi {hi}); set both in one patch"
+                                ));
+                            }
+                        }
+                        Ok(())
+                    }
+                    _ => Ok(()),
                 }
             }
 
@@ -1056,6 +1080,57 @@ mod tests {
             "whole-document content hash"
         );
         assert!(by_registry.document().content_hash().is_ok());
+    }
+
+    #[test]
+    fn every_controls_range_is_inclusive_at_both_ends_and_refuses_beyond() {
+        // No GPU needed: the bounds come from the panel's own spec for each control.
+        for c in CONTROLS {
+            let (lo, hi) = (f64::from(c.spec.min), f64::from(c.spec.max));
+            assert_eq!(c.check(Some(lo)), Ok(Some(c.spec.min)), "{} at min", c.id);
+            assert_eq!(c.check(Some(hi)), Ok(Some(c.spec.max)), "{} at max", c.id);
+            assert!(c.check(Some(lo - 1.0)).is_err(), "{} below min", c.id);
+            assert!(c.check(Some(hi + 1.0)).is_err(), "{} above max", c.id);
+            assert!(c.check(Some(f64::NAN)).is_err() && c.check(Some(f64::INFINITY)).is_err());
+        }
+    }
+
+    #[test]
+    fn an_inverted_defringe_window_is_refused_and_a_consistent_pair_in_one_patch_is_not() {
+        use crate::cmd::{develop_stage_get, develop_stage_set};
+        let Some(mut dev) = develop() else { return };
+        // Default window 0.3..0.7: raising only `lo` past `hi` is refused, nothing is stored.
+        let e = develop_stage_set(
+            &mut dev,
+            DEFRINGE,
+            &serde_json::json!({"purple_hue_lo": 0.9}),
+        )
+        .unwrap_err();
+        assert!(e.contains("inverted") && e.contains("one patch"), "{e}");
+        assert_eq!(
+            develop_stage_get(&dev, DEFRINGE).unwrap()["purple_hue_lo"].as_f64(),
+            Some(f64::from(0.3f32))
+        );
+        // Both ends in one patch is fine; so is lo == hi.
+        assert!(develop_stage_set(
+            &mut dev,
+            DEFRINGE,
+            &serde_json::json!({"purple_hue_lo": 0.8, "purple_hue_hi": 0.95})
+        )
+        .is_ok());
+        assert!(develop_stage_set(
+            &mut dev,
+            DEFRINGE,
+            &serde_json::json!({"green_hue_lo": 0.5, "green_hue_hi": 0.5})
+        )
+        .is_ok());
+        // Lowering `hi` below the stored `lo` is refused too.
+        assert!(develop_stage_set(
+            &mut dev,
+            DEFRINGE,
+            &serde_json::json!({"purple_hue_hi": 0.5})
+        )
+        .is_err());
     }
 
     #[test]

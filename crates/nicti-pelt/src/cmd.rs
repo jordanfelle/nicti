@@ -637,7 +637,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         id: "develop.get",
         label: "Read a Develop stage's params",
-        params: r#"{"stage": "nicti.wb" | "nicti.exposure" | "nicti.tone" | "nicti.vibrance" | "nicti.presence", "asset"?: <id>}  (the result names the photo Develop has loaded; `asset`, if given, must be it)"#,
+        params: r#"{"stage": <a `stage` listed by develop.controls, for example "nicti.tone", "nicti.hsl", "nicti.color_grade">, "asset"?: <id>}  (the result names the photo Develop has loaded; `asset`, if given, must be it)"#,
         risk: Risk::Read,
         risk_for: None,
         enabled: develop_enabled,
@@ -646,7 +646,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         id: "develop.set",
         label: "Set fields of a Develop stage",
-        params: r#"{"stage": <as develop.get>, "asset": <id of the photo Develop has loaded -- required>, "set": {<field>: <number>, ...}}  (unknown fields are refused; undoable)"#,
+        params: r#"{"stage": <as develop.get>, "asset": <id of the photo Develop has loaded -- required>, "set": {<field>: <number>, ...}}  (`field` is the control's `field` from develop.controls, a dotted path for nested values such as "bands.2.hue" or "shadows.sat"; unknown fields and out-of-range values are refused; a window whose low end is above its high end is refused; undoable)"#,
         risk: Risk::Mutate,
         risk_for: None,
         enabled: develop_enabled,
@@ -1043,6 +1043,7 @@ pub fn develop_stage_set(
     for (control, value) in plan {
         control.write(&mut draft, value);
     }
+    draft.validate()?;
     // Each scripted write is its own undo step, never folded into the user's last slider drag.
     dev.without_gesture_merging(|dev| draft.store(dev));
     develop_stage_get(dev, stage)
