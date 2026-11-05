@@ -1418,6 +1418,80 @@ mod tests {
         );
     }
 
+    /// The guide the rig uploads, as the CPU twin sees it: the same pixels (f16-rounded by the
+    /// upload) through the same luminance and mapping.
+    fn cpu_guide() -> Field {
+        let px: Vec<[f32; 4]> = (0..W * H)
+            .map(|i| {
+                let (x, y) = ((i % W) as f32 / W as f32, (i / W) as f32 / H as f32);
+                let edge = if x > 0.5 { 0.6f32 } else { 0.1 };
+                [edge + 0.1 * y, edge, edge * 0.8, 1.0].map(|v| half::f16::from_f32(v).to_f32())
+            })
+            .collect();
+        super::super::guided::guide_from_frame(&px, W, H, W, H)
+    }
+
+    fn cpu_group_guided(group: &MaskGroup, guide: &Field) -> Field {
+        super::super::compose::compose(group, W, H, |s| match s {
+            MaskSource::Brush { strokes } => {
+                Some(raster::rasterize_brush_guided(strokes, W, H, Some(guide)))
+            }
+            other => raster::rasterize_source(other, W, H),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn auto_mask_strokes_match_their_cpu_twin_which_is_what_the_overlay_draws() {
+        let Some(mut rig) = Rig::new() else { return };
+        let guide = cpu_guide();
+        let mut wide = stroke(&[[0.25, 0.5], [0.3, 0.5]], false);
+        wide.radius = 0.2;
+        wide.feather = 0.19;
+        wide.auto_mask = true;
+        let mut fill = stroke(&[[0.1, 0.5], [0.9, 0.5]], false);
+        fill.radius = 0.3;
+        let mut erase = stroke(&[[0.3, 0.3], [0.7, 0.7]], true);
+        erase.radius = 0.12;
+        erase.auto_mask = true;
+        let mut build = stroke(&[[0.6, 0.2], [0.8, 0.4]], false);
+        build.buildup = true;
+        build.auto_mask = true;
+        let cases: Vec<(&str, Vec<Stroke>)> = vec![
+            ("one feathered auto add", vec![wide.clone()]),
+            (
+                "auto erase over a plain fill",
+                vec![fill.clone(), erase.clone()],
+            ),
+            (
+                "auto strokes mixed with plain ones",
+                vec![fill, wide, erase, build],
+            ),
+        ];
+        for (name, strokes) in cases {
+            let c = correction("a", brush(strokes.clone()), 1.0);
+            let frame = rig.prepare(vec![c.clone()]).unwrap();
+            let gpu = rig.atlas_channel(&frame, 0);
+            let cpu = cpu_group_guided(&c.mask, &guide);
+            let worst = gpu
+                .iter()
+                .zip(&cpu.data)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(worst < 2e-3, "{name}: GPU and CPU differ by {worst}");
+            // The snapped field is not the raw stroke: the twin must differ from the plain
+            // rasterization where an auto stroke crosses the step, or this proves nothing.
+            let plain = cpu_group(&c.mask, W, H);
+            let moved = cpu
+                .data
+                .iter()
+                .zip(&plain.data)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(moved > 0.1, "{name}: the refine changed nothing ({moved})");
+        }
+    }
+
     #[test]
     fn an_auto_mask_erase_stroke_removes_up_to_the_edge_and_leaves_the_rest() {
         let Some(mut rig) = Rig::new() else { return };

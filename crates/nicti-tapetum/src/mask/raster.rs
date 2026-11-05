@@ -10,7 +10,7 @@
 //! add stroke (#357) instead accumulates its dabs, `1-(1-s)(1-w)`, on top of what earlier strokes
 //! painted, so repeated passes darken.
 
-use super::params::{MaskSource, Stroke, MIN_RADIUS};
+use super::params::{MaskSource, Op, Stroke, MIN_RADIUS};
 use super::Field;
 
 /// Most dabs one stroke expands to. A stroke that would exceed it gets a wider dab spacing instead
@@ -381,56 +381,103 @@ pub fn stroke_box(
 
 /// Rasterizes a brush's strokes to a field. Each stroke is splatted by dab bounding box (cost is
 /// the painted area, not `pixels x dabs`), then folded in order: add = `max`, erase = subtract.
+/// Auto Mask strokes are painted as plain strokes here; see [`rasterize_brush_guided`].
 pub fn rasterize_brush(strokes: &[Stroke], width: usize, height: usize) -> Field {
+    rasterize_brush_guided(strokes, width, height, None)
+}
+
+/// [`rasterize_brush`] with the Auto Mask refine (#644/#698), the CPU twin of the engine's
+/// `auto_mask_stroke`: an Auto Mask stroke is painted *alone and without its feather* from an empty
+/// field, snapped to the photo's edges by the guided filter against `guide` (the photo's
+/// luminance at this extent), then folded in: `max` to add, `acc * (1 - w)` to erase. With no
+/// `guide` (the photo is not available yet) an Auto Mask stroke paints like a plain one.
+pub fn rasterize_brush_guided(
+    strokes: &[Stroke],
+    width: usize,
+    height: usize,
+    guide: Option<&Field>,
+) -> Field {
     let mut acc = Field::new(width, height, 0.0);
     let mut budget = MAX_DABS_TOTAL;
     for stroke in strokes {
         let dabs = dabs_for_stroke(stroke, width, height, budget);
+        let remaining = budget;
         budget = budget.saturating_sub(dabs.len());
-        let Some((x0, y0, x1, y1)) = stroke_box(&dabs, width, height) else {
-            continue;
-        };
-        let (bw, bh) = (x1 - x0, y1 - y0);
-        // The stroke's own field, only over the box its dabs touch.
-        let mut scratch = vec![0.0f32; bw * bh];
-        // A build-up add stroke keeps accumulating on what earlier strokes painted (as the GPU
-        // kernel does), so repeated passes build.
-        if stroke.buildup && !stroke.erase {
-            for y in 0..bh {
-                for x in 0..bw {
-                    scratch[y * bw + x] = acc.data[(y + y0) * width + (x + x0)];
+        match guide {
+            Some(guide) if stroke.auto_mask => {
+                if dabs.is_empty() {
+                    continue;
+                }
+                let hard = Stroke {
+                    feather: 0.0,
+                    erase: false,
+                    ..stroke.clone()
+                };
+                let hard_dabs = dabs_for_stroke(&hard, width, height, remaining);
+                let mut painted = Field::new(width, height, 0.0);
+                splat_stroke(&mut painted, &hard, &hard_dabs, width, height);
+                let refined = super::guided::guided_refine(
+                    &painted,
+                    guide,
+                    super::guided::radius_for(width, height),
+                    super::guided::EPS,
+                );
+                let op = if stroke.erase { Op::Subtract } else { Op::Add };
+                for (a, &w) in acc.data.iter_mut().zip(&refined.data) {
+                    *a = super::compose::fold_step(*a, w, false, 1.0, op);
                 }
             }
+            _ => splat_stroke(&mut acc, stroke, &dabs, width, height),
         }
-        for d in &dabs {
-            let Some((lo_x, lo_y, hi_x, hi_y)) = dab_box(d, width, height) else {
-                continue;
-            };
-            for y in lo_y..hi_y {
-                for x in lo_x..hi_x {
-                    let w = d.weight(x as f32 + 0.5, y as f32 + 0.5);
-                    let s = &mut scratch[(y - y0) * bw + (x - x0)];
-                    *s = if stroke.buildup && !stroke.erase {
-                        1.0 - (1.0 - *s) * (1.0 - w)
-                    } else {
-                        s.max(w)
-                    };
-                }
-            }
-        }
+    }
+    acc
+}
+
+/// Splats one stroke's `dabs` into `acc` over the box they touch: add = `max`, erase = subtract,
+/// build-up keeps accumulating on what is already there.
+fn splat_stroke(acc: &mut Field, stroke: &Stroke, dabs: &[Dab], width: usize, height: usize) {
+    let Some((x0, y0, x1, y1)) = stroke_box(dabs, width, height) else {
+        return;
+    };
+    let (bw, bh) = (x1 - x0, y1 - y0);
+    // The stroke's own field, only over the box its dabs touch.
+    let mut scratch = vec![0.0f32; bw * bh];
+    // A build-up add stroke keeps accumulating on what earlier strokes painted (as the GPU
+    // kernel does), so repeated passes build.
+    if stroke.buildup && !stroke.erase {
         for y in 0..bh {
             for x in 0..bw {
-                let s = scratch[y * bw + x];
-                let a = &mut acc.data[(y + y0) * width + (x + x0)];
-                *a = if stroke.erase {
-                    (*a - s).max(0.0)
+                scratch[y * bw + x] = acc.data[(y + y0) * width + (x + x0)];
+            }
+        }
+    }
+    for d in dabs {
+        let Some((lo_x, lo_y, hi_x, hi_y)) = dab_box(d, width, height) else {
+            continue;
+        };
+        for y in lo_y..hi_y {
+            for x in lo_x..hi_x {
+                let w = d.weight(x as f32 + 0.5, y as f32 + 0.5);
+                let s = &mut scratch[(y - y0) * bw + (x - x0)];
+                *s = if stroke.buildup && !stroke.erase {
+                    1.0 - (1.0 - *s) * (1.0 - w)
                 } else {
-                    a.max(s)
+                    s.max(w)
                 };
             }
         }
     }
-    acc
+    for y in 0..bh {
+        for x in 0..bw {
+            let s = scratch[y * bw + x];
+            let a = &mut acc.data[(y + y0) * width + (x + x0)];
+            *a = if stroke.erase {
+                (*a - s).max(0.0)
+            } else {
+                a.max(s)
+            };
+        }
+    }
 }
 
 /// Rasterizes a *geometry* source (gradient or brush) to a field at `width x height`. Returns

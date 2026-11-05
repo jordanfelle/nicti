@@ -18,7 +18,7 @@ use nicti_stalk::{SegmentTarget, SegmentationRegistry};
 use nicti_tapetum::coat::WbParams;
 use nicti_tapetum::color::{self, Mat3};
 use nicti_tapetum::mask::compose::{self, ai_bake_key};
-use nicti_tapetum::mask::guided::sample_mapped;
+use nicti_tapetum::mask::guided::{self, sample_mapped};
 use nicti_tapetum::mask::params::{
     LocalCorrection, MaskComponent, MaskGroup, MaskParams, MaskSource, Op, Stroke,
     MAX_BRUSH_POINTS, MAX_COLOR_SAMPLES, MAX_COMPONENTS, MAX_CORRECTIONS, MAX_STROKES,
@@ -632,6 +632,9 @@ pub fn preview_field(
     }
     .sanitized();
     let group = &sanitized.corrections[0].mask;
+    let guide = thumb
+        .filter(|_| has_auto_stroke(c))
+        .map(|t| thumb_guide(t, w, h));
     compose::compose(group, w, h, |source| match source {
         MaskSource::Ai(_) => {
             let alpha = ai_bake_key(source, neutral).and_then(|k| develop.ai_alpha(&k))?;
@@ -652,9 +655,55 @@ pub fn preview_field(
             let t = thumb?;
             raster::range_field(source, &t.pixels, t.width, t.height, w, h, t.matrix)
         }
+        // An Auto Mask stroke snaps to the photo's edges (#698): refined against the thumbnail's
+        // luminance, the CPU twin of the render's guided filter. Without a thumbnail yet it
+        // paints as a plain stroke, as before.
+        MaskSource::Brush { strokes } if guide.is_some() => Some(raster::rasterize_brush_guided(
+            strokes,
+            w,
+            h,
+            guide.as_ref(),
+        )),
         geometry => raster::rasterize_source(geometry, w, h),
     })
     .expect("every field is produced at the requested extent")
+}
+
+/// The photo's luminance at `w x h` from the thumbnail (camera -> working space, then the guide's
+/// own luminance), what an Auto Mask stroke is refined against on the CPU.
+fn thumb_guide(t: &Thumb, w: usize, h: usize) -> Field {
+    let luma = Field {
+        width: t.width,
+        height: t.height,
+        data: t
+            .pixels
+            .iter()
+            .map(|p| guided::guide_luminance(color::mat3_apply(t.matrix, [p[0], p[1], p[2]])))
+            .collect(),
+    };
+    let mut out = Field::new(w, h, 0.0);
+    for y in 0..h {
+        for x in 0..w {
+            out.data[y * w + x] = sample_mapped(&luma, x, y, w, h);
+        }
+    }
+    out
+}
+
+fn has_auto_stroke(c: &LocalCorrection) -> bool {
+    c.mask.components.iter().any(|m| {
+        matches!(&m.source, MaskSource::Brush { strokes } if strokes.iter().any(|s| s.auto_mask))
+    })
+}
+
+/// Whether the overlay of this correction needs the photo thumbnail: a colour or luminance range
+/// component measures it, and an Auto Mask brush stroke is refined against it.
+pub fn needs_thumb(c: &LocalCorrection) -> bool {
+    c.mask.components.iter().any(|m| match &m.source {
+        MaskSource::LuminanceRange { .. } | MaskSource::ColorRange { .. } => true,
+        MaskSource::Brush { strokes } => strokes.iter().any(|s| s.auto_mask),
+        _ => false,
+    })
 }
 
 /// A key that changes exactly when the preview would: the mask group, and the content of every AI
@@ -1032,6 +1081,66 @@ mod tests {
     fn a_tiny_frame_still_makes_a_thumbnail() {
         let t = Thumb::build(Arc::new(frame(2, 2)), Default::default());
         assert_eq!((t.width, t.height), (2, 2));
+    }
+    #[test]
+    fn an_auto_mask_stroke_is_drawn_snapped_to_the_photo_and_plain_without_a_thumbnail() {
+        use nicti_tapetum::mask::params::Stroke;
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let develop = crate::render::DevelopView::new(gpu);
+        let thumb = Thumb::build(Arc::new(frame(600, 400)), Default::default());
+        // A feathered stroke straddling the photo's hard left/right step at x = 0.5.
+        let stroke = |auto: bool| Stroke {
+            points: vec![[0.25, 0.5], [0.3, 0.5]],
+            radius: 0.2,
+            feather: 0.19,
+            flow: 1.0,
+            erase: false,
+            pressure: Vec::new(),
+            buildup: false,
+            auto_mask: auto,
+        };
+        let correction = |auto: bool| {
+            let mut c = new_correction(NewMask::Brush, "m".into());
+            c.mask.components[0].source = MaskSource::Brush {
+                strokes: vec![stroke(auto)],
+            };
+            c
+        };
+        let (w, h) = (120, 80);
+        let auto = correction(true);
+        assert!(needs_thumb(&auto) && !needs_thumb(&correction(false)));
+        let with = preview_field(&auto, w, h, &develop, Some(&thumb));
+        let without = preview_field(&auto, w, h, &develop, None);
+        let plain = preview_field(&correction(false), w, h, &develop, Some(&thumb));
+        // No thumbnail yet, or not an Auto Mask stroke: the plain feathered stroke, as before.
+        assert_eq!(without.data, plain.data);
+        // With one it is the guided refine of the stroke (the CPU twin the engine is tested
+        // against), which is not the plain stroke.
+        let guide = thumb_guide(&thumb, w, h);
+        let want = raster::rasterize_brush_guided(&[stroke(true)], w, h, Some(&guide));
+        assert_eq!(with.data, want.data);
+        let moved = with
+            .data
+            .iter()
+            .zip(&plain.data)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(moved > 0.1, "the refine changed nothing ({moved})");
+        // The snapped boundary: selected right up to the step, gone just past it.
+        let at =
+            |f: &Field, x: f32| f.data[(0.5 * h as f32) as usize * w + (x * w as f32) as usize];
+        assert!(
+            at(&with, 0.45) > 0.8 && at(&with, 0.56) < 0.2,
+            "{} {}",
+            at(&with, 0.45),
+            at(&with, 0.56)
+        );
+        assert!(
+            at(&plain, 0.45) < 0.5,
+            "the plain stroke has faded out by then"
+        );
     }
 }
 
