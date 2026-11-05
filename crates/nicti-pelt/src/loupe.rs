@@ -1009,11 +1009,15 @@ mod tests {
             LoupeSession::new(ids, counting_decoder(), u64::MAX).with_larder(larder.clone());
 
         session.set_cursor(0, &store, &pounce).unwrap();
+        // Capture the value inside the wait: `current_t2` returns `None` whenever a concurrent T2
+        // write holds the Larder, so a second call after the wait could race with the next job.
+        let mut t2 = None;
         wait_for(|| {
             session.poll(&store, &pounce);
-            session.current_t2(&store).is_some()
+            t2 = session.current_t2(&store);
+            t2.is_some()
         });
-        let t2 = session.current_t2(&store).unwrap();
+        let t2 = t2.unwrap();
         assert_eq!(dims(&t2), (1200, 800));
 
         // Window at cursor 0 is {0, 1}: asset 1 gets a T2 too, assets 2 and 3 don't.
@@ -1123,11 +1127,13 @@ mod tests {
             "a T2 from the old identity must read as stale"
         );
         session.set_cursor(0, &store, &pounce).unwrap();
+        let mut t2 = None;
         wait_for(|| {
             session.poll(&store, &pounce);
-            session.current_t2(&store).is_some()
+            t2 = session.current_t2(&store);
+            t2.is_some()
         });
-        assert_eq!(dims(&session.current_t2(&store).unwrap()), (640, 480));
+        assert_eq!(dims(&t2.unwrap()), (640, 480));
     }
 
     /// #390: a job still in `inflight` for the *previous* identity must not stop the re-ingested
