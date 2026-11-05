@@ -42,6 +42,19 @@ impl Draft {
         })
     }
 
+    /// The stage's default params, with no document: lets the registry be checked without a view.
+    #[cfg(test)]
+    fn default_for(stage: &str) -> Option<Draft> {
+        Some(match stage {
+            WB => Draft::Wb(WbParams::default()),
+            EXPOSURE => Draft::Exposure(ExposureParams::default()),
+            TONE => Draft::Tone(ToneParams::default()),
+            VIBRANCE => Draft::Vibrance(VibranceParams::default()),
+            PRESENCE => Draft::Presence(PresenceParams::default()),
+            _ => return None,
+        })
+    }
+
     /// Writes the draft back through the undo history (a no-op when nothing changed).
     pub fn store(&self, dev: &mut DevelopDoc) {
         match self {
@@ -186,7 +199,8 @@ pub fn listing() -> serde_json::Value {
                     "field": c.field,
                     "min": c.spec.min,
                     "max": c.spec.max,
-                    "default": c.spec.default,
+                    // An optional control's real default is "unset" (as-shot), not the slider's resting value.
+                    "default": if c.optional { serde_json::Value::Null } else { serde_json::json!(c.spec.default) },
                     "optional": c.optional,
                 })
             })
@@ -306,6 +320,100 @@ mod tests {
             "whole-document content hash"
         );
         assert!(by_registry.document().content_hash().is_ok());
+    }
+
+    #[test]
+    fn every_control_reads_back_what_it_writes_and_every_params_field_has_a_control() {
+        // No GPU needed: a control whose stage and Draft variant disagree would write nothing.
+        for c in CONTROLS {
+            let mut d = Draft::default_for(c.stage).unwrap();
+            let v = c.spec.min + (c.spec.max - c.spec.min) * 0.25;
+            c.write(&mut d, Some(v));
+            assert_eq!(c.read(&d), Some(v), "{} does not round-trip", c.id);
+        }
+        // A new field on a params struct must get a control, or `develop.set` could never reach it.
+        let fields = |v: serde_json::Value| -> Vec<String> {
+            v.as_object().unwrap().keys().cloned().collect()
+        };
+        let mut serialized = std::collections::BTreeMap::new();
+        serialized.insert(
+            WB,
+            fields(serde_json::to_value(WbParams::default()).unwrap()),
+        );
+        serialized.insert(
+            EXPOSURE,
+            fields(serde_json::to_value(ExposureParams::default()).unwrap()),
+        );
+        serialized.insert(
+            TONE,
+            fields(serde_json::to_value(ToneParams::default()).unwrap()),
+        );
+        serialized.insert(
+            VIBRANCE,
+            fields(serde_json::to_value(VibranceParams::default()).unwrap()),
+        );
+        serialized.insert(
+            PRESENCE,
+            fields(serde_json::to_value(PresenceParams::default()).unwrap()),
+        );
+        for (stage, mut have) in serialized {
+            if stage == WB {
+                have.push("temp_k".to_owned()); // omitted while as-shot
+            }
+            for f in &have {
+                assert!(find(stage, f).is_some(), "`{stage}`.`{f}` has no control");
+            }
+            let n = CONTROLS.iter().filter(|c| c.stage == stage).count();
+            assert_eq!(
+                n,
+                have.len(),
+                "`{stage}` has a control for a field it does not have"
+            );
+        }
+        // The listing says "unset" for the optional control, not the slider's resting value.
+        let temp = listing()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["field"] == "temp_k")
+            .cloned()
+            .unwrap();
+        assert!(temp["default"].is_null() && temp["optional"] == true);
+    }
+
+    #[test]
+    fn a_multi_field_patch_through_develop_set_equals_the_panel_and_is_one_undo_step() {
+        use crate::cmd::develop_stage_set;
+        let (Some(mut by_set), Some(mut by_panel)) = (develop(), develop()) else {
+            return;
+        };
+        // Make the later undo step unambiguous: every write is its own step.
+        by_panel.disable_gesture_merging();
+        develop_stage_set(
+            &mut by_set,
+            TONE,
+            &serde_json::json!({"contrast": 0.5, "shadows": -0.25}),
+        )
+        .unwrap();
+        let mut tone: ToneParams = by_panel.stage_params(TONE);
+        tone.contrast = 0.5;
+        tone.shadows = -0.25;
+        by_panel.set_stage_params(TONE, &tone);
+        assert_eq!(
+            by_set.document().content_hash().ok(),
+            by_panel.document().content_hash().ok()
+        );
+        assert!(by_set.document().content_hash().is_ok());
+        // One step: a single undo reverts both fields.
+        assert!(by_set.undo());
+        let after: ToneParams = by_set.stage_params(TONE);
+        assert_eq!(after, ToneParams::default());
+        // Setting a value back to the default leaves the document exactly as untouched (the entry
+        // is removed, as the panel's drag-back-to-start does).
+        let untouched = develop().unwrap().document().content_hash().ok();
+        develop_stage_set(&mut by_set, TONE, &serde_json::json!({"contrast": 0.5})).unwrap();
+        develop_stage_set(&mut by_set, TONE, &serde_json::json!({"contrast": 0.0})).unwrap();
+        assert_eq!(by_set.document().content_hash().ok(), untouched);
     }
 
     #[test]
