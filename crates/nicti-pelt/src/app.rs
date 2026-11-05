@@ -4099,6 +4099,9 @@ impl crate::cmd::CommandHost for PeltApp {
         match image {
             Some(image) => {
                 self.screenshot = None;
+                if max_width == 0 {
+                    return None; // the client left: no encode for nobody
+                }
                 Some(encode_screenshot(&image, max_width))
             }
             None => {
@@ -4233,6 +4236,9 @@ impl crate::cmd::CommandHost for PeltApp {
 /// Where egui's screenshot callback leaves the image for the next command drain.
 type ShotSlot = Arc<std::sync::Mutex<Option<Arc<egui::ColorImage>>>>;
 
+/// Most pixels a capture may have (5120x2880 HiDPI 4K fits).
+const MAX_SHOT_PIXELS: usize = 16_800_000;
+
 /// The captured window as a PNG (base64), scaled down to `max_width` when wider.
 fn encode_screenshot(
     image: &egui::ColorImage,
@@ -4240,11 +4246,19 @@ fn encode_screenshot(
 ) -> Result<serde_json::Value, String> {
     use base64::Engine as _;
     let [w, h] = image.size;
+    // The encode runs on the UI thread: refuse a window past 8K-class sizes rather than freeze it.
+    if w.saturating_mul(h) > MAX_SHOT_PIXELS {
+        return Err(format!("the window is too large to capture ({w}x{h} px)"));
+    }
     let (w32, h32) = (
         u32::try_from(w).map_err(|e| e.to_string())?,
         u32::try_from(h).map_err(|e| e.to_string())?,
     );
-    let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+    let bytes: Vec<u8> = image
+        .pixels
+        .iter()
+        .flat_map(|c| c.to_srgba_unmultiplied())
+        .collect();
     let mut rgba = image::RgbaImage::from_raw(w32, h32, bytes)
         .ok_or_else(|| "the screenshot had an unexpected size".to_owned())?;
     if w32 > max_width {
@@ -4281,6 +4295,11 @@ mod screenshot_tests {
         let back = image::load_from_memory_with_format(&png, image::ImageFormat::Png).unwrap();
         assert_eq!((back.width(), back.height()), (100, 50));
         assert_eq!(back.to_rgba8().get_pixel(50, 25).0, [10, 20, 30, 255]);
+        // Too large: refused, not frozen on.
+        let huge = egui::ColorImage::filled([5000, 4000], egui::Color32::BLACK);
+        assert!(encode_screenshot(&huge, 1600)
+            .unwrap_err()
+            .contains("too large"));
         // Narrower than the cap: untouched.
         let v = encode_screenshot(&img, 1600).unwrap();
         assert_eq!(v["width"], 400);

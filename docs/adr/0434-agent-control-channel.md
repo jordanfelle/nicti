@@ -358,8 +358,9 @@ still race the check (a link planted between check and write).
 
 ### Screenshot as built (#649, slice 3a)
 
-- `ui.screenshot` (`Risk::Read`) asks egui for `ViewportCommand::Screenshot` via `Context::request_screenshot`; the reply is deferred like `ui.settle` and carries `{width, height, png_base64}`. The capture includes the wgpu photo viewport. It needs a visible, painted window: a hidden one times out with an error instead of hanging.
-- `max_width` (default 1600, 64-4096) scales a wider window down so a 4K window cannot make a multi-megabyte reply; `timeout_ms` is 500-30000 (default 10000).
+- `ui.screenshot` (`Risk::Read`) asks egui for `ViewportCommand::Screenshot` via `Context::request_screenshot`; the reply is deferred like `ui.settle` and carries `{width, height, png_base64}`. The capture includes the wgpu photo viewport. egui paints a pending capture even for an occluded window; a minimised (zero-sized) surface cannot be captured and times out with an error instead of hanging. Unverified on a real window.
+- `max_width` (default 1600, 64-4096) scales a wider window down so a 4K window cannot make a multi-megabyte reply; `timeout_ms` is 500-25000 (default 10000, under the transport's 30 s). A window past 16.8 Mpx is refused (the encode runs on the UI thread). Pixels are un-premultiplied for the PNG.
 - One capture at a time (a second is refused); a timed-out or cancelled request frees the slot.
+- **`Read` risk, deliberately:** this is the first `Read` command that returns the library's pixels (plus any visible filename, metadata or dialog); loopback + token is the boundary. The reply line can be several MiB, so a reader must not apply the 1 MiB request cap to replies (the MCP shim must not).
 - **No `path` parameter yet.** The ADR's rule (write to a channel-supplied path only under `--control-allow-destructive`) is not built; bytes only.
 - Not verified against a real window (this host is headless): the egui/eframe screenshot path is exercised by the encoder and queue tests only.

@@ -109,7 +109,8 @@ pub trait CommandHost {
     /// time; the image is collected with [`Self::screenshot_take`].
     fn screenshot_start(&mut self) -> Result<(), String>;
     /// The finished screenshot, encoded for the reply, or `None` while it is still on its way.
-    /// `give_up` abandons a request that ran out of time so a new one can start.
+    /// `give_up` abandons a request that ran out of time so a new one can start. `max_width == 0`
+    /// means nobody wants the image any more (the client left): drop it without encoding.
     fn screenshot_take(&mut self, max_width: u32, give_up: bool) -> Option<Result<Value, String>>;
 }
 
@@ -566,8 +567,9 @@ pub fn screenshot_params(params: &Value) -> Result<(std::time::Duration, u32), S
         None | Some(Value::Null) => 10_000,
         Some(v) => v
             .as_u64()
-            .filter(|ms| (500..=30_000).contains(ms))
-            .ok_or("`timeout_ms` must be 500-30000")?,
+            // Below the transport's own 30 s request timeout, so this error is the one the caller sees.
+            .filter(|ms| (500..=25_000).contains(ms))
+            .ok_or("`timeout_ms` must be 500-25000")?,
     };
     let width = match params.get("max_width") {
         None | Some(Value::Null) => 1600,
@@ -694,7 +696,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         id: "ui.screenshot",
         label: "Screenshot of the window as painted",
-        params: r#"{"timeout_ms"?: 500-30000 (default 10000), "max_width"?: 64-4096 (default 1600; wider windows are scaled down)}  -> {"width", "height", "png_base64"}. Needs a visible, painted window. Never writes a file."#,
+        params: r#"{"timeout_ms"?: 500-25000 (default 10000), "max_width"?: 64-4096 (default 1600; wider windows are scaled down)}  -> {"width", "height", "png_base64"}. A minimised window cannot be captured (times out). The reply line can be several MiB: read it without the request line cap. Never writes a file."#,
         risk: Risk::Read,
         risk_for: None,
         enabled: always,
@@ -848,6 +850,9 @@ impl CommandQueue {
     /// many ran, so the caller can ask for another frame when more are left.
     pub fn drain(&self, host: &mut dyn CommandHost, policy: Policy) -> usize {
         let mut ran = 0;
+        // Expired and abandoned waits first, so a retry right after a timeout finds the host's
+        // capture slot free.
+        self.poll_deferred(host);
         while ran < MAX_PER_DRAIN {
             // The lock is held only for the pop, so a command may itself submit.
             let next = self.rx.lock().ok().and_then(|rx| rx.try_recv().ok());
@@ -2010,6 +2015,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
         assert!(reply.unwrap_err().contains("no screenshot arrived"));
+        assert!(slow.shot_gave_up > 0, "the host was told to give up");
 
         // A client that gave up frees the host's capture slot.
         let (req, _rx) = shot(json!({}));
@@ -2025,6 +2031,7 @@ mod tests {
 
         for bad in [
             json!({"timeout_ms": 5}),
+            json!({"timeout_ms": 30_000}),
             json!({"max_width": 10}),
             json!({"max_width": 99_999}),
             json!({"path": "/tmp/x.png"}),
