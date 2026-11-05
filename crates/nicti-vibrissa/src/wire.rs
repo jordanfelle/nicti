@@ -61,8 +61,11 @@ pub fn read_line_limited<R: BufRead>(r: &mut R, max: usize) -> io::Result<Option
     }
     String::from_utf8(line)
         .map(Some)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "not UTF-8"))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "not UTF-8"))
 }
+
+/// A token file is a few dozen bytes.
+const MAX_TOKEN_FILE: u64 = 4096;
 
 /// What the app writes to `nicti-control-<pid>.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,9 +95,31 @@ impl TokenInfo {
         Ok(Self { port, token, pid })
     }
 
+    /// Reads a token file, refusing anything but a small regular file (not a symlink, FIFO or
+    /// device: a FIFO would block forever, `/dev/zero` would fill memory) that, on Unix, only its
+    /// owner can touch. The app creates it `0600`. Use a private directory: a planted file in a
+    /// shared one would make the client trust whoever planted it.
     pub fn read(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("can't read {}: {e}", path.display()))?;
+        let shown = path.display();
+        let meta =
+            std::fs::symlink_metadata(path).map_err(|e| format!("can't read {shown}: {e}"))?;
+        if !meta.is_file() {
+            return Err(format!("{shown} is not a regular file"));
+        }
+        if meta.len() > MAX_TOKEN_FILE {
+            return Err(format!("{shown} is too large to be a token file"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if meta.permissions().mode() & 0o077 != 0 {
+                return Err(format!(
+                    "{shown} is readable by other users (mode {:o}); the app creates it 0600",
+                    meta.permissions().mode() & 0o777
+                ));
+            }
+        }
+        let text = std::fs::read_to_string(path).map_err(|e| format!("can't read {shown}: {e}"))?;
         Self::parse(&text)
     }
 }
@@ -120,6 +145,7 @@ pub fn find_token_file(dir: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("can't read {}: {e}", dir.display()))?
         .filter_map(Result::ok)
         .map(|e| e.path())
+        .filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file()))
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
@@ -203,12 +229,43 @@ mod tests {
             .unwrap_err()
             .contains("no nicti-control"));
         std::fs::write(d.join("other.json"), "{}").unwrap();
+        std::fs::create_dir(d.join("nicti-control-9.json")).unwrap(); // a directory is not a token file
         std::fs::write(d.join("nicti-control-1.json"), "{}").unwrap();
         assert!(find_token_file(&d)
             .unwrap()
             .ends_with("nicti-control-1.json"));
         std::fs::write(d.join("nicti-control-2.json"), "{}").unwrap();
         assert!(find_token_file(&d).unwrap_err().contains("--token-file"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_token_file_must_be_a_private_regular_file() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let d = std::env::temp_dir().join(format!("vib-priv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let body = r#"{"port":4000,"token":"ab","pid":7}"#;
+        let f = d.join("t.json");
+        std::fs::write(&f, body).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(TokenInfo::read(&f).is_ok());
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(TokenInfo::read(&f).unwrap_err().contains("other users"));
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = d.join("link.json");
+        symlink(&f, &link).unwrap();
+        assert!(TokenInfo::read(&link)
+            .unwrap_err()
+            .contains("not a regular file"));
+        assert!(TokenInfo::read(&d)
+            .unwrap_err()
+            .contains("not a regular file"));
+        let big = d.join("big.json");
+        std::fs::write(&big, vec![b' '; 5000]).unwrap();
+        std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(TokenInfo::read(&big).unwrap_err().contains("too large"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

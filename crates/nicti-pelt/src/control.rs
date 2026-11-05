@@ -1069,10 +1069,7 @@ mod tests {
     fn the_mcp_clients_session_talks_to_the_real_server_and_rejects_an_impostor() {
         use nicti_vibrissa::client::{Backend, Session, Source};
         let rig = Rig::new();
-        let mut session = Session::new(Source {
-            token_file: rig.control.token_path().to_owned(),
-            port: None,
-        });
+        let mut session = Session::new(Source::file(rig.control.token_path()));
         let list = session.call("commands", json!({})).unwrap();
         assert!(list.as_array().is_some_and(|l| !l.is_empty()));
         // The same session through the MCP layer: tools are generated from the real table.
@@ -1088,10 +1085,7 @@ mod tests {
             .collect();
         assert!(names.contains(&"ui_screenshot".to_owned()), "{names:?}");
         // A server error comes back as an error, not a hang.
-        let mut session = Session::new(Source {
-            token_file: rig.control.token_path().to_owned(),
-            port: None,
-        });
+        let mut session = Session::new(Source::file(rig.control.token_path()));
         assert!(session.call("no.such", json!({})).is_err());
 
         // An impostor that bound the port first: right hello, `ok`, but it cannot forge the proof.
@@ -1104,6 +1098,11 @@ mod tests {
             json!({"port": port, "token": rig.token, "pid": 1}).to_string(),
         )
         .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tf, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let h = thread::spawn(move || {
             let (mut s, _) = fake.accept().unwrap();
             writeln!(
@@ -1115,10 +1114,7 @@ mod tests {
             let _ = read_line_limited(&mut r, 4096);
             writeln!(s, r#"{{"ok":true,"proof":"{}"}}"#, "00".repeat(32)).unwrap();
         });
-        let mut bad = Session::new(Source {
-            token_file: tf,
-            port: None,
-        });
+        let mut bad = Session::new(Source::file(tf));
         let e = bad.call("commands", json!({})).unwrap_err();
         assert!(e.contains("proof is wrong"), "{e}");
         h.join().unwrap();

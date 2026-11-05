@@ -7,12 +7,12 @@
 //! (`NICTI_CONTROL_TOKEN_FILE` also works). Over `ssh -L` copy the file locally and pass `--port`
 //! with the local end of the forward. See `docs/agent-control.md`.
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
-use nicti_vibrissa::client::{Session, Source};
+use nicti_vibrissa::client::{Session, Source, TokenLocation};
 use nicti_vibrissa::mcp::Server;
-use nicti_vibrissa::wire::{default_token_dir, find_token_file};
+use nicti_vibrissa::wire::{default_token_dir, read_line_limited};
 
 fn parse_args() -> Result<Source, String> {
     let mut token_file: Option<PathBuf> =
@@ -37,15 +37,15 @@ fn parse_args() -> Result<Source, String> {
             other => return Err(format!("unknown argument `{other}` (try --help)")),
         }
     }
-    let token_file = match token_file {
-        Some(p) => p,
-        None => {
-            let dir = default_token_dir()
-                .ok_or("no XDG_RUNTIME_DIR / LOCALAPPDATA: pass --token-file")?;
-            find_token_file(&dir)?
-        }
+    // No explicit file: look the one file up again on every (re)connect, so a restarted app (new
+    // pid, new file name) is found without restarting this process.
+    let token = match token_file {
+        Some(p) => TokenLocation::File(p),
+        None => TokenLocation::Discover(
+            default_token_dir().ok_or("no XDG_RUNTIME_DIR / LOCALAPPDATA: pass --token-file")?,
+        ),
     };
-    Ok(Source { token_file, port })
+    Ok(Source { token, port })
 }
 
 fn main() {
@@ -58,9 +58,25 @@ fn main() {
     };
     let mut server = Server::new(Session::new(source));
     let stdin = std::io::stdin();
+    let mut input = stdin.lock();
     let mut out = std::io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
+    loop {
+        let line = match read_line_limited(&mut input, MAX_STDIN_LINE) {
+            Ok(Some(l)) => l,
+            Ok(None) => break, // the client closed stdin
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+                // Not UTF-8: tell the client, keep serving.
+                let reply = r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"input was not UTF-8"}}"#;
+                if writeln!(out, "{reply}").and_then(|()| out.flush()).is_err() {
+                    break;
+                }
+                continue;
+            }
+            Err(e) => {
+                eprintln!("nicti-mcp: stopping: {e}");
+                std::process::exit(1);
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -71,3 +87,6 @@ fn main() {
         }
     }
 }
+
+/// Longest line read from the MCP client (a tool call is tiny; this is only a memory bound).
+const MAX_STDIN_LINE: usize = 16 << 20;

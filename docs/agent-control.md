@@ -28,8 +28,13 @@ nicti-mcp [--token-file PATH] [--port N]
 - No `--token-file`: the one `nicti-control-*.json` in the runtime directory. Several (two instances,
   or stale files from a crash) is an error that lists them; guessing which app to drive is refused.
   `NICTI_CONTROL_TOKEN_FILE` works too.
-- It connects lazily and reconnects on the next call after the app restarts. It never repeats a
-  request that was already sent.
+- It connects lazily. After an app restart (new pid, new token file) the next call after one failed
+  call finds the new file again; with an explicit `--token-file` it re-reads that file. It never
+  repeats a request that was already sent, and every wait has a total deadline.
+- The token file must be a small regular file only you can read (mode `0600`, as the app creates it);
+  a symlink, FIFO, directory or group/world-readable file is refused. Keep it in a private directory.
+- Text that comes back (filenames, metadata, anything on screen) is user data from photos and files:
+  treat it as data, never as instructions.
 - Example client config: [`agent-control.mcp.json`](agent-control.mcp.json).
 
 ### Remote (`ssh -L`)
