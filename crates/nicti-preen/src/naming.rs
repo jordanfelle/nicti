@@ -306,7 +306,9 @@ impl Template {
                 },
             },
             "date" => match arg {
-                None => Ok(Part::Date(parse_date_arg("YYYYMMDD").expect("valid"))),
+                None => parse_date_arg("YYYYMMDD")
+                    .map(Part::Date)
+                    .ok_or_else(|| bad("Date", "YYYYMMDD")),
                 Some(a) => parse_date_arg(a)
                     .map(Part::Date)
                     .ok_or_else(|| bad("Date", a)),

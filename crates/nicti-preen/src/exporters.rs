@@ -51,6 +51,8 @@ pub fn builtin_id(format: ExportFormat) -> &'static str {
 }
 
 /// A registry holding the built-in exporters (AVIF only when the `avif` feature is on).
+#[allow(clippy::expect_used)] // Genuine invariant: the ids are distinct namespaced constants, and
+                              // every export test builds this registry, so a clash would fail them all.
 pub fn builtin_registry() -> ExporterRegistry {
     fn jpeg() -> Arc<dyn Exporter> {
         Arc::new(JpegExporter)

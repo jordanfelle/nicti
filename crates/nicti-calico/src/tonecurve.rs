@@ -86,13 +86,20 @@ impl ToneCurve {
     }
 
     pub fn eval(&self, x: f64) -> f64 {
-        let x = x.clamp(self.xs[0], *self.xs.last().unwrap());
-        let i = match self
-            .xs
-            .binary_search_by(|probe| probe.partial_cmp(&x).unwrap())
-        {
+        let lo = self.xs.first().copied().unwrap_or(0.0);
+        let hi = self.xs.last().copied().unwrap_or(1.0);
+        // NaN has no place on the curve: treat it as the first point (clamp would pass it through
+        // and the search below used to panic on it).
+        // `+ 0.0` turns -0.0 into 0.0: `total_cmp` orders -0.0 before 0.0, so a -0.0 input would
+        // otherwise land before the first knot.
+        let x = if x.is_nan() {
+            lo
+        } else {
+            x.clamp(lo, hi) + 0.0
+        };
+        let i = match self.xs.binary_search_by(|probe| probe.total_cmp(&x)) {
             Ok(i) => i.min(self.xs.len() - 2),
-            Err(i) => (i - 1).min(self.xs.len() - 2),
+            Err(i) => i.saturating_sub(1).min(self.xs.len() - 2),
         };
         let (x0, x1) = (self.xs[i], self.xs[i + 1]);
         let (y0, y1) = (self.ys[i], self.ys[i + 1]);
@@ -286,5 +293,21 @@ mod tests {
             ToneCurveLut::from_points_or_default(Some(&bad)),
             ToneCurveLut::acr_default()
         );
+    }
+
+    #[test]
+    fn evaluating_nan_or_infinity_does_not_panic_and_stays_on_the_curve() {
+        let c = ToneCurve::new(&[(0.0, 0.1), (0.5, 0.6), (1.0, 0.9)]);
+        // NaN used to panic in the search; it is now the first point.
+        assert_eq!(c.eval(f64::NAN), c.eval(0.0));
+        assert_eq!(c.eval(f64::INFINITY), c.eval(1.0));
+        assert_eq!(c.eval(f64::NEG_INFINITY), c.eval(0.0));
+    }
+
+    #[test]
+    fn negative_zero_evaluates_like_zero() {
+        let c = ToneCurve::new(&[(0.0, 0.1), (0.5, 0.6), (1.0, 0.9)]);
+        assert_eq!(c.eval(-0.0), c.eval(0.0));
+        assert!((c.eval(-0.0) - 0.1).abs() < 1e-12);
     }
 }

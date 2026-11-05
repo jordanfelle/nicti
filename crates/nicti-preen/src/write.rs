@@ -97,7 +97,7 @@ fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
             Err(e) => return Err(e),
         }
     }
-    Err(last.expect("loop ran at least once"))
+    Err(last.unwrap_or_else(|| io::Error::other("the rename was never attempted")))
 }
 
 fn write_temp(target: &Path, bytes: &[u8]) -> io::Result<(PathBuf, Cleanup)> {

@@ -18,7 +18,7 @@
 //!    ([`crate::space::PROPHOTO_GAMMA`], matching `moxcms`'s ProPhoto profile).
 
 use crate::icc::{color_profile, working_profile};
-use crate::math::{mat_invert, mat_mul, mat_vec_mul};
+use crate::math::{mat_mul, mat_try_invert, mat_vec_mul};
 use crate::space::{OutputSpace, PROPHOTO_GAMMA};
 use moxcms::{CmsError, Layout, RenderingIntent, TransformOptions};
 
@@ -233,8 +233,11 @@ fn matrix_trc(profile: &ColorProfile) -> Option<MatrixTrc> {
     if det.abs() < 1e-9 {
         return None;
     }
-    let from_working = mat_mul(&mat_invert(&to_xyz), &crate::space::working_to_xyz_d50())
-        .map(|row| row.map(|v| v as f32));
+    let from_working = mat_mul(
+        &mat_try_invert(&to_xyz)?,
+        &crate::space::working_to_xyz_d50(),
+    )
+    .map(|row| row.map(|v| v as f32));
 
     let mut encode: [Vec<f32>; 3] = Default::default();
     for (c, decode) in decoders.iter().enumerate() {

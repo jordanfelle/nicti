@@ -166,10 +166,9 @@ impl Scheduler {
     pub fn take_next(&mut self) -> Option<Taken> {
         while let Some(entry) = self.foreground.front() {
             if entry.cancel.is_cancelled() {
-                let entry = self
-                    .foreground
-                    .pop_front()
-                    .expect("just peeked via front()");
+                let Some(entry) = self.foreground.pop_front() else {
+                    break;
+                };
                 self.cancelled_while_queued
                     .push((entry.id, safe_progress(entry.job.as_ref())));
                 drop_guarded(entry);
@@ -247,9 +246,15 @@ impl Scheduler {
         // fits, and the CPU lane would otherwise grow the list with every started import job).
         let vram_bytes = entry.job.spec().vram_bytes;
         if vram_bytes > 0 && !admission.is_admitted(entry.id) {
-            admission
+            // Checked against `remaining()` above, so a refusal is an invariant break: put the
+            // job back unchanged rather than losing it.
+            if admission
                 .admit(entry.id, Priority::Background, vram_bytes)
-                .expect("checked against admission.remaining() above, must not be refused");
+                .is_err()
+            {
+                self.background.insert(pick, entry);
+                return None;
+            }
         }
 
         Some(Taken {

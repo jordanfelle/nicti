@@ -128,9 +128,9 @@ impl Inner {
             // `finish_status`, which removes a token that isn't in the registry yet -- a no-op.
             // `submit` then inserts it anyway, and nothing ever removes it again: a permanent
             // leak for every fast job that hits this window (found by CodeRabbit's review).
-            let mut scheduler = lane.scheduler.lock().unwrap();
+            let mut scheduler = crate::lock(&lane.scheduler);
             let cancel_token = scheduler.submit(id, job);
-            self.cancel_tokens.lock().unwrap().insert(id, cancel_token);
+            crate::lock(&self.cancel_tokens).insert(id, cancel_token);
         }
         lane.notify();
         (self.on_change)();
@@ -138,14 +138,14 @@ impl Inner {
     }
 
     fn cancel(&self, id: JobId) {
-        if let Some(token) = self.cancel_tokens.lock().unwrap().get(&id) {
+        if let Some(token) = crate::lock(&self.cancel_tokens).get(&id) {
             token.cancel();
         }
         self.notify_all_lanes();
     }
 
     fn set_status(&self, status: JobStatus) {
-        let mut statuses = self.statuses.lock().unwrap();
+        let mut statuses = crate::lock(&self.statuses);
         statuses.insert(status.id, status);
     }
 
@@ -154,7 +154,7 @@ impl Inner {
     /// caller never has to reconstruct (and risk getting wrong) the parts of a `JobStatus` that
     /// don't change over a job's lifetime.
     fn update_state(&self, id: JobId, state: JobState, progress: Progress) {
-        let mut statuses = self.statuses.lock().unwrap();
+        let mut statuses = crate::lock(&self.statuses);
         if let Some(status) = statuses.get_mut(&id) {
             status.state = state;
             status.progress = progress;
@@ -163,12 +163,12 @@ impl Inner {
 
     fn finish_status(&self, id: JobId, state: JobState, progress: Progress) {
         self.update_state(id, state, progress);
-        self.cancel_tokens.lock().unwrap().remove(&id);
-        let mut order = self.finished_order.lock().unwrap();
+        crate::lock(&self.cancel_tokens).remove(&id);
+        let mut order = crate::lock(&self.finished_order);
         order.push_back(id);
         if order.len() > FINISHED_RING_CAPACITY {
             if let Some(evicted) = order.pop_front() {
-                self.statuses.lock().unwrap().remove(&evicted);
+                crate::lock(&self.statuses).remove(&evicted);
             }
         }
     }
@@ -243,24 +243,28 @@ impl Pounce {
         });
 
         let gpu_inner = inner.clone();
+        // A failed spawn (OS thread limit) leaves that worker absent rather than aborting the
+        // app: the lane's jobs stay queued (never run), and `shutdown` has nothing to join.
         let gpu_handle = std::thread::Builder::new()
             .name("pounce-gpu".into())
             .spawn(move || worker_loop(gpu_inner, Lane::Gpu))
-            .expect("spawning the Pounce GPU worker thread");
+            .ok();
 
         let mut cpu_handles = Vec::with_capacity(cpu_threads);
         for i in 0..cpu_threads {
             let cpu_inner = inner.clone();
-            let handle = std::thread::Builder::new()
+            match std::thread::Builder::new()
                 .name(format!("pounce-cpu-{i}"))
                 .spawn(move || worker_loop(cpu_inner, Lane::Cpu))
-                .expect("spawning a Pounce CPU worker thread");
-            cpu_handles.push(handle);
+            {
+                Ok(handle) => cpu_handles.push(handle),
+                Err(_) => break,
+            }
         }
 
         Pounce {
             inner,
-            gpu_handle: Arc::new(Mutex::new(Some(gpu_handle))),
+            gpu_handle: Arc::new(Mutex::new(gpu_handle)),
             cpu_handles: Arc::new(Mutex::new(cpu_handles)),
         }
     }
@@ -305,18 +309,8 @@ impl Pounce {
     /// applied to both lanes for forward-compat with a future CPU-lane job that also wants
     /// nearest-to-cursor ordering.
     pub fn reprioritize(&self, key: impl Fn(&JobSpec) -> usize + Send + Clone + 'static) {
-        self.inner
-            .gpu
-            .scheduler
-            .lock()
-            .unwrap()
-            .reprioritize_background(key.clone());
-        self.inner
-            .cpu
-            .scheduler
-            .lock()
-            .unwrap()
-            .reprioritize_background(key);
+        crate::lock(&self.inner.gpu.scheduler).reprioritize_background(key.clone());
+        crate::lock(&self.inner.cpu.scheduler).reprioritize_background(key);
         self.inner.notify_all_lanes();
     }
 
@@ -341,7 +335,7 @@ impl Pounce {
     /// construction (raising this above that count would promise concurrency the lane has no
     /// threads to provide).
     pub fn set_cpu_limit(&self, limit: usize) {
-        let capped = limit.clamp(1, self.cpu_handles.lock().unwrap().len().max(1));
+        let capped = limit.clamp(1, crate::lock(&self.cpu_handles).len().max(1));
         self.inner.cpu_throttle.set_limit(capped);
         self.inner.cpu.notify();
     }
@@ -350,7 +344,7 @@ impl Pounce {
     /// [`FINISHED_RING_CAPACITY`] finished ones, for the activity panel to render. Ordered by id
     /// (submission order).
     pub fn snapshot(&self) -> Vec<JobStatus> {
-        let statuses = self.inner.statuses.lock().unwrap();
+        let statuses = crate::lock(&self.inner.statuses);
         let mut all: Vec<JobStatus> = statuses.values().cloned().collect();
         all.sort_by_key(|s| s.id);
         all
@@ -362,10 +356,10 @@ impl Pounce {
     pub fn shutdown(&self) {
         self.inner.shutdown.store(true, Ordering::SeqCst);
         self.inner.notify_all_lanes();
-        if let Some(handle) = self.gpu_handle.lock().unwrap().take() {
+        if let Some(handle) = crate::lock(&self.gpu_handle).take() {
             let _ = handle.join();
         }
-        let mut cpu_handles = self.cpu_handles.lock().unwrap();
+        let mut cpu_handles = crate::lock(&self.cpu_handles);
         for handle in cpu_handles.drain(..) {
             let _ = handle.join();
         }
@@ -461,7 +455,7 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
                 }),
                 None => {
                     inner.idle_wakes.fetch_add(1, Ordering::Relaxed);
-                    let guard = lane_state.scheduler.lock().unwrap();
+                    let guard = crate::lock(&lane_state.scheduler);
                     let _ = lane_state.condvar.wait_timeout(guard, POLL_INTERVAL);
                     continue;
                 }
@@ -471,7 +465,7 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
         };
 
         let taken = {
-            let mut scheduler = lane_state.scheduler.lock().unwrap();
+            let mut scheduler = crate::lock(&lane_state.scheduler);
             let taken = scheduler.take_next();
             // Checked on every call, whether or not a job was also taken -- a job cancelled while
             // still queued is dropped by `take_next` itself (never becomes a `Taken`), so nothing
@@ -524,7 +518,7 @@ fn worker_loop(inner: Arc<Inner>, lane: Lane) {
 
         let id = taken.id;
         let terminal = {
-            let mut scheduler = lane_state.scheduler.lock().unwrap();
+            let mut scheduler = crate::lock(&lane_state.scheduler);
             // Re-check cancellation now, under the same lock `finish` uses to decide whether to
             // re-enqueue the job -- a cancellation landing in the window between this chunk's
             // own check above and this point would otherwise leave `terminal` at `None` (so

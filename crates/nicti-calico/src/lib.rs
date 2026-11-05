@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! Color management (#42, ADR-0042) and the camera color profile extension point (ADR-0019
 //! §7/§8).
 //!

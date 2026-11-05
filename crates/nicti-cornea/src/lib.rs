@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! RAW decoder extension point (ADR-0019 §7/§8) plus its real implementation (#41): LibRaw-backed
 //! decode → demosaic (WB/color-matrix/gamma disabled) → linear camera RGB, the first stage of
 //! ADR-0044's baked prefix. #40's own demosaic/NR algorithm comparison lives in `spikes/rods`, not
