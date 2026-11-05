@@ -165,7 +165,16 @@ jobs:
           submodules: true # #31, see the Linux clippy job's own comment above
       # #29: see the Linux clippy job's own nasm comment above -- same requirement, Windows's
       # own package manager.
-      - run: choco install nasm -y
+      # The Chocolatey community feed 503s now and then: retry rather than fail the whole job.
+      - name: Install nasm
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            choco install nasm -y
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Start-Sleep -Seconds (15 * $attempt)
+          }
+          throw "choco install nasm failed after 5 attempts"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -205,7 +214,16 @@ jobs:
           persist-credentials: false
           submodules: true # #31, see the clippy (linux) job's own comment above
       # #29: see the Linux clippy job's own nasm comment above -- same requirement here.
-      - run: choco install nasm -y
+      # The Chocolatey community feed 503s now and then: retry rather than fail the whole job.
+      - name: Install nasm
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            choco install nasm -y
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Start-Sleep -Seconds (15 * $attempt)
+          }
+          throw "choco install nasm failed after 5 attempts"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
