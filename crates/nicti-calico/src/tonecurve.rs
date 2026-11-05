@@ -90,10 +90,16 @@ impl ToneCurve {
         let hi = self.xs.last().copied().unwrap_or(1.0);
         // NaN has no place on the curve: treat it as the first point (clamp would pass it through
         // and the search below used to panic on it).
-        let x = if x.is_nan() { lo } else { x.clamp(lo, hi) };
+        // `+ 0.0` turns -0.0 into 0.0: `total_cmp` orders -0.0 before 0.0, so a -0.0 input would
+        // otherwise land before the first knot.
+        let x = if x.is_nan() {
+            lo
+        } else {
+            x.clamp(lo, hi) + 0.0
+        };
         let i = match self.xs.binary_search_by(|probe| probe.total_cmp(&x)) {
             Ok(i) => i.min(self.xs.len() - 2),
-            Err(i) => (i - 1).min(self.xs.len() - 2),
+            Err(i) => i.saturating_sub(1).min(self.xs.len() - 2),
         };
         let (x0, x1) = (self.xs[i], self.xs[i + 1]);
         let (y0, y1) = (self.ys[i], self.ys[i + 1]);
@@ -296,5 +302,12 @@ mod tests {
         assert_eq!(c.eval(f64::NAN), c.eval(0.0));
         assert_eq!(c.eval(f64::INFINITY), c.eval(1.0));
         assert_eq!(c.eval(f64::NEG_INFINITY), c.eval(0.0));
+    }
+
+    #[test]
+    fn negative_zero_evaluates_like_zero() {
+        let c = ToneCurve::new(&[(0.0, 0.1), (0.5, 0.6), (1.0, 0.9)]);
+        assert_eq!(c.eval(-0.0), c.eval(0.0));
+        assert!((c.eval(-0.0) - 0.1).abs() < 1e-12);
     }
 }

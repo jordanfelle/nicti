@@ -23,8 +23,9 @@ pub mod telemetry;
 pub mod throttle;
 
 /// Locks `m`, recovering the data if another thread panicked while holding it. Pounce's
-/// guarded state stays consistent across a job panic (jobs run under `catch_unwind`), so
-/// poisoning must not cascade into every other thread.
+/// poisoning must not cascade into every other thread. Job `step`/`progress`/drop run under
+/// `catch_unwind`; a panicking `ChunkedJob::spec()` under the scheduler lock is not guarded, so
+/// a buggy job impl can still leave its lane's queue truncated (its worker dies with it).
 pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }

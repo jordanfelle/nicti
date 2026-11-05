@@ -244,7 +244,7 @@ impl Pounce {
 
         let gpu_inner = inner.clone();
         // A failed spawn (OS thread limit) leaves that worker absent rather than aborting the
-        // app: the lane's jobs stay queued, and `shutdown` has nothing to join.
+        // app: the lane's jobs stay queued (never run), and `shutdown` has nothing to join.
         let gpu_handle = std::thread::Builder::new()
             .name("pounce-gpu".into())
             .spawn(move || worker_loop(gpu_inner, Lane::Gpu))
