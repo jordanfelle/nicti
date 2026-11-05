@@ -15,7 +15,10 @@
 //! The table fails loudly instead of skipping when `NICTI_REQUIRE_GPU` is set and there is no
 //! adapter (the required CI runner sets it); lavapipe is enough for the headless run.
 
-use crate::coat::{ExposureParams, HslBand, ToneCurveParams, ToneParams, VibranceParams, WbParams};
+use crate::coat::{
+    CalibrationParams, ExposureParams, HslBand, NoiseReductionParams, SharpenParams,
+    ToneCurveParams, ToneParams, VibranceParams, WbParams,
+};
 use crate::color;
 use crate::frame::{Extent, FrameTexture};
 use crate::renderer::LiveExec;
@@ -88,9 +91,10 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
 }
 
 /// The CPU twin of the live suffix for the stages the table covers, in shader order: working-space
-/// matrix, exposure, tone, tone curve, vibrance, HSL.
+/// matrix, calibration shadows tint, exposure, tone, tone curve, vibrance, HSL.
 fn cpu_chain(px: [f32; 3], p: &LiveParams) -> [f32; 3] {
     let mut rgb = color::mat3_apply(p.working_space_matrix, px);
+    rgb = color::shadow_tint_pixel(rgb, p.calibration.sanitized().shadow_tint);
     let mult = color::exposure_multiplier(p.exposure.stops);
     rgb = rgb.map(|c| c * mult);
     rgb = color::apply_tone(rgb, &p.tone);
@@ -98,6 +102,52 @@ fn cpu_chain(px: [f32; 3], p: &LiveParams) -> [f32; 3] {
     rgb = color::apply_tone_curve(rgb, &lut);
     rgb = color::apply_vibrance(rgb, p.vibrance.amount);
     color::apply_hsl(rgb, &p.hsl)
+}
+
+/// The CPU twin of a whole render of `data`: the per-pixel chain, then (when Sharpen or Noise
+/// Reduction is on) the Detail pass over the f16-stored result -- two Gaussian blurs of the image
+/// (noise-reduction and sharpen radius), combined per pixel by `detail::apply_detail_rgb`, exactly
+/// the GPU's `detail_blur` + `detail_combine` passes.
+fn cpu_image(data: &[[f32; 4]], p: &LiveParams) -> Vec<[f32; 3]> {
+    use crate::detail::{apply_detail_rgb, gaussian_blur, Extent2D};
+    let pointwise: Vec<[f32; 3]> = data
+        .iter()
+        .map(|px| cpu_chain([px[0], px[1], px[2]].map(through_f16), p))
+        .collect();
+    if p.sharpen.amount == 0.0 && p.noise_reduction.is_noop() {
+        return pointwise;
+    }
+    // The GPU keeps the pointwise result in an f16 texture before blurring it.
+    let stage_a: Vec<[f32; 3]> = pointwise.iter().map(|px| px.map(through_f16)).collect();
+    let extent = Extent2D {
+        width: W as usize,
+        height: H as usize,
+    };
+    let blur = |sigma: f32| -> Vec<[f32; 3]> {
+        let planes: Vec<Vec<f32>> = (0..3)
+            .map(|c| {
+                let plane: Vec<f32> = stage_a.iter().map(|px| px[c]).collect();
+                gaussian_blur(&plane, extent, sigma)
+            })
+            .collect();
+        (0..stage_a.len())
+            .map(|i| [planes[0][i], planes[1][i], planes[2][i]])
+            .collect()
+    };
+    let nr_sigma = (crate::stages::NR_BASE_SIGMA * p.pixel_scale).max(0.05);
+    let sharpen_sigma = (p.sharpen.radius_px * p.pixel_scale).max(0.05);
+    let (nr_blur, sharpen_blur) = (blur(nr_sigma), blur(sharpen_sigma));
+    (0..stage_a.len())
+        .map(|i| {
+            apply_detail_rgb(
+                stage_a[i],
+                nr_blur[i],
+                sharpen_blur[i],
+                &p.noise_reduction,
+                &p.sharpen,
+            )
+        })
+        .collect()
 }
 
 /// The camera -> ProPhoto matrix the GPU and CPU both start from.
@@ -248,6 +298,60 @@ fn cases() -> Vec<(String, Edit)> {
             };
         }),
     );
+    // Calibration's shadows tint (the primaries fold into the matrix and are not a live stage).
+    for tint in [-1.0f32, -0.4, 0.5, 1.0] {
+        add(
+            format!("calibration shadow tint {tint:+}"),
+            Box::new(move |p| {
+                p.calibration = CalibrationParams {
+                    shadow_tint: tint,
+                    ..CalibrationParams::default()
+                }
+            }),
+        );
+    }
+    // The Detail pass (Sharpen, Noise Reduction): neighbourhood blurs, so the reference is the
+    // whole-image `cpu_image`, not a per-pixel map.
+    for (amount, radius_px, detail) in [(1.0f32, 1.0f32, 0.5f32), (1.5, 3.0, 0.0), (0.6, 2.0, 1.0)]
+    {
+        add(
+            format!("sharpen {amount} r{radius_px} d{detail}"),
+            Box::new(move |p| {
+                p.sharpen = SharpenParams {
+                    amount,
+                    radius_px,
+                    detail,
+                }
+            }),
+        );
+    }
+    for (luminance, color, detail) in [(1.0f32, 0.0f32, 0.0f32), (0.0, 1.0, 0.0), (0.7, 0.5, 1.0)] {
+        add(
+            format!("noise reduction l{luminance} c{color} d{detail}"),
+            Box::new(move |p| {
+                p.noise_reduction = NoiseReductionParams {
+                    luminance,
+                    color,
+                    detail,
+                }
+            }),
+        );
+    }
+    add(
+        "sharpen with noise reduction".into(),
+        Box::new(|p| {
+            p.sharpen = SharpenParams {
+                amount: 1.0,
+                radius_px: 1.5,
+                detail: 0.5,
+            };
+            p.noise_reduction = NoiseReductionParams {
+                luminance: 0.6,
+                color: 0.4,
+                detail: 0.5,
+            };
+        }),
+    );
     v
 }
 
@@ -337,11 +441,27 @@ fn the_live_suffix_matches_its_cpu_twin_for_every_edit() {
             // The GPU reads the image from an `Rgba16Float` texture, so it sees the f16-rounded
             // input; the twin must start from the same values, or the comparison also measures
             // that rounding (amplified by a steep curve such as `shadows -1`: #701).
-            let expected: Vec<[f32; 3]> = data
-                .iter()
-                .map(|px| cpu_chain([px[0], px[1], px[2]].map(through_f16), &params))
-                .collect();
+            let expected = cpu_image(&data, &params);
             let (mean, max) = lsb_error(&actual, &expected);
+            // A small effect hides under the shared bound (calibration's shadows tint moves the
+            // image by about a level), so a twin that lacked it would still pass. For these cases
+            // the twin must also explain the GPU's change: much closer than the same render with
+            // the setting reset.
+            if name.starts_with("calibration") {
+                let mut plain = LiveParams {
+                    working_space_matrix: base,
+                    ..Default::default()
+                };
+                edit(&mut plain);
+                plain.calibration = CalibrationParams::default();
+                let (_, max_plain) = lsb_error(&actual, &cpu_image(&data, &plain));
+                if max_plain < 0.4 || max >= max_plain / 3.0 {
+                    failures.push(format!(
+                        "{label}: the twin does not explain the GPU's change (max {max:.3} LSB \
+                         with the setting, {max_plain:.3} without)"
+                    ));
+                }
+            }
             if max > worst.0 {
                 worst = (max, label.clone());
             }
@@ -382,7 +502,10 @@ enum Coverage {
     },
     /// Nothing to compare, with the reason.
     Exempt(&'static str),
-    /// A real stage with no parity test yet; tracked, and the count may only go down.
+    /// A real stage with no parity test yet; tracked, and the count may only go down. None is
+    /// recorded today (#702 closed the last three), the variant stays for the next stage that
+    /// cannot be tested yet.
+    #[allow(dead_code)]
     Gap(&'static str),
 }
 
@@ -404,7 +527,7 @@ fn source_of(name: &str) -> &'static str {
 }
 
 /// Gaps that exist today. Lower this when one is closed; a new stage can't add to it silently.
-const MAX_GAPS: usize = 3;
+const MAX_GAPS: usize = 0;
 
 const COVERAGE: &[(&str, Coverage)] = &[
     (
@@ -438,10 +561,7 @@ const COVERAGE: &[(&str, Coverage)] = &[
     ),
     (WB, Coverage::Table),
     (WORKING_SPACE, Coverage::Table),
-    (
-        CALIBRATION,
-        Coverage::Gap("shadows tint has no CPU-twin parity test (primaries fold into the matrix)"),
-    ),
+    (CALIBRATION, Coverage::Table),
     (
         DEFRINGE,
         Coverage::Parity {
@@ -482,14 +602,8 @@ const COVERAGE: &[(&str, Coverage)] = &[
             test: "oklab_ops_in_the_live_pass_match_the_cpu_twin_and_neutral_is_a_noop",
         },
     ),
-    (
-        SHARPEN,
-        Coverage::Gap("no CPU-twin parity test for the global sharpen pass"),
-    ),
-    (
-        NOISE_REDUCTION,
-        Coverage::Gap("no CPU-twin parity test for the global noise-reduction pass"),
-    ),
+    (SHARPEN, Coverage::Table),
+    (NOISE_REDUCTION, Coverage::Table),
     (
         MASKS,
         Coverage::Parity {
@@ -558,8 +672,12 @@ fn every_render_stage_is_classified() {
             }
         }
     }
+    // `MAX_GAPS` is 0 since #702; the comparison stays so the next recorded gap needs a conscious
+    // raise of the cap.
+    #[allow(clippy::absurd_extreme_comparisons)]
+    let within_cap = gaps <= MAX_GAPS;
     assert!(
-        gaps <= MAX_GAPS,
+        within_cap,
         "{gaps} parity gaps recorded, more than the {MAX_GAPS} known ones"
     );
     // The Table entries must really be exercised by the table.
@@ -571,6 +689,9 @@ fn every_render_stage_is_classified() {
         "tone curve",
         "hsl band",
         "wb ",
+        "calibration shadow tint",
+        "sharpen ",
+        "noise reduction",
     ] {
         assert!(
             names.iter().any(|n| n.starts_with(needle)),

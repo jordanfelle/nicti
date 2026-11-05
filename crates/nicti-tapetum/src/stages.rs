@@ -863,7 +863,7 @@ impl Default for DetailState {
 /// blur -- LRC's Luminance/Color Noise Reduction sliders don't expose a separate radius control,
 /// unlike Sharpening's `radius_px`, so this is a single v1 constant rather than a slider-driven
 /// value.
-const NR_BASE_SIGMA: f32 = 2.0;
+pub(crate) const NR_BASE_SIGMA: f32 = 2.0;
 
 /// Fuses #46's Tone Curve + HSL into the same per-pixel dispatch every other live stage already
 /// shares (`live_suffix.wgsl`), and adds a second, separate multi-pass path for Sharpening/Noise
