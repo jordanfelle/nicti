@@ -5,10 +5,12 @@ Design and security model: [ADR-0434](adr/0434-agent-control-channel.md). This p
 ## 1. Start the app with the channel on
 
 ```text
-nicti --control                                  # loopback only, OS-assigned port
+nicti [catalog.sqlite] --control                                  # loopback only, OS-assigned port
 nicti --control --control-export-dir ~/exports   # lets export.run write there
 nicti --control --control-allow-destructive      # also lets an agent confirm delete/Export dialogs
 ```
+
+The catalog is the first non-option argument; without one it is `nicti.catalog.sqlite` in the current directory if that exists, else `nicti.catalog.sqlite` in the per-user data directory (`%LOCALAPPDATA%\\nicti`, `$XDG_DATA_HOME/nicti` or `~/.local/share/nicti`). A flag is never taken as the catalog (#758).
 
 The app writes `nicti-control-<pid>.json` (port, token, pid) to `$XDG_RUNTIME_DIR` (Windows:
 `%LOCALAPPDATA%\nicti`), mode `0600`, and removes it on exit. The token never crosses the socket:
