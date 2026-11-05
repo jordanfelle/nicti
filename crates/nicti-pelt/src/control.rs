@@ -921,6 +921,12 @@ mod tests {
         fn ui_settled(&self, _: bool) -> bool {
             true
         }
+        fn screenshot_start(&mut self) -> Result<(), String> {
+            Err("none".into())
+        }
+        fn screenshot_take(&mut self, _: u32, _: bool) -> Option<Result<Value, String>> {
+            None
+        }
     }
 
     /// A running channel plus a thread standing in for the UI thread that drains its queue.
