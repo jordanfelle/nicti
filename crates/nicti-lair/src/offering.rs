@@ -321,7 +321,9 @@ fn offer_file_with(
         ));
     }
 
-    let (name, folders) = parts.split_last().expect("validate_rel returns >= 1 part");
+    let Some((name, folders)) = parts.split_last() else {
+        return Err(refuse("an empty relative path"));
+    };
     let dir = open_folder(dest_root, folders).map_err(|why| refuse(&why))?;
 
     // Copy + hash in one pass into a temp file we exclusively created (never pre-deleted: another

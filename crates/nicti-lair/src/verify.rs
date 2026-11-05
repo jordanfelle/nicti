@@ -180,12 +180,11 @@ impl Verify {
                         }
                         Err(e) => self.report.unreadable.push((rel_path, e.to_string())),
                     }
-                } else if let Some(cur) = current.as_mut() {
+                } else if let Some(mut cur) = current.take() {
                     self.buf.resize(SLICE_BYTES, 0);
                     match read_up_to(&mut cur.file, &mut self.buf, &mut cur.hasher) {
-                        Ok(true) => {} // more bytes remain
+                        Ok(true) => current = Some(cur), // more bytes remain
                         Ok(false) => {
-                            let cur = current.take().unwrap();
                             self.report.checked += 1;
                             if cur.hasher.finalize().to_hex().as_str() == cur.expected {
                                 self.report.matched += 1;
@@ -194,7 +193,6 @@ impl Verify {
                             }
                         }
                         Err(e) => {
-                            let cur = current.take().unwrap();
                             self.report.unreadable.push((cur.rel_path, e.to_string()));
                         }
                     }
@@ -417,7 +415,7 @@ impl Baseline {
                             self.report.unreadable.push((rel_path, e.to_string()))
                         }
                     }
-                } else if let Some(cur) = current.as_mut() {
+                } else if let Some(mut cur) = current.take() {
                     self.buf.resize(SLICE_BYTES, 0);
                     match read_up_to_counting(
                         &mut cur.file,
@@ -425,9 +423,8 @@ impl Baseline {
                         &mut cur.hasher,
                         &mut cur.hashed,
                     ) {
-                        Ok(true) => {}
+                        Ok(true) => current = Some(cur),
                         Ok(false) => {
-                            let cur = current.take().unwrap();
                             self.done += 1;
                             if cur.hashed == cur.size
                                 && stat_matches(&cur.file, cur.size, cur.mtime)
@@ -446,7 +443,6 @@ impl Baseline {
                             }
                         }
                         Err(e) => {
-                            let cur = current.take().unwrap();
                             self.done += 1;
                             self.report.unreadable.push((cur.rel_path, e.to_string()));
                         }

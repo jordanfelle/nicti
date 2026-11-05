@@ -219,7 +219,8 @@ fn retry_on_transient_access_denied<T>(
             Err(e) => return Err(e),
         }
     }
-    Err(last_err.expect("loop only exits via return, or after at least one PermissionDenied"))
+    // `RETRY_MAX_ATTEMPTS` is non-zero, so an error was recorded; the fallback covers a zero.
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("no attempt was made")))
 }
 
 /// The `rusqlite`-flavored twin of [`retry_on_transient_access_denied`] -- `verify`'s own
@@ -250,7 +251,11 @@ fn retry_rusqlite_open_on_transient_access_denied(
             Err(e) => return Err(e),
         }
     }
-    Err(last_err.expect("loop only exits via return, or after at least one matching error"))
+    Err(last_err.unwrap_or_else(|| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+            "no attempt was made",
+        )))
+    }))
 }
 
 /// Writes a fresh, unverified snapshot of `catalog` to a new `.partial` file under `policy.dir`,

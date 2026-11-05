@@ -637,3 +637,23 @@ fn a_backup_of_a_missing_folder_is_a_source_problem_not_a_target_problem() {
     assert!(r.error.is_some() && !r.target_problem, "{r:?}");
     pounce.shutdown();
 }
+
+#[test]
+fn a_job_stepped_after_it_reported_done_returns_an_error_instead_of_panicking() {
+    use nicti_pounce::job::{ChunkedJob, Step};
+    let concrete = Arc::new(SqliteCatalog::open_in_memory().unwrap());
+    let store: Arc<dyn CatalogStore + Send + Sync> = concrete.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let volume_id = concrete.upsert_volume("v", None, None, 0).unwrap();
+    let root_id = concrete.ensure_root(volume_id, "").unwrap();
+    let (mut job, _result) = IngestJob::new(store, root_id, dir.path());
+    for _ in 0..100 {
+        if matches!(job.step(), Ok(Step::Done)) {
+            // Pounce never steps a finished job again; if something did, it must be an error the
+            // worker reports, not a panic that unwinds through it.
+            assert!(job.step().is_err());
+            return;
+        }
+    }
+    panic!("an empty folder should finish in a few steps");
+}
