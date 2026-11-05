@@ -112,22 +112,22 @@ pub fn score(query: &str, label: &str) -> Option<i32> {
     }
     let l: Vec<char> = label.chars().flat_map(char::to_lowercase).collect();
     let mut qi = 0;
-    let mut score = 0;
+    let mut total = 0;
     let mut last: Option<usize> = None;
     for (i, &c) in l.iter().enumerate() {
         if qi < q.len() && c == q[qi] {
             let word_start = i == 0 || !l[i - 1].is_alphanumeric();
-            score += 1 + if word_start { 8 } else { 0 };
+            total += 1 + if word_start { 8 } else { 0 };
             match last {
-                Some(p) if p + 1 == i => score += 5,
-                Some(p) => score -= (i - p - 1).min(6) as i32,
-                None => score -= (i as i32).min(6),
+                Some(p) if p + 1 == i => total += 5,
+                Some(p) => total -= (i - p - 1).min(6) as i32,
+                None => total -= (i as i32).min(6),
             }
             last = Some(i);
             qi += 1;
         }
     }
-    (qi == q.len()).then(|| score * 4 - (l.len() as i32).min(64) / 8)
+    (qi == q.len()).then(|| total * 4 - (l.len() as i32).min(64) / 8)
 }
 
 /// Indices into `entries` that match `query`, best first (ties keep the table's order).
