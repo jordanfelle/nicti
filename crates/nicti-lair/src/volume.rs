@@ -109,6 +109,46 @@ pub fn identifier() -> Identify {
     }
 }
 
+/// A folder's volume identity plus whether the folder is that volume's mount root itself (a whole
+/// drive, as opposed to a folder on it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderVolume {
+    pub identity: VolumeIdentity,
+    pub is_mount_root: bool,
+}
+
+/// [`FolderVolume`] for `path` from a volume snapshot: pure, so it is testable without Windows.
+pub fn folder_volume(volumes: &[VolumeInfo], path: &str) -> Option<FolderVolume> {
+    let volume = volume_containing(volumes, path)?;
+    let identity = identity_of(volume)?;
+    let target = normalized(path);
+    let target = target.trim_end_matches('\\');
+    let is_mount_root = volume
+        .mount_points
+        .iter()
+        .any(|mp| normalized(mp).trim_end_matches('\\') == target);
+    Some(FolderVolume {
+        identity,
+        is_mount_root,
+    })
+}
+
+/// [`folder_volume`] for a real folder; `None` where [`identify`] has no answer (not Windows, the
+/// volume isn't mounted, its partition info can't be read).
+pub fn identify_folder(path: &Path) -> Option<FolderVolume> {
+    #[cfg(windows)]
+    {
+        let volumes = windows_impl::enumerate().ok()?;
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        folder_volume(&volumes, &canon.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// The volume identity of the folder `path`, or `None` when it can't be established (not Windows,
 /// the volume isn't mounted, or its partition info can't be read: the caller keeps the placeholder).
 pub fn identify(path: &Path) -> Option<VolumeIdentity> {
@@ -548,6 +588,41 @@ mod tests {
             label: Some(label.into()),
             ..v(Some(ntfs), Some(gpt), None, None)
         }
+    }
+
+    #[test]
+    fn a_folder_volume_knows_whether_the_folder_is_the_whole_drive() {
+        let vols = vec![
+            mounted(
+                "Archive",
+                &["D:\\"],
+                1,
+                "aaaaaaaa-1111-1111-1111-111111111111",
+            ),
+            mounted(
+                "Work",
+                &["C:\\", "C:\\mnt\\work"],
+                2,
+                "bbbbbbbb-1111-1111-1111-111111111111",
+            ),
+        ];
+        let root = folder_volume(&vols, "D:\\").unwrap();
+        assert!(root.is_mount_root);
+        // Verbatim prefix, forward slashes, case and a trailing separator all still mean the root.
+        assert!(folder_volume(&vols, r"\\?\d:/").unwrap().is_mount_root);
+        let inside = folder_volume(&vols, "D:\\events").unwrap();
+        assert!(!inside.is_mount_root);
+        assert_eq!(inside.identity, root.identity);
+        // A folder mount point of another volume is that volume's root, not C:'s.
+        let mounted_dir = folder_volume(&vols, "C:\\mnt\\work\\").unwrap();
+        assert!(mounted_dir.is_mount_root);
+        // Outside every volume, or a volume with no usable key: no answer.
+        assert!(folder_volume(&vols, "Z:\\x").is_none());
+        let bare = vec![VolumeInfo {
+            mount_points: vec!["F:\\".into()],
+            ..v(None, None, None, None)
+        }];
+        assert!(folder_volume(&bare, "F:\\").is_none());
     }
 
     #[test]

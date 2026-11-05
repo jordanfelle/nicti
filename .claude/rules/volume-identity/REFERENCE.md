@@ -48,7 +48,7 @@ Full reasoning/history: `docs/decisions/volume-identity.md`.
   offline-volume path handles that case, not #24's). No change to this ADR's own offline-volume
   semantics.
 
-- **Wired into the app (#510)**: `nicti_lair::volume` (`identity_key`, `identify`, `volume_containing`; Windows enumeration promoted from the spike, `None` elsewhere) feeds `scruff::register_root` (identity key + label + existing `.nicti-volume` marker; a root already on the placeholder volume is adopted, same id; `migrate_placeholder_roots` at startup on a background thread; `CatalogStore::reassign_root_volume`). `rel_path` is still the full path, the marker is read not created, non-Windows keeps the placeholder: follow-up #676. Windows half unverified (type-checked only). Detail: `docs/decisions/volume-identity.md`.
+- **Wired into the app (#510)**: `nicti_lair::volume` (`identity_key`, `identify`, `volume_containing`; Windows enumeration promoted from the spike, `None` elsewhere) feeds `scruff::register_root` (identity key + label + existing `.nicti-volume` marker; a root already on the placeholder volume is adopted, same id; `migrate_placeholder_roots` at startup on a background thread; `CatalogStore::reassign_root_volume`). `rel_path` is still the full path, the marker is read not created, non-Windows keeps the placeholder: follow-up #676. #392: `volume::folder_volume`/`identify_folder` (identity + 'is the mount root') back `ArchiveDrives`' per-volume archive flag. Windows half unverified (type-checked only). Detail: `docs/decisions/volume-identity.md`.
 
 ## Package contents
 
