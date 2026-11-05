@@ -104,8 +104,16 @@ impl ColorManagement {
     }
 
     /// The baked LUT depends on `black_point`: drop it so the next build rebakes, not just re-pushes.
+    /// The JPEG preview converter depends on it too (#624): rebuild it and bump the generation so
+    /// cached thumbnails and previews are converted again -- but only for a monitor profile, where
+    /// compensation can apply; a built-in space ignores the flag, so purging every thumbnail for it
+    /// would be a pointless reload.
     fn invalidate_bake(&mut self) {
         self.display_kind = None;
+        if matches!(self.display, DisplayProfile::Icc(_)) {
+            self.source = Arc::new(SourceTransforms::new_with(&self.display, self.black_point));
+            self.generation += 1;
+        }
     }
 
     /// The gamut overlay only means something while proofing.
@@ -184,7 +192,7 @@ impl ColorManagement {
     /// two identical monitors share one profile -- neither should purge every thumbnail.
     fn adopt_profile(&mut self, profile: DisplayProfile) {
         if !same_profile(&self.display, &profile) {
-            self.source = Arc::new(SourceTransforms::new(&profile));
+            self.source = Arc::new(SourceTransforms::new_with(&profile, self.black_point));
             self.generation += 1;
         }
         self.display = profile;
@@ -288,6 +296,28 @@ mod tests {
         cm.black_point = false;
         cm.invalidate_bake();
         assert!(cm.display_kind.is_none(), "a toggle must rebake");
+    }
+
+    #[test]
+    fn a_black_point_toggle_rebuilds_the_preview_converter_only_for_a_monitor_profile() {
+        use nicti_calico::icc::color_profile;
+        // A built-in space ignores the flag: no thumbnail purge.
+        let mut cm = ColorManagement::new();
+        let (source, generation) = (cm.source_transforms(), cm.generation());
+        cm.black_point = false;
+        cm.invalidate_bake();
+        assert_eq!(cm.generation(), generation);
+        assert!(Arc::ptr_eq(&source, &cm.source_transforms()));
+        // A monitor profile: the converter is rebuilt and the generation moves, so the grid and
+        // the preview tiers convert again.
+        cm.adopt_profile(DisplayProfile::Icc(Arc::new(color_profile(
+            OutputSpace::AdobeRgb,
+        ))));
+        let (source, generation) = (cm.source_transforms(), cm.generation());
+        cm.black_point = true;
+        cm.invalidate_bake();
+        assert_eq!(cm.generation(), generation + 1);
+        assert!(!Arc::ptr_eq(&source, &cm.source_transforms()));
     }
 
     #[test]
