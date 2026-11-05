@@ -199,9 +199,12 @@ fn read_gps(exif: &exif::Exif) -> Option<Gps> {
             .map(|b| b.to_ascii_uppercase())
             .filter(|b| allowed.contains(b))
     };
-    let with_ref = |value: exif::Tag, r: exif::Tag, allowed: &[u8], default: u8| {
+    // A missing reference is only defaulted where the EXIF spec defines one (speed: km/h); a
+    // track or image direction without its reference is dropped rather than given a claim the
+    // file never made.
+    let with_ref = |value: exif::Tag, r: exif::Tag, allowed: &[u8], default: Option<u8>| {
         let v = get(value).and_then(rational)?;
-        Some((v, reference(r, allowed).unwrap_or(default)))
+        Some((v, reference(r, allowed).or(default)?))
     };
     Some(Gps {
         lat_ref,
@@ -212,27 +215,44 @@ fn read_gps(exif: &exif::Exif) -> Option<Gps> {
         date: get(exif::Tag::GPSDateStamp)
             .and_then(ascii)
             .filter(|d| valid_gps_date(d)),
-        time: get(exif::Tag::GPSTimeStamp).and_then(dms),
-        speed: with_ref(exif::Tag::GPSSpeed, exif::Tag::GPSSpeedRef, b"KMN", b'K'),
-        track: with_ref(exif::Tag::GPSTrack, exif::Tag::GPSTrackRef, b"TM", b'T'),
+        time: get(exif::Tag::GPSTimeStamp)
+            .and_then(dms)
+            .filter(valid_gps_time),
+        speed: with_ref(
+            exif::Tag::GPSSpeed,
+            exif::Tag::GPSSpeedRef,
+            b"KMN",
+            Some(b'K'),
+        ),
+        track: with_ref(exif::Tag::GPSTrack, exif::Tag::GPSTrackRef, b"TM", None),
         img_direction: with_ref(
             exif::Tag::GPSImgDirection,
             exif::Tag::GPSImgDirectionRef,
             b"TM",
-            b'T',
+            None,
         ),
     })
 }
 
-/// `YYYY:MM:DD` with plausible digits (EXIF's own format).
+/// `YYYY:MM:DD` with plausible digits and a real-looking month and day (EXIF's own format).
 fn valid_gps_date(d: &str) -> bool {
     let b = d.as_bytes();
-    b.len() == 10
+    let shape = b.len() == 10
         && b[4] == b':'
         && b[7] == b':'
         && b.iter()
             .enumerate()
-            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
+    shape && {
+        let (month, day) = (&d[5..7], &d[8..10]);
+        matches!(month.parse::<u8>(), Ok(1..=12)) && matches!(day.parse::<u8>(), Ok(1..=31))
+    }
+}
+
+/// Hours below 24, minutes and seconds below 60 (the three rationals may be fractional).
+fn valid_gps_time(t: &[(u32, u32); 3]) -> bool {
+    let v = |(n, d): (u32, u32)| f64::from(n) / f64::from(d);
+    v(t[0]) < 24.0 && v(t[1]) < 60.0 && v(t[2]) < 60.0
 }
 
 fn ascii(field: &exif::Field) -> Option<String> {
@@ -342,7 +362,12 @@ impl SourceMetadata {
         if let Some(file) = &self.exif.gps {
             let (flat, flon) = file.degrees();
             if (flat - c.latitude).abs() < 1e-5 && (flon - c.longitude).abs() < 1e-5 {
-                return Some(file.clone());
+                let mut same = file.clone();
+                // The catalog's altitude (say from a GPX track) is as deliberate as its position.
+                if catalog.altitude.is_some() {
+                    same.altitude = catalog.altitude;
+                }
+                return Some(same);
             }
         }
         Some(catalog)
@@ -568,11 +593,19 @@ pub fn wrap_xpacket(xmp: &str) -> String {
 /// XMP `exif:GPS*` properties for `gps` (the XMP spelling differs from EXIF's: coordinates are
 /// `DDD,MM.mmmmk` text, rationals are `n/d` text, the stamp is one UTC date-time).
 fn gps_xmp_properties(gps: &Gps) -> String {
+    // `DDD,MM.mmmmk`, rounded once in integer ten-thousandths of a minute so the carry
+    // (59.99996' -> 1 degree) can never print as "60.0000".
     let coordinate = |dms: &[(u32, u32); 3], reference: u8| {
         let part = |(n, d): (u32, u32)| f64::from(n) / f64::from(d);
-        let deg = part(dms[0]).floor();
-        let minutes = part(dms[1]) + part(dms[2]) / 60.0;
-        format!("{deg:.0},{minutes:.4}{}", reference as char)
+        let total = ((part(dms[0]).floor() * 60.0 + part(dms[1]) + part(dms[2]) / 60.0) * 10_000.0)
+            .round() as u64;
+        let (deg, rest) = (total / 600_000, total % 600_000);
+        format!(
+            "{deg},{}.{:04}{}",
+            rest / 10_000,
+            rest % 10_000,
+            reference as char
+        )
     };
     let rational = |(n, d): (u32, u32)| format!("{n}/{d}");
     let mut out = String::new();
@@ -596,11 +629,11 @@ fn gps_xmp_properties(gps: &Gps) -> String {
         let part = |(n, d): (u32, u32)| f64::from(n) / f64::from(d);
         let seconds = part(t[2]);
         out.push_str(&format!(
-            "   <exif:GPSTimeStamp>{}T{:02.0}:{:02.0}:{:02.0}Z</exif:GPSTimeStamp>\n",
+            "   <exif:GPSTimeStamp>{}T{:02}:{:02}:{:02}Z</exif:GPSTimeStamp>\n",
             date.replace(':', "-"),
-            part(t[0]),
-            part(t[1]),
-            seconds.floor()
+            part(t[0]).floor() as u32,
+            part(t[1]).floor() as u32,
+            seconds.floor() as u32
         ));
     }
     for (name, value) in [
@@ -1111,6 +1144,100 @@ mod tests {
         ] {
             assert!(!text.contains(tag), "{tag} leaked into {text}");
         }
+    }
+
+    #[test]
+    fn the_extras_rule_needs_both_axes_to_match_and_takes_the_catalogs_altitude() {
+        let file = source_with_gps(extra_tags());
+        let (flat, flon) = file.gps.as_ref().unwrap().degrees();
+        let with_catalog = |lat: f64, lon: f64, alt: Option<f64>| {
+            SourceMetadata {
+                exif: file.clone(),
+                catalog_gps: Some(CatalogGps {
+                    latitude: lat,
+                    longitude: lon,
+                    altitude: alt,
+                }),
+                ..source()
+            }
+            .effective_gps()
+            .unwrap()
+        };
+        // Both axes within tolerance (either sign of the difference): the file's fix and extras.
+        for (dlat, dlon) in [(0.0, 0.0), (5e-6, -5e-6), (-5e-6, 5e-6)] {
+            assert!(
+                with_catalog(flat + dlat, flon + dlon, None).speed.is_some(),
+                "{dlat} {dlon}"
+            );
+        }
+        // One axis off by 0.01 degree (about 1 km) is a different place, whichever axis it is.
+        for (dlat, dlon) in [(0.01, 0.0), (-0.01, 0.0), (0.0, 0.01), (0.0, -0.01)] {
+            let g = with_catalog(flat + dlat, flon + dlon, None);
+            assert!(
+                g.speed.is_none() && g.date.is_none() && g.time.is_none(),
+                "{dlat} {dlon}"
+            );
+        }
+        // The catalog's altitude replaces the file's even when the fix itself is the file's.
+        let g = with_catalog(flat, flon, Some(900.0));
+        assert_eq!(g.altitude, Some(((90_000, 100), false)));
+        assert!(g.speed.is_some());
+        // No catalog altitude: the file's stays.
+        assert_eq!(
+            with_catalog(flat, flon, None).altitude,
+            Some(((1523, 10), false))
+        );
+    }
+
+    #[test]
+    fn xmp_coordinates_carry_and_cover_every_hemisphere_and_sanitise_the_stamp() {
+        let xmp_of = |lat: f64, lon: f64| {
+            let src = SourceMetadata {
+                catalog_gps: Some(CatalogGps {
+                    latitude: lat,
+                    longitude: lon,
+                    altitude: None,
+                }),
+                ..source()
+            };
+            build_xmp(&on(), &src, "Nicti").unwrap()
+        };
+        let xmp = xmp_of(-33.8568, 151.2153);
+        assert!(
+            xmp.contains("<exif:GPSLatitude>33,51.4080S</exif:GPSLatitude>"),
+            "{xmp}"
+        );
+        assert!(
+            xmp.contains("<exif:GPSLongitude>151,12.9180E</exif:GPSLongitude>"),
+            "{xmp}"
+        );
+        // 10.9999992 degrees is 10 deg 59' 59.997": the minutes must carry, never print "60.0000".
+        let xmp = xmp_of(10.999_999_2, 0.0);
+        assert!(
+            xmp.contains("<exif:GPSLatitude>11,0.0000N</exif:GPSLatitude>"),
+            "{xmp}"
+        );
+        assert!(!xmp.contains("60.0000"), "{xmp}");
+        // Out-of-range stamps from a source are dropped on read, so the XMP never prints them.
+        let mut tags = gps_tags("N", [40, 26, 46], "W", [79, 58, 56]);
+        tags.push(ExifTag::GPSDateStamp("2026:99:99".into()));
+        tags.push(ExifTag::GPSTimeStamp(vec![
+            urat(24, 1),
+            urat(61, 1),
+            urat(61, 1),
+        ]));
+        let gps = source_with_gps(tags).gps.unwrap();
+        assert!(gps.date.is_none() && gps.time.is_none());
+        // A track or direction without its reference is dropped, a speed without one is km/h.
+        let mut tags = gps_tags("N", [40, 26, 46], "W", [79, 58, 56]);
+        tags.extend([
+            ExifTag::GPSTrack(vec![urat(10, 1)]),
+            ExifTag::GPSImgDirection(vec![urat(20, 1)]),
+            ExifTag::GPSSpeed(vec![urat(5, 1)]),
+        ]);
+        let gps = source_with_gps(tags).gps.unwrap();
+        assert!(gps.track.is_none() && gps.img_direction.is_none());
+        assert_eq!(gps.speed, Some(((5, 1), b'K')));
     }
 
     #[test]
