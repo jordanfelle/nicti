@@ -340,7 +340,14 @@ impl PeltApp {
         {
             let catalog = Arc::clone(&catalog);
             std::thread::spawn(move || {
-                let _ = nicti_lair::scruff::migrate_placeholder_roots(catalog.as_ref());
+                // Fire-and-forget, but not silent: a failure here repeats on every start (#740).
+                match nicti_pounce::guard::catch_panic(|| {
+                    nicti_lair::scruff::migrate_placeholder_roots(catalog.as_ref())
+                }) {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => eprintln!("nicti: placeholder-root migration failed: {e}"),
+                    Err(panic) => eprintln!("nicti: placeholder-root migration panicked: {panic}"),
+                }
             });
         }
         let nine_lives = NineLives::new(policy);
@@ -2155,7 +2162,14 @@ impl PeltApp {
                         );
                     } else {
                         // Not "No folders yet": nothing has been read, so nothing is known.
-                        ui.weak("Reading folders\u{2026}");
+                        if self.folder_cache.failed() {
+                            ui.colored_label(
+                                egui::Color32::RED,
+                                "Couldn't read the folder list (the reader stopped unexpectedly).",
+                            );
+                        } else {
+                            ui.weak("Reading folders\u{2026}");
+                        }
                     }
                     set_codec = sidecar_codec_row(ui, self.archive_drives.sidecar_codec(), !moving);
                     let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();

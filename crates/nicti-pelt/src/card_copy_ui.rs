@@ -198,6 +198,12 @@ fn human_bytes(b: u64) -> String {
 type PlanMsg = Result<(Vec<PlannedCopy>, Vec<String>, Vec<String>), String>;
 
 /// The card-scan thread's answer: the cards found, or the panic message.
+const SCAN_ERROR_PREFIX: &str = "Couldn't scan for cards: ";
+
+fn is_scan_error(status: &str) -> bool {
+    status.starts_with(SCAN_ERROR_PREFIX)
+}
+
 type ScanSlot = Arc<Mutex<Option<Result<Vec<CardVolume>, String>>>>;
 
 pub struct CardCopyUi {
@@ -285,10 +291,19 @@ impl CardCopyUi {
                 self.scan = None;
                 self.scanned_at = Some(Instant::now());
                 let found = match found {
-                    Ok(found) => found,
+                    Ok(found) => {
+                        if self.status.as_deref().is_some_and(is_scan_error) {
+                            self.status = None;
+                        }
+                        found
+                    }
                     Err(panic) => {
-                        self.status = Some(format!("Couldn't scan for cards: {panic}"));
-                        Vec::new()
+                        // Never clobber a status the user is reading (a copy summary).
+                        if self.status.as_deref().is_none_or(is_scan_error) {
+                            self.status = Some(format!("{SCAN_ERROR_PREFIX}{panic}"));
+                        }
+                        // A transient failure must not deselect the card the user picked.
+                        self.cards.clone()
                     }
                 };
                 if let Some(sel) = &self.selected {
