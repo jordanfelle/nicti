@@ -152,6 +152,8 @@ pub struct PeltApp {
     backup_copy: crate::backup_copy_ui::BackupCopyUi,
     /// `--control-export-dir`: where the control channel's `export.run` may write (#647).
     control_export_dir: Option<PathBuf>,
+    /// The screenshot `ui.screenshot` is waiting for (one at a time).
+    screenshot: Option<ShotSlot>,
     /// The control channel's widget registry and input queue (#649); `None` while it is off.
     widgets: Option<crate::widgets::Widgets>,
     /// The egui context, kept for the screen rectangle injected clicks are checked against.
@@ -495,6 +497,7 @@ impl PeltApp {
             geotag_ui: crate::geotag_ui::GeotagUi::default(),
             backup_copy,
             control_export_dir: None,
+            screenshot: None,
             widgets: None,
             control_ctx: None,
             card_copy: crate::card_copy_ui::CardCopyUi::default(),
@@ -4065,6 +4068,51 @@ impl crate::cmd::CommandHost for PeltApp {
         Ok(serde_json::json!({ "queued": true, "widget": widget }))
     }
 
+    fn screenshot_start(&mut self) -> Result<(), String> {
+        let ctx = self
+            .control_ctx
+            .as_ref()
+            .ok_or_else(|| "the control channel is off".to_owned())?;
+        if self.screenshot.is_some() {
+            return Err("a screenshot is already in progress".to_owned());
+        }
+        let slot: ShotSlot = Arc::default();
+        let into = Arc::clone(&slot);
+        let wake = ctx.clone();
+        ctx.request_screenshot(move |image| {
+            *into.lock().unwrap_or_else(|e| e.into_inner()) = Some(image);
+            wake.request_repaint();
+        });
+        // The capture is taken from the next painted frame, so make sure there is one.
+        ctx.request_repaint();
+        self.screenshot = Some(slot);
+        Ok(())
+    }
+
+    fn screenshot_take(
+        &mut self,
+        max_width: u32,
+        give_up: bool,
+    ) -> Option<Result<serde_json::Value, String>> {
+        let slot = self.screenshot.as_ref()?;
+        let image = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match image {
+            Some(image) => {
+                self.screenshot = None;
+                if max_width == 0 {
+                    return None; // the client left: no encode for nobody
+                }
+                Some(encode_screenshot(&image, max_width))
+            }
+            None => {
+                if give_up {
+                    self.screenshot = None;
+                }
+                None
+            }
+        }
+    }
+
     fn ui_settled(&self, jobs: bool) -> bool {
         let Some(w) = self.widgets.as_ref() else {
             return true;
@@ -4182,5 +4230,78 @@ impl crate::cmd::CommandHost for PeltApp {
                 "the export dialog could not open (no photos, or a job is running)".into()
             }))
         }
+    }
+}
+
+/// Where egui's screenshot callback leaves the image for the next command drain.
+type ShotSlot = Arc<std::sync::Mutex<Option<Arc<egui::ColorImage>>>>;
+
+/// Most pixels a capture may have (5120x2880 HiDPI 4K fits).
+const MAX_SHOT_PIXELS: usize = 16_800_000;
+
+/// The captured window as a PNG (base64), scaled down to `max_width` when wider.
+fn encode_screenshot(
+    image: &egui::ColorImage,
+    max_width: u32,
+) -> Result<serde_json::Value, String> {
+    use base64::Engine as _;
+    let [w, h] = image.size;
+    // The encode runs on the UI thread: refuse a window past 8K-class sizes rather than freeze it.
+    if w.saturating_mul(h) > MAX_SHOT_PIXELS {
+        return Err(format!("the window is too large to capture ({w}x{h} px)"));
+    }
+    let (w32, h32) = (
+        u32::try_from(w).map_err(|e| e.to_string())?,
+        u32::try_from(h).map_err(|e| e.to_string())?,
+    );
+    let bytes: Vec<u8> = image
+        .pixels
+        .iter()
+        .flat_map(|c| c.to_srgba_unmultiplied())
+        .collect();
+    let mut rgba = image::RgbaImage::from_raw(w32, h32, bytes)
+        .ok_or_else(|| "the screenshot had an unexpected size".to_owned())?;
+    if w32 > max_width {
+        let nh = ((u64::from(h32) * u64::from(max_width)) / u64::from(w32)).max(1) as u32;
+        rgba = image::imageops::resize(&rgba, max_width, nh, image::imageops::FilterType::Triangle);
+    }
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(rgba.clone())
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "width": rgba.width(),
+        "height": rgba.height(),
+        "png_base64": base64::engine::general_purpose::STANDARD.encode(png),
+    }))
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::encode_screenshot;
+
+    #[test]
+    fn a_screenshot_is_a_png_scaled_to_max_width() {
+        use base64::Engine as _;
+        let img = egui::ColorImage::filled([400, 200], egui::Color32::from_rgb(10, 20, 30));
+        let v = encode_screenshot(&img, 100).unwrap();
+        assert_eq!(
+            (v["width"].as_u64(), v["height"].as_u64()),
+            (Some(100), Some(50))
+        );
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(v["png_base64"].as_str().unwrap())
+            .unwrap();
+        let back = image::load_from_memory_with_format(&png, image::ImageFormat::Png).unwrap();
+        assert_eq!((back.width(), back.height()), (100, 50));
+        assert_eq!(back.to_rgba8().get_pixel(50, 25).0, [10, 20, 30, 255]);
+        // Too large: refused, not frozen on.
+        let huge = egui::ColorImage::filled([5000, 4000], egui::Color32::BLACK);
+        assert!(encode_screenshot(&huge, 1600)
+            .unwrap_err()
+            .contains("too large"));
+        // Narrower than the cap: untouched.
+        let v = encode_screenshot(&img, 1600).unwrap();
+        assert_eq!(v["width"], 400);
     }
 }

@@ -105,6 +105,13 @@ pub trait CommandHost {
     /// Whether queued input has been delivered and drawn (and, with `jobs`, no background job is
     /// queued or running).
     fn ui_settled(&self, jobs: bool) -> bool;
+    /// Asks the window for a screenshot of what is painted (needs a visible frame). One at a
+    /// time; the image is collected with [`Self::screenshot_take`].
+    fn screenshot_start(&mut self) -> Result<(), String>;
+    /// The finished screenshot, encoded for the reply, or `None` while it is still on its way.
+    /// `give_up` abandons a request that ran out of time so a new one can start. `max_width == 0`
+    /// means nobody wants the image any more (the client left): drop it without encoding.
+    fn screenshot_take(&mut self, max_width: u32, give_up: bool) -> Option<Result<Value, String>>;
 }
 
 /// A validated `export.run` request. Every path in it is either the operator's export folder or,
@@ -552,6 +559,34 @@ fn run_ui_settle(host: &mut dyn CommandHost, params: &Value) -> Result<Value, St
     Ok(json!({ "settled": host.ui_settled(jobs) }))
 }
 
+/// What `ui.screenshot` asks for: the longest the reply may wait, and the widest image returned
+/// (wider windows are scaled down, so a 4K window cannot produce a multi-megabyte reply).
+pub fn screenshot_params(params: &Value) -> Result<(std::time::Duration, u32), String> {
+    only_keys(params, &["timeout_ms", "max_width"])?;
+    let ms = match params.get("timeout_ms") {
+        None | Some(Value::Null) => 10_000,
+        Some(v) => v
+            .as_u64()
+            // Below the transport's own 30 s request timeout, so this error is the one the caller sees.
+            .filter(|ms| (500..=25_000).contains(ms))
+            .ok_or("`timeout_ms` must be 500-25000")?,
+    };
+    let width = match params.get("max_width") {
+        None | Some(Value::Null) => 1600,
+        Some(v) => v
+            .as_u64()
+            .filter(|w| (64..=4096).contains(w))
+            .ok_or("`max_width` must be 64-4096")? as u32,
+    };
+    Ok((std::time::Duration::from_millis(ms), width))
+}
+
+fn run_ui_screenshot(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
+    screenshot_params(params)?;
+    host.screenshot_start()?;
+    Ok(json!({ "pending": true }))
+}
+
 fn run_export_status(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
     only_keys(params, &[])?;
     Ok(host.export_status())
@@ -657,6 +692,15 @@ pub const COMMANDS: &[Command] = &[
         risk_for: None,
         enabled: always,
         run: run_ui_settle,
+    },
+    Command {
+        id: "ui.screenshot",
+        label: "Screenshot of the window as painted",
+        params: r#"{"timeout_ms"?: 500-25000 (default 10000), "max_width"?: 64-4096 (default 1600; wider windows are scaled down)}  -> {"width", "height", "png_base64"}. A minimised window cannot be captured (times out). The reply line can be several MiB: read it without the request line cap. Never writes a file."#,
+        risk: Risk::Read,
+        risk_for: None,
+        enabled: always,
+        run: run_ui_screenshot,
     },
     Command {
         id: "export.run",
@@ -772,7 +816,12 @@ struct Deferred {
     reply: Sender<Result<Value, String>>,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     deadline: std::time::Instant,
-    jobs: bool,
+    kind: DeferredKind,
+}
+
+enum DeferredKind {
+    Settle { jobs: bool },
+    Screenshot { max_width: u32 },
 }
 
 impl Default for CommandQueue {
@@ -801,6 +850,9 @@ impl CommandQueue {
     /// many ran, so the caller can ask for another frame when more are left.
     pub fn drain(&self, host: &mut dyn CommandHost, policy: Policy) -> usize {
         let mut ran = 0;
+        // Expired and abandoned waits first, so a retry right after a timeout finds the host's
+        // capture slot free.
+        self.poll_deferred(host);
         while ran < MAX_PER_DRAIN {
             // The lock is held only for the pop, so a command may itself submit.
             let next = self.rx.lock().ok().and_then(|rx| rx.try_recv().ok());
@@ -814,24 +866,28 @@ impl CommandQueue {
             } else {
                 dispatch(host, policy, &req.id, &req.params)
             };
-            // `ui.settle` that is not settled yet keeps its reply until it is (or times out).
-            if req.id == "ui.settle" {
-                if let Ok(v) = &result {
-                    if v["settled"] == false {
-                        if let Ok((timeout, jobs)) = settle_params(&req.params) {
-                            if let Ok(mut d) = self.deferred.lock() {
-                                d.push(Deferred {
-                                    reply: req.reply,
-                                    cancelled: req.cancelled,
-                                    deadline: std::time::Instant::now() + timeout,
-                                    jobs,
-                                });
-                            }
-                            ran += 1;
-                            continue;
-                        }
-                    }
+            // `ui.settle` that is not settled yet keeps its reply until it is (or times out); a
+            // started `ui.screenshot` keeps it until the image arrives.
+            let deferral = match (req.id.as_str(), &result) {
+                ("ui.settle", Ok(v)) if v["settled"] == false => settle_params(&req.params)
+                    .ok()
+                    .map(|(t, jobs)| (t, DeferredKind::Settle { jobs })),
+                ("ui.screenshot", Ok(_)) => screenshot_params(&req.params)
+                    .ok()
+                    .map(|(t, max_width)| (t, DeferredKind::Screenshot { max_width })),
+                _ => None,
+            };
+            if let Some((timeout, kind)) = deferral {
+                if let Ok(mut d) = self.deferred.lock() {
+                    d.push(Deferred {
+                        reply: req.reply,
+                        cancelled: req.cancelled,
+                        deadline: std::time::Instant::now() + timeout,
+                        kind,
+                    });
                 }
+                ran += 1;
+                continue;
             }
             // The client may have gone; that is its problem, not the app's.
             let _ = req.reply.send(result);
@@ -849,19 +905,40 @@ impl CommandQueue {
         let now = std::time::Instant::now();
         waiting.retain(|d| {
             if d.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                if matches!(d.kind, DeferredKind::Screenshot { .. }) {
+                    // Free the host's single capture slot, or every later one would be refused.
+                    let _ = host.screenshot_take(0, true);
+                }
                 return false; // the client gave up
             }
-            if host.ui_settled(d.jobs) {
-                let _ = d.reply.send(Ok(json!({ "settled": true })));
-                return false;
-            }
-            if now >= d.deadline {
-                let _ = d.reply.send(Ok(json!({
-                    "settled": false,
-                    "reason": "timed out before the UI went quiet (input still queued, or the \
-                               window is not being painted)"
-                })));
-                return false;
+            let timed_out = now >= d.deadline;
+            match d.kind {
+                DeferredKind::Settle { jobs } => {
+                    if host.ui_settled(jobs) {
+                        let _ = d.reply.send(Ok(json!({ "settled": true })));
+                        return false;
+                    }
+                    if timed_out {
+                        let _ = d.reply.send(Ok(json!({
+                            "settled": false,
+                            "reason": "timed out before the UI went quiet (input still queued, or the \
+                                       window is not being painted)"
+                        })));
+                        return false;
+                    }
+                }
+                DeferredKind::Screenshot { max_width } => {
+                    if let Some(done) = host.screenshot_take(max_width, timed_out) {
+                        let _ = d.reply.send(done);
+                        return false;
+                    }
+                    if timed_out {
+                        let _ = d.reply.send(Err("no screenshot arrived in time (is the window \
+                                                  visible and being painted?)"
+                            .to_owned()));
+                        return false;
+                    }
+                }
             }
             true
         });
@@ -1021,6 +1098,8 @@ mod tests {
         export_dir: Option<std::path::PathBuf>,
         export_requests: Vec<ExportRequest>,
         ui_calls: Vec<String>,
+        shot_polls: u32,
+        shot_gave_up: u32,
         settled: bool,
     }
 
@@ -1097,6 +1176,20 @@ mod tests {
         fn ui_drag(&mut self, w: &str, dx: f32, dy: f32) -> Result<Value, String> {
             self.ui_calls.push(format!("drag {w} {dx} {dy}"));
             Ok(json!({ "queued": true }))
+        }
+        fn screenshot_start(&mut self) -> Result<(), String> {
+            self.ui_calls.push("screenshot".into());
+            Ok(())
+        }
+        fn screenshot_take(&mut self, w: u32, give_up: bool) -> Option<Result<Value, String>> {
+            self.shot_polls += 1;
+            if give_up {
+                self.shot_gave_up += 1;
+            }
+            if give_up || self.shot_polls < 3 {
+                return None;
+            }
+            Some(Ok(json!({ "width": w, "height": 1, "png_base64": "AA==" })))
         }
         fn ui_settled(&self, _: bool) -> bool {
             self.settled
@@ -1876,5 +1969,83 @@ mod tests {
             assert!(rx.try_recv().unwrap().is_err(), "{bad}");
         }
         assert!(!q.has_deferred());
+    }
+
+    #[test]
+    fn ui_screenshot_waits_for_the_image_and_rejects_bad_parameters() {
+        let q = CommandQueue::default();
+        let tx = q.sender();
+        let mut m = Mock::default();
+        let shot = |params: Value| {
+            let (rtx, rrx) = mpsc::channel();
+            (
+                Request {
+                    id: "ui.screenshot".into(),
+                    params,
+                    reply: rtx,
+                    cancelled: Default::default(),
+                },
+                rrx,
+            )
+        };
+        let (req, rx) = shot(json!({"max_width": 800}));
+        tx.send(req).unwrap();
+        q.drain(&mut m, OPEN);
+        assert_eq!(m.ui_calls, ["screenshot"]);
+        assert!(rx.try_recv().is_err(), "the image has not arrived yet");
+        assert!(q.has_deferred());
+        q.drain(&mut m, OPEN);
+        q.drain(&mut m, OPEN);
+        let v = rx.try_recv().unwrap().unwrap();
+        assert_eq!(v["width"], 800, "max_width reaches the host");
+        assert!(!q.has_deferred());
+
+        // A deadline gives an error (and tells the host to give up), never a hang.
+        let mut slow = Mock::default();
+        let (req, rx) = shot(json!({"timeout_ms": 500}));
+        tx.send(req).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let reply = loop {
+            q.drain(&mut slow, OPEN);
+            slow.shot_polls = 0; // the image never arrives
+            if let Ok(r) = rx.try_recv() {
+                break r;
+            }
+            assert!(std::time::Instant::now() < end, "deadline never fired");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(reply.unwrap_err().contains("no screenshot arrived"));
+        assert!(slow.shot_gave_up > 0, "the host was told to give up");
+
+        // A client that gave up frees the host's capture slot.
+        let (req, _rx) = shot(json!({}));
+        let cancelled = req.cancelled.clone();
+        tx.send(req).unwrap();
+        q.drain(&mut slow, OPEN);
+        slow.shot_polls = 0;
+        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        let polls = slow.shot_gave_up;
+        q.drain(&mut slow, OPEN);
+        assert!(slow.shot_gave_up > polls, "the host was told to give up");
+        assert!(!q.has_deferred());
+
+        for bad in [
+            json!({"timeout_ms": 5}),
+            json!({"timeout_ms": 30_000}),
+            json!({"max_width": 10}),
+            json!({"max_width": 99_999}),
+            json!({"path": "/tmp/x.png"}),
+        ] {
+            let before = m.ui_calls.len();
+            let (req, rx) = shot(bad.clone());
+            tx.send(req).unwrap();
+            q.drain(&mut m, OPEN);
+            assert!(rx.try_recv().unwrap().is_err(), "{bad}");
+            assert_eq!(
+                m.ui_calls.len(),
+                before,
+                "a refused call must not start a capture"
+            );
+        }
     }
 }

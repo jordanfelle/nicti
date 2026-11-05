@@ -30,7 +30,9 @@ getrandom = "0.4"
 # decode is still in flight (#31 phase 3) -- already in the workspace's resolved dependency graph
 # via nicti-tapetum/nicti-prowl, so this is a new direct edge to an already-vetted crate, not a new
 # dependency (no docs/licensing.md update needed per ADR-0018's amendment).
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# ui.screenshot replies with the PNG as base64 (#649).
+base64 = "0.22"
 # f16 conversion for the display LUT texture upload (ADR-0042) -- already a nicti-tapetum dependency.
 half = "2"
 raw-window-handle = "0.6"
