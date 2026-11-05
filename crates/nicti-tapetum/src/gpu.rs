@@ -218,25 +218,41 @@ pub fn make_compute_pipeline(
     })
 }
 
+/// A readback from the GPU failed (the device was lost, timed out, or the buffer did not map).
+/// Nothing is returned in place of the pixels: a zero-filled stand-in would be exported or cached
+/// as if it were the photo, so callers propagate this and fail the unit of work instead.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ReadbackError {
+    #[error("the GPU did not finish the readback: {0}")]
+    Device(String),
+    #[error("the GPU readback buffer could not be mapped: {0}")]
+    NotMapped(String),
+}
+
 /// Maps `staging` for reading, waits for the GPU, and copies the bytes out.
-///
-/// A failed poll/map means the device is lost. These synchronous readbacks feed export tiles, the
-/// dehaze airlight cache and auto-level, so a zero-filled stand-in would be written out or cached
-/// as if it were the photo; failing loudly is the safer behaviour until the readbacks are made
-/// fallible end to end (tracked in the #739 follow-up).
-#[allow(clippy::expect_used)]
-pub(crate) fn read_mapped(gpu: &GpuContext, staging: &wgpu::Buffer) -> Vec<u8> {
+pub(crate) fn read_mapped(
+    gpu: &GpuContext,
+    staging: &wgpu::Buffer,
+) -> Result<Vec<u8>, ReadbackError> {
     let slice = staging.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
     gpu.device
         .poll(wgpu::PollType::wait_indefinitely())
-        .expect("device poll failed");
+        .map_err(|e| ReadbackError::Device(e.to_string()))?;
     let bytes = slice
         .get_mapped_range()
-        .expect("readback buffer not mapped")
+        .map_err(|e| ReadbackError::NotMapped(e.to_string()))?
         .to_vec();
     staging.unmap();
-    bytes
+    Ok(bytes)
+}
+
+/// For the infallible convenience readers (`read_frame`, `Field::read`, ...) that tests, benches
+/// and callers that cannot continue without the pixels use. Production paths that can report the
+/// failure call the `try_*` versions instead.
+#[allow(clippy::expect_used)]
+pub(crate) fn expect_readback<T>(result: Result<T, ReadbackError>) -> T {
+    result.expect("GPU readback failed (device lost?)")
 }
 
 #[cfg(test)]

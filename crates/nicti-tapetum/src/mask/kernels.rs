@@ -86,6 +86,11 @@ impl FieldTexture {
 
     /// Reads the field back to the CPU (tests, and the engine's CPU fallbacks).
     pub fn read(&self, gpu: &GpuContext) -> Field {
+        crate::gpu::expect_readback(self.try_read(gpu))
+    }
+
+    /// [`Self::read`] that reports a failed readback instead of panicking.
+    pub fn try_read(&self, gpu: &GpuContext) -> Result<Field, crate::gpu::ReadbackError> {
         let unpadded = self.width * 4;
         let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -122,18 +127,18 @@ impl FieldTexture {
             },
         );
         gpu.queue.submit(Some(encoder.finish()));
-        let raw = crate::gpu::read_mapped(gpu, &staging);
+        let raw = crate::gpu::read_mapped(gpu, &staging)?;
         let mut data = Vec::with_capacity((self.width * self.height) as usize);
         for y in 0..self.height {
             let start = (y * padded) as usize;
             let row: &[f32] = bytemuck::cast_slice(&raw[start..start + unpadded as usize]);
             data.extend_from_slice(row);
         }
-        Field {
+        Ok(Field {
             width: self.width as usize,
             height: self.height as usize,
             data,
-        }
+        })
     }
 
     pub fn byte_size(&self) -> u64 {

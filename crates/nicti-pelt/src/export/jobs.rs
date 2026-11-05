@@ -1169,7 +1169,7 @@ impl ChunkedJob for RenderJob {
 
         // One tile per step.
         let tile = phase.tiles[phase.next];
-        TiledRender::new(
+        let stepped = TiledRender::new(
             shared.gpu.clone(),
             &phase.live,
             &phase.ctx.crop_kernel,
@@ -1177,6 +1177,19 @@ impl ChunkedJob for RenderJob {
             vec![tile],
         )
         .step(&mut phase.sink);
+        if let Err(e) = stepped {
+            // A lost device / failed readback: the tile was not written, so the file would have a
+            // hole. Fail this photo with the reason instead of exporting it.
+            let Some(phase) = self.phase.take() else {
+                return Ok(Step::Done);
+            };
+            self.give_back(phase.ctx);
+            shared.with_state(|st| st.rendering = false);
+            self.finished = true;
+            phase.ticket.failed(format!("the GPU readback failed: {e}"));
+            shared.advance();
+            return Ok(Step::Done);
+        }
         phase.next += 1;
         if phase.next < phase.tiles.len() {
             return Ok(Step::Yield);

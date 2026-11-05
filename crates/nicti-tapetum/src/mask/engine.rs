@@ -791,7 +791,15 @@ impl MaskEngine {
             self.bases_kernels
                 .thumb(gpu, enc, &guide.view, fextent, &thumb);
         });
-        let airlight = bases::estimate_airlight(&thumb.read(gpu), tw as usize, th as usize);
+        // A failed readback must not poison the cache: fall back to a white airlight for this
+        // frame only (a mild dehaze rather than a wrong one) and rebuild next time.
+        let (airlight, cacheable) = match thumb.try_read(gpu) {
+            Ok(pixels) => (
+                bases::estimate_airlight(&pixels, tw as usize, th as usize),
+                true,
+            ),
+            Err(_) => ([1.0; 3], false),
+        };
 
         let g = self.guide_luma_at(gpu, cx, (bw, bh));
         let scratch = FieldTexture::new(gpu, bw, bh);
@@ -821,7 +829,9 @@ impl MaskEngine {
             transmission: Arc::new(refined),
             airlight,
         };
-        self.haze_cache.put(key, state.clone());
+        if cacheable {
+            self.haze_cache.put(key, state.clone());
+        }
         state
     }
 

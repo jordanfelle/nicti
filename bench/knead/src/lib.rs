@@ -13,7 +13,7 @@ use image::RgbImage;
 use nicti_cornea::{LibRawDecoder, LinearFrame, RawDecoder};
 use nicti_tapetum::coat::{ExposureParams, LensParams, ToneParams, VibranceParams, WbParams};
 use nicti_tapetum::color;
-use nicti_tapetum::frame::{read_frame, Extent, FrameTexture};
+use nicti_tapetum::frame::{try_read_frame, Extent, FrameTexture};
 use nicti_tapetum::geometry::{self, Affine2D};
 use nicti_tapetum::gpu::{GpuContext, GpuPreference};
 use nicti_tapetum::graph::RenderGraph;
@@ -199,7 +199,7 @@ impl RealRender {
     /// golden comparison or a `.png` dump.
     pub fn render_to_image(&self) -> anyhow::Result<RgbImage> {
         let output = self.render()?;
-        let pixels = read_frame(&self.gpu, &output);
+        let pixels = try_read_frame(&self.gpu, &output)?;
         let mut img = RgbImage::new(self.extent.width, self.extent.height);
         for (i, px) in pixels.iter().enumerate() {
             let rgb = geometry::output_encode([px[0], px[1], px[2]]);

@@ -1151,7 +1151,15 @@ impl DevelopEngine {
     /// view's small synthetic extent (see this module's own doc comment for why a full-res photo
     /// would need a different, throttled/GPU approach instead).
     pub fn histogram(&self, frame: &FrameTexture) -> Histogram {
-        let pixels = nicti_tapetum::frame::read_frame(&self.gpu, frame);
+        // A failed readback degrades to an empty histogram (display only; Auto tone uses
+        // `try_histogram` so it never edits from fake data).
+        self.try_histogram(frame)
+            .unwrap_or_else(|| histogram::from_display_pixels(&[]))
+    }
+
+    /// [`Self::histogram`], or `None` when the GPU readback fails.
+    pub fn try_histogram(&self, frame: &FrameTexture) -> Option<Histogram> {
+        let pixels = nicti_tapetum::frame::try_read_frame(&self.gpu, frame).ok()?;
         let display: Vec<[f32; 4]> = pixels
             .iter()
             .map(|p| {
@@ -1159,7 +1167,7 @@ impl DevelopEngine {
                 [encoded[0], encoded[1], encoded[2], p[3]]
             })
             .collect();
-        histogram::from_display_pixels(&display)
+        Some(histogram::from_display_pixels(&display))
     }
 
     /// One-click Auto tone (#46): renders at default params (the same image ADR-0099 analyzes),
@@ -1180,8 +1188,14 @@ impl DevelopEngine {
         let was_before = dv.show_before;
         dv.show_before = true;
         let default_render = self.render(dv);
-        let hist = self.histogram(&default_render);
+        let hist = self.try_histogram(&default_render);
         dv.show_before = was_before;
+        let Some(hist) = hist else {
+            return AutoApplied::Skipped {
+                reason: AutoReason::ReadbackFailed,
+                low_confidence: false,
+            };
+        };
 
         let outcome = nicti_tapetum::perk::estimate(&hist);
         let (exposure, tone) = match outcome {
@@ -1236,7 +1250,12 @@ impl DevelopEngine {
         dv.show_before = was_before;
         dv.uncropped_preview = was_uncropped;
 
-        let pixels = nicti_tapetum::frame::read_frame(&self.gpu, &uncropped);
+        let Ok(pixels) = nicti_tapetum::frame::try_read_frame(&self.gpu, &uncropped) else {
+            return AutoApplied::Skipped {
+                reason: AutoReason::ReadbackFailed,
+                low_confidence: false,
+            };
+        };
         let display: Vec<[f32; 4]> = pixels
             .iter()
             .map(|p| {
@@ -1279,7 +1298,10 @@ impl DevelopEngine {
 impl DevelopEngine {
     /// Renders the whole frame with no crop, straighten or Upright applied (so detection isn't
     /// biased by an existing correction) as display-encoded pixels.
-    fn render_for_upright_analysis(&mut self, dv: &mut DevelopDoc) -> (Vec<[f32; 4]>, u32, u32) {
+    fn render_for_upright_analysis(
+        &mut self,
+        dv: &mut DevelopDoc,
+    ) -> Option<(Vec<[f32; 4]>, u32, u32)> {
         let (was_before, was_uncropped, was_keep) = (
             dv.show_before,
             dv.uncropped_preview,
@@ -1292,7 +1314,7 @@ impl DevelopEngine {
         dv.show_before = was_before;
         dv.uncropped_preview = was_uncropped;
         dv.uncropped_keeps_upright = was_keep;
-        let pixels = nicti_tapetum::frame::read_frame(&self.gpu, &uncropped);
+        let pixels = nicti_tapetum::frame::try_read_frame(&self.gpu, &uncropped).ok()?;
         let display = pixels
             .iter()
             .map(|p| {
@@ -1300,7 +1322,7 @@ impl DevelopEngine {
                 [e[0], e[1], e[2], p[3]]
             })
             .collect();
-        (display, uncropped.extent.width, uncropped.extent.height)
+        Some((display, uncropped.extent.width, uncropped.extent.height))
     }
 
     /// Auto Upright (#427): detects lines on the uncorrected frame and writes the perspective
@@ -1313,7 +1335,12 @@ impl DevelopEngine {
                 low_confidence: false,
             };
         }
-        let (display, w, h) = self.render_for_upright_analysis(dv);
+        let Some((display, w, h)) = self.render_for_upright_analysis(dv) else {
+            return AutoApplied::Skipped {
+                reason: AutoReason::ReadbackFailed,
+                low_confidence: false,
+            };
+        };
         let focal = dv.upright_focal_px();
         dv.apply_upright_outcome(upright::analyze(&display, w, h, focal, mode), w, h)
     }

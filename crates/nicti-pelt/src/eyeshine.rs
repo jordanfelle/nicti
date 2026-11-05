@@ -847,7 +847,7 @@ impl RenderJob {
         }
         // One tile per step (ADR-0054's ~16 ms chunks).
         let tile = phase.tiles[phase.next];
-        TiledRender::new(
+        let stepped = TiledRender::new(
             self.task.env.gpu.clone(),
             &phase.live,
             &phase.ctx.crop_kernel,
@@ -855,6 +855,17 @@ impl RenderJob {
             vec![tile],
         )
         .step(&mut phase.sink);
+        if let Err(e) = stepped {
+            // A failed GPU readback leaves a hole in the preview: never store it.
+            let Some(phase) = self.phase.take() else {
+                return Ok(Step::Done);
+            };
+            self.give_back(phase.ctx);
+            phase
+                .settle
+                .settle(T2Outcome::Retry(format!("the GPU readback failed: {e}")));
+            return Ok(Step::Done);
+        }
         phase.next += 1;
         if phase.next < phase.tiles.len() {
             return Ok(Step::Yield);

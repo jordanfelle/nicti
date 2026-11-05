@@ -211,6 +211,11 @@ impl ThumbTexture {
 
     /// Reads the thumbnail back as row-major RGBA.
     pub fn read(&self, gpu: &GpuContext) -> Vec<[f32; 4]> {
+        crate::gpu::expect_readback(self.try_read(gpu))
+    }
+
+    /// [`Self::read`] that reports a failed readback instead of panicking.
+    pub fn try_read(&self, gpu: &GpuContext) -> Result<Vec<[f32; 4]>, crate::gpu::ReadbackError> {
         let unpadded = self.width * 16;
         let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -245,7 +250,7 @@ impl ThumbTexture {
             },
         );
         gpu.queue.submit(Some(enc.finish()));
-        let raw = crate::gpu::read_mapped(gpu, &staging);
+        let raw = crate::gpu::read_mapped(gpu, &staging)?;
         let mut out = Vec::with_capacity((self.width * self.height) as usize);
         for y in 0..self.height {
             let start = (y * padded) as usize;
@@ -254,7 +259,7 @@ impl ThumbTexture {
                 out.push([px[0], px[1], px[2], px[3]]);
             }
         }
-        out
+        Ok(out)
     }
 }
 
