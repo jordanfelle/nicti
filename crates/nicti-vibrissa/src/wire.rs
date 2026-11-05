@@ -262,6 +262,7 @@ mod tests {
         let d = std::env::temp_dir().join(format!("vib-priv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
         let body = r#"{"port":4000,"token":"ab","pid":7}"#;
         let f = d.join("t.json");
         std::fs::write(&f, body).unwrap();

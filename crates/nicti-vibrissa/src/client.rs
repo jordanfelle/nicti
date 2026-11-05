@@ -278,6 +278,11 @@ mod tests {
         let d = std::env::temp_dir().join(format!("vib-c-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         d
     }
 
