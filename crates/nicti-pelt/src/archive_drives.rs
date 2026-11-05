@@ -9,7 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use nicti_lair::thumb_sidecar::SidecarCodec;
 use nicti_lair::volume::FolderVolume;
@@ -18,12 +20,28 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Saved {
     archive_locations: Vec<String>,
-    /// Identity keys of whole volumes flagged as archive drives (#392). Absent in older files.
-    #[serde(default)]
-    archive_volumes: Vec<String>,
+    /// Whole volumes flagged as archive drives (#392). Absent in older files; a junk element is
+    /// skipped rather than discarding the rest of the file.
+    #[serde(default, deserialize_with = "lenient_volumes")]
+    archive_volumes: Vec<ArchiveVolume>,
     /// Thumbnail sidecar codec for folders archived from now on (#393). Absent in older files.
     #[serde(default, deserialize_with = "lenient_codec")]
     sidecar_codec: SidecarCodec,
+}
+
+/// A whole drive flagged as an archive: its identity key, and the path it was flagged under (kept
+/// so an offline drive can still be recognised, and unflagged, by that path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ArchiveVolume {
+    key: String,
+    path: String,
+}
+
+fn lenient_volumes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ArchiveVolume>, D::Error> {
+    let v = Vec::<serde_json::Value>::deserialize(d).unwrap_or_default();
+    Ok(v.into_iter()
+        .filter_map(|e| serde_json::from_value(e).ok())
+        .collect())
 }
 
 /// An unknown or hand-edited codec value must not discard the archive-location list that shares
@@ -39,11 +57,18 @@ type IdentifyFolder = Arc<dyn Fn(&Path) -> Option<FolderVolume> + Send + Sync>;
 pub struct ArchiveDrives {
     file: Option<PathBuf>,
     locations: Vec<String>,
-    /// Volume identity keys (`volume::identity_key`) of whole archive drives.
-    volumes: Vec<String>,
+    /// Whole archive drives (identity key + the path they were flagged under).
+    volumes: Vec<ArchiveVolume>,
     codec: SidecarCodec,
     identify: IdentifyFolder,
+    /// Recent lookups by normalised path. The folder panel asks about every drive on every frame
+    /// and a real lookup enumerates the volumes (disk I/O), so answers are reused for
+    /// [`LOOKUP_TTL`]; [`ArchiveDrives::set`] always looks fresh.
+    cache: Mutex<HashMap<String, (Instant, Option<FolderVolume>)>>,
 }
+
+/// How long a volume lookup is reused. Drive letters change on a replug, not between frames.
+const LOOKUP_TTL: Duration = Duration::from_secs(5);
 
 impl std::fmt::Debug for ArchiveDrives {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -63,6 +88,7 @@ impl Default for ArchiveDrives {
             volumes: Vec::new(),
             codec: SidecarCodec::default(),
             identify: Arc::new(nicti_lair::volume::identify_folder),
+            cache: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -119,11 +145,32 @@ impl ArchiveDrives {
         self
     }
 
-    /// The saved identity key of the volume `path` is on, when that volume is flagged.
+    /// The volume `path` is on, cached for [`LOOKUP_TTL`].
+    fn lookup(&self, path: &Path) -> Option<FolderVolume> {
+        let key = norm(&path.to_string_lossy());
+        let now = Instant::now();
+        if let Ok(cache) = self.cache.lock() {
+            if let Some((at, found)) = cache.get(&key) {
+                if now.duration_since(*at) < LOOKUP_TTL {
+                    return found.clone();
+                }
+            }
+        }
+        let found = (self.identify)(path);
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(key, (now, found.clone()));
+        }
+        found
+    }
+
+    /// Whether `path` is on a flagged volume. Never looks anything up while nothing is flagged.
     fn volume_flagged(&self, path: &Path) -> bool {
         !self.volumes.is_empty()
-            && (self.identify)(path)
-                .is_some_and(|fv| self.volumes.contains(&fv.identity.identity_key))
+            && self.lookup(path).is_some_and(|fv| {
+                self.volumes
+                    .iter()
+                    .any(|v| v.key == fv.identity.identity_key)
+            })
     }
 
     /// `true` if `path` is, or is inside, an archive location.
@@ -143,8 +190,11 @@ impl ArchiveDrives {
         let l = norm(location);
         self.locations.iter().any(|x| norm(x) == l)
             // A flagged whole drive reads as flagged under whatever letter it has now.
-            || (self.volume_flagged(Path::new(location))
-                && (self.identify)(Path::new(location)).is_some_and(|fv| fv.is_mount_root))
+            || (!self.volumes.is_empty()
+                && self.lookup(Path::new(location)).is_some_and(|fv| {
+                    fv.is_mount_root
+                        && self.volumes.iter().any(|v| v.key == fv.identity.identity_key)
+                }))
     }
 
     /// Adds or removes `location` and saves. The in-memory change sticks even if the save fails.
@@ -155,21 +205,41 @@ impl ArchiveDrives {
                 "the filesystem root can't be an archive drive; pick a mounted drive or folder",
             ));
         }
-        // A whole, identifiable drive is flagged by volume identity (drops any older path entry for
-        // the same location); everything else keeps the path rule.
+        // A whole, identifiable drive is flagged by identity *and* by the path it was flagged
+        // under, so while it is offline (or unreadable) the old path rule still recognises it and
+        // it can still be unflagged. Always looked up fresh.
+        self.cache.lock().map(|mut c| c.clear()).ok();
         let drive = (self.identify)(Path::new(location)).filter(|fv| fv.is_mount_root);
         self.locations.retain(|x| norm(x) != l);
-        if let Some(fv) = drive {
-            let key = fv.identity.identity_key;
-            self.volumes.retain(|k| *k != key);
-            if archive {
-                self.volumes.push(key);
-            }
-            self.volumes.sort();
-        } else if archive {
+        self.volumes.retain(|v| norm(&v.path) != l);
+        if let Some(fv) = &drive {
+            let key = &fv.identity.identity_key;
+            // Drop everything else on record for this same disk (another letter, an older path
+            // entry), so one click flags or unflags it as a whole.
+            self.volumes.retain(|v| v.key != *key);
+            let same_disk = |p: &str| {
+                (self.identify)(Path::new(p))
+                    .is_some_and(|f| f.is_mount_root && f.identity.identity_key == *key)
+            };
+            let stale: Vec<String> = self
+                .locations
+                .iter()
+                .filter(|x| same_disk(x))
+                .cloned()
+                .collect();
+            self.locations.retain(|x| !stale.contains(x));
+        }
+        if archive {
             self.locations.push(location.to_string());
+            if let Some(fv) = drive {
+                self.volumes.push(ArchiveVolume {
+                    key: fv.identity.identity_key,
+                    path: location.to_string(),
+                });
+            }
         }
         self.locations.sort();
+        self.volumes.sort_by(|a, b| a.key.cmp(&b.key));
         self.save()
     }
 
@@ -284,11 +354,15 @@ mod tests {
         assert!(a.is_archive(Path::new("E:\\events\\x")));
         assert!(a.is_location("E:\\"));
         assert!(!a.is_archive(Path::new("C:\\events")));
-        // It is recorded by identity, not as a path.
-        assert!(a.locations.is_empty() && a.volumes == ["K1"]);
-        // Unflagging under the new letter clears the volume.
+        // A folder on the flagged disk is archive, but it is not itself the flagged *location*.
+        assert!(a.is_archive(Path::new("E:\\events")));
+        assert!(!a.is_location("E:\\events"));
+        assert_eq!(a.volumes.len(), 1);
+        // Unflagging under the new letter clears the disk, whatever letter it was flagged under.
         a.set("E:\\", false).unwrap();
         assert!(!a.is_archive(Path::new("D:\\events\\x")));
+        assert!(!a.is_archive(Path::new("E:\\events\\x")));
+        assert!(a.locations.is_empty() && a.volumes.is_empty());
     }
 
     #[test]
@@ -303,30 +377,84 @@ mod tests {
     }
 
     #[test]
-    fn an_older_path_entry_for_a_drive_is_replaced_by_its_identity_when_reflagged() {
-        let mut a = ArchiveDrives::with_locations(&["D:\\"]).with_identify(fake_identify);
-        assert!(a.is_archive(Path::new("D:\\x")));
+    fn an_offline_flagged_drive_is_still_an_archive_and_can_still_be_unflagged() {
+        let mut a = ArchiveDrives::default().with_identify(fake_identify);
         a.set("D:\\", true).unwrap();
-        assert!(a.locations.is_empty() && a.volumes == ["K1"]);
-        assert!(a.is_archive(Path::new("E:\\x")));
+        // Unplugged: identity can't be read, so only the saved path speaks, as it always did.
+        a.identify = Arc::new(|_| None);
+        a.cache.lock().unwrap().clear();
+        assert!(a.is_archive(Path::new("D:\\events\\x")));
+        assert!(a.is_location("D:\\"));
+        a.set("D:\\", false).unwrap();
+        assert!(a.locations.is_empty() && a.volumes.is_empty());
+        // Back online: it is no longer an archive.
+        a.identify = Arc::new(fake_identify);
+        a.cache.lock().unwrap().clear();
+        assert!(!a.is_archive(Path::new("E:\\x")));
     }
 
     #[test]
-    fn volumes_persist_and_an_unidentifiable_host_ignores_them() {
+    fn older_path_entries_for_one_disk_are_replaced_as_a_whole() {
+        // Two letters of the same disk were flagged by path before identity existed.
+        let mut a = ArchiveDrives::with_locations(&["D:\\", "E:\\", "C:\\keep"])
+            .with_identify(fake_identify);
+        a.set("D:\\", true).unwrap();
+        assert_eq!(a.locations, ["C:\\keep", "D:\\"]);
+        assert_eq!(a.volumes.len(), 1);
+        a.set("D:\\", false).unwrap();
+        assert_eq!(a.locations, ["C:\\keep"]);
+        assert!(!a.is_archive(Path::new("E:\\x")));
+    }
+
+    #[test]
+    fn volumes_persist_survive_junk_and_a_host_without_identity_ignores_them() {
         let d = tempfile::tempdir().unwrap();
         let cat = d.path().join("cat.db");
         let mut a = ArchiveDrives::load(&cat).with_identify(fake_identify);
         a.set("D:\\", true).unwrap();
         let again = ArchiveDrives::load(&cat).with_identify(fake_identify);
         assert!(again.is_archive(Path::new("E:\\x")));
-        // The default lookup finds no identity off Windows: the saved key matches nothing, and the
-        // path rule is untouched.
-        let plain = ArchiveDrives::load(&cat);
+        // No identity (the default lookup off Windows): the saved path rule still answers.
         #[cfg(not(windows))]
-        assert!(!plain.is_archive(Path::new("E:\\x")));
-        let _ = plain;
-        // A file written before volumes existed still loads.
+        {
+            let plain = ArchiveDrives::load(&cat);
+            assert!(!plain.is_archive(Path::new("E:\\x")));
+            assert!(plain.is_archive(Path::new("D:\\x")));
+        }
+        // A junk element costs only itself; an older file still loads.
+        std::fs::write(
+            file_for(&cat),
+            r#"{"archive_locations":["/a"],"archive_volumes":[123,null,{"key":"K1","path":"D:\\"}]}"#,
+        )
+        .unwrap();
+        let b = ArchiveDrives::load(&cat);
+        assert!(b.is_location("/a") && b.volumes.len() == 1);
         std::fs::write(file_for(&cat), r#"{"archive_locations":["/a"]}"#).unwrap();
         assert!(ArchiveDrives::load(&cat).is_location("/a"));
+    }
+
+    #[test]
+    fn volume_lookups_are_cached_and_never_made_while_nothing_is_flagged() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let mut a = ArchiveDrives::default().with_identify(move |p| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            fake_identify(p)
+        });
+        // Nothing flagged: the folder panel's per-frame questions cost no lookup at all.
+        for _ in 0..50 {
+            assert!(!a.is_location("D:\\"));
+            assert!(!a.is_archive(Path::new("D:\\x")));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        a.set("D:\\", true).unwrap();
+        let after_set = calls.load(Ordering::SeqCst);
+        // Flagged: repeated per-frame questions about the same paths reuse one lookup each.
+        for _ in 0..50 {
+            assert!(a.is_location("E:\\"));
+            assert!(a.is_archive(Path::new("E:\\x")));
+        }
+        assert!(calls.load(Ordering::SeqCst) - after_set <= 2);
     }
 }
