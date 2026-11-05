@@ -67,10 +67,17 @@ fn mean_rgb(pixels: &[[f32; 4]]) -> [f32; 3] {
 }
 
 /// The rendered frame at normalized `(nx, ny)`, as linear working-space (ProPhoto) RGB.
-pub fn sample_rendered(gpu: &GpuContext, frame: &FrameTexture, nx: f32, ny: f32) -> [f32; 3] {
+pub fn sample_rendered(
+    gpu: &GpuContext,
+    frame: &FrameTexture,
+    nx: f32,
+    ny: f32,
+) -> Option<[f32; 3]> {
     let (x, y, w, h) = sample_window(frame.extent.width, frame.extent.height, nx, ny);
-    // A failed readback samples as black rather than panicking the UI.
-    mean_rgb(&try_read_frame_region(gpu, frame, x, y, w, h).unwrap_or_default())
+    // A failed readback yields no sample: black would be stored as a real Point Color target.
+    try_read_frame_region(gpu, frame, x, y, w, h)
+        .ok()
+        .map(|px| mean_rgb(&px))
 }
 
 /// Which sample the Point Color section is editing (clamped by the caller to the live count).
@@ -170,7 +177,13 @@ pub fn handle_viewport(
     };
     // The frame on screen is the one sampled, so the click's position on it is the position in it.
     let n = to_norm(develop.view_orient(), rect, develop.display_extent(), p);
-    let working = sample_rendered(gpu, frame, n[0], n[1]);
+    let Some(working) = sample_rendered(gpu, frame, n[0], n[1]) else {
+        set_status(
+            ui.ctx(),
+            Some("Could not read the colour from the GPU; try again.".into()),
+        );
+        return;
+    };
     let mut params: PointColorParams = develop.stage_params(POINT_COLOR);
     match add_sample(&mut params, sample_from_working(working)) {
         Some(i) => {

@@ -863,7 +863,7 @@ impl RenderJob {
             self.give_back(phase.ctx);
             phase
                 .settle
-                .settle(T2Outcome::Failed(format!("the GPU readback failed: {e}")));
+                .settle(T2Outcome::Retry(format!("the GPU readback failed: {e}")));
             return Ok(Step::Done);
         }
         phase.next += 1;

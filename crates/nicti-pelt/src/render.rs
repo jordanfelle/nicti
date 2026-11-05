@@ -1151,8 +1151,15 @@ impl DevelopEngine {
     /// view's small synthetic extent (see this module's own doc comment for why a full-res photo
     /// would need a different, throttled/GPU approach instead).
     pub fn histogram(&self, frame: &FrameTexture) -> Histogram {
-        // A failed readback degrades to an empty histogram rather than panicking the UI.
-        let pixels = nicti_tapetum::frame::try_read_frame(&self.gpu, frame).unwrap_or_default();
+        // A failed readback degrades to an empty histogram (display only; Auto tone uses
+        // `try_histogram` so it never edits from fake data).
+        self.try_histogram(frame)
+            .unwrap_or_else(|| histogram::from_display_pixels(&[]))
+    }
+
+    /// [`Self::histogram`], or `None` when the GPU readback fails.
+    pub fn try_histogram(&self, frame: &FrameTexture) -> Option<Histogram> {
+        let pixels = nicti_tapetum::frame::try_read_frame(&self.gpu, frame).ok()?;
         let display: Vec<[f32; 4]> = pixels
             .iter()
             .map(|p| {
@@ -1160,7 +1167,7 @@ impl DevelopEngine {
                 [encoded[0], encoded[1], encoded[2], p[3]]
             })
             .collect();
-        histogram::from_display_pixels(&display)
+        Some(histogram::from_display_pixels(&display))
     }
 
     /// One-click Auto tone (#46): renders at default params (the same image ADR-0099 analyzes),
@@ -1181,8 +1188,14 @@ impl DevelopEngine {
         let was_before = dv.show_before;
         dv.show_before = true;
         let default_render = self.render(dv);
-        let hist = self.histogram(&default_render);
+        let hist = self.try_histogram(&default_render);
         dv.show_before = was_before;
+        let Some(hist) = hist else {
+            return AutoApplied::Skipped {
+                reason: AutoReason::ReadbackFailed,
+                low_confidence: false,
+            };
+        };
 
         let outcome = nicti_tapetum::perk::estimate(&hist);
         let (exposure, tone) = match outcome {
