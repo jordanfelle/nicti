@@ -674,8 +674,11 @@ impl Carry {
         renamed: bool,
     ) -> Option<CarryOutcome> {
         let Some(move_id) = self.move_id else {
-            return Some(self.abort_failed(
-                "internal error: the move journal was not open before commit".into(),
+            // Never `abort_failed` here: after a rename the destination is the only copy of the
+            // user's files, and `discard_dest` would delete it. Report and leave everything.
+            return Some(CarryOutcome::Failed(
+                "internal error: the move journal was not open before commit; nothing was removed"
+                    .into(),
             ));
         };
         let mut hashes = Vec::new();
@@ -1425,6 +1428,28 @@ mod tests {
             },
             1,
         )
+    }
+
+    #[test]
+    fn a_commit_without_an_open_journal_reports_and_never_deletes_the_destination() {
+        // After a rename the destination is the only copy of the user's files. If the journal id
+        // were ever missing at commit, the old code panicked (Drop recovery then repointed the
+        // catalog); the replacement must not run `discard_dest`, which would delete that copy.
+        let f = fixture();
+        let mut c = carry(&f, false);
+        let dest = f.dest_parent.join("event-2026");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("a.NEF"), b"the only copy").unwrap();
+        c.move_id = None;
+        c.phase = Phase::Commit {
+            done: Vec::new(),
+            dirs: Vec::new(),
+            renamed: true,
+        };
+        c.dest = dest.clone();
+        let outcome = c.step().expect("commit reports immediately");
+        assert!(matches!(outcome, CarryOutcome::Failed(m) if m.contains("nothing was removed")));
+        assert_eq!(fs::read(dest.join("a.NEF")).unwrap(), b"the only copy");
     }
 
     fn run(c: &mut Carry) -> CarryOutcome {

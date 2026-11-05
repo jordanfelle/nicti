@@ -2113,49 +2113,56 @@ impl CatalogStore for SqliteCatalog {
         } else {
             None
         };
-        let result = (|| -> Result<(), CatalogError> {
-            let tx = conn.transaction()?;
-            let bulk = items.len() >= BULK_META_ROWS;
-            let ids: Vec<i64> = if bulk {
-                items.iter().map(|(id, _)| *id).collect()
-            } else {
-                Vec::new()
-            };
-            let write = || -> Result<(), CatalogError> {
-                // One guarded statement per column (#499): SQLite rewrites every index containing a
-                // column in the SET list whether or not the value changed, and fires the facet
-                // trigger's row machinery on `rating`. Guarding with `IS NOT` makes an unchanged
-                // column (or a whole no-op rewrite) cost one PK lookup instead of index churn.
-                let mut rating = tx.prepare_cached(
-                    "UPDATE asset SET rating = ?1 WHERE id = ?2 AND rating IS NOT ?1",
-                )?;
-                let mut flag = tx.prepare_cached(
-                    "UPDATE asset SET flag = ?1 WHERE id = ?2 AND flag IS NOT ?1",
-                )?;
-                let mut label = tx.prepare_cached(
-                    "UPDATE asset SET label = ?1 WHERE id = ?2 AND label IS NOT ?1",
-                )?;
-                for (id, meta) in items {
-                    rating.execute(params![meta.rating, id])?;
-                    flag.execute(params![meta.flag, id])?;
-                    label.execute(params![meta.label, id])?;
+        // A panic in the batch must not leave the borrowed cache on this (recovered) connection
+        // for the rest of the process: restore it, then let the panic continue.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<(), CatalogError> {
+                let tx = conn.transaction()?;
+                let bulk = items.len() >= BULK_META_ROWS;
+                let ids: Vec<i64> = if bulk {
+                    items.iter().map(|(id, _)| *id).collect()
+                } else {
+                    Vec::new()
+                };
+                let write = || -> Result<(), CatalogError> {
+                    // One guarded statement per column (#499): SQLite rewrites every index containing a
+                    // column in the SET list whether or not the value changed, and fires the facet
+                    // trigger's row machinery on `rating`. Guarding with `IS NOT` makes an unchanged
+                    // column (or a whole no-op rewrite) cost one PK lookup instead of index churn.
+                    let mut rating = tx.prepare_cached(
+                        "UPDATE asset SET rating = ?1 WHERE id = ?2 AND rating IS NOT ?1",
+                    )?;
+                    let mut flag = tx.prepare_cached(
+                        "UPDATE asset SET flag = ?1 WHERE id = ?2 AND flag IS NOT ?1",
+                    )?;
+                    let mut label = tx.prepare_cached(
+                        "UPDATE asset SET label = ?1 WHERE id = ?2 AND label IS NOT ?1",
+                    )?;
+                    for (id, meta) in items {
+                        rating.execute(params![meta.rating, id])?;
+                        flag.execute(params![meta.flag, id])?;
+                        label.execute(params![meta.label, id])?;
+                    }
+                    Ok(())
+                };
+                // A bulk mark moves the facet counts in one aggregated step, not one trigger per row (#580).
+                if bulk {
+                    with_facet_delta(&tx, &ids, write)?;
+                } else {
+                    write()?;
                 }
+                tx.commit()?;
                 Ok(())
-            };
-            // A bulk mark moves the facet counts in one aggregated step, not one trigger per row (#580).
-            if bulk {
-                with_facet_delta(&tx, &ids, write)?;
-            } else {
-                write()?;
-            }
-            tx.commit()?;
-            Ok(())
-        })();
+            },
+        ));
         if let Some(prior) = prior_cache {
             // Give the memory back; best effort, so a failure here can't mask a committed batch.
             let _ = conn.pragma_update(None, "cache_size", prior);
         }
-        result
+        match outcome {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     fn begin_delete_items(&self, items: &[(i64, String)]) -> Result<(), CatalogError> {

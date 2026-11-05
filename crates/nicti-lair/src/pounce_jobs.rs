@@ -25,7 +25,8 @@ use crate::verify::{Baseline, BaselineReport, Verify, VerifyReport};
 use crate::{CatalogStore, SqliteCatalog};
 
 /// What a job's `step` reports when Pounce steps it again after it already returned `Done` (which
-/// Pounce never does); an error instead of a panic, so a scheduler bug cannot kill a worker.
+/// Pounce never does); an error instead of a panic. (Pounce already contains a panicking `step` as
+/// a `Failed` job, so this changes the message, not the outcome.)
 fn after_done() -> JobError {
     JobError::new("the job was stepped again after it already reported Done")
 }
