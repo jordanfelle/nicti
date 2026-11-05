@@ -454,10 +454,11 @@ fn show_cell(
     // For the control channel (#649): `cell:<photo id>`, the part of the cell that is on screen
     // (a cell scrolled half out of view is clicked in its visible half).
     if crate::widgets::enabled(ui.ctx()) {
-        crate::widgets::register(
+        crate::widgets::register_widget(
             ui.ctx(),
             &format!("cell:{id}"),
             rect.intersect(ui.clip_rect()),
+            response.id,
         );
     }
     // Cells are custom-painted, so without this they have no accessibility node: a
