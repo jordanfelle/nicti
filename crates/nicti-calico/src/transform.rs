@@ -335,6 +335,13 @@ fn display_black_linear(display_profile: &ColorProfile) -> [f32; 3] {
     }
 }
 
+/// Whether compensation would change anything for this monitor profile: its measured black is
+/// above true black. Cheap (one probe transform), so callers can skip the compensated path -- and
+/// its cost -- for the common true-black monitor.
+pub fn has_lifted_black(display_profile: &ColorProfile) -> bool {
+    display_black_linear(display_profile) != [0.0; 3]
+}
+
 /// Maps working black to the display's black and keeps white: `bp + v * (1 - bp)` on a linear
 /// working channel. Applied to the bake's input, so the shadows the monitor can show are spread
 /// over its real range instead of the part below its black point collapsing to one value.
@@ -429,14 +436,31 @@ pub(crate) fn equivalent_space(profile: &ColorProfile) -> Option<OutputSpace> {
     })
 }
 
+/// The shaper (gamma 1/1.8) of every 16-bit linear value, built once.
+pub fn shaper_table_u16() -> &'static [f32] {
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..=65535u32)
+            .map(|i| (f64::from(i) / 65535.0).powf(1.0 / PROPHOTO_GAMMA) as f32)
+            .collect()
+    })
+}
+
 impl Lut3d {
     /// Trilinear sample, matching the shader: shaper (gamma 1/1.8 on the clamped input), then
     /// texel-centered trilinear filtering with clamp-to-edge addressing.
     pub fn sample(&self, working_linear: [f32; 3]) -> [f32; 3] {
+        self.sample_shaped(
+            working_linear.map(|c| f64::from(c).clamp(0.0, 1.0).powf(1.0 / PROPHOTO_GAMMA) as f32),
+        )
+    }
+
+    /// [`Self::sample`] for input that is already shaped (gamma 1/1.8 applied, in 0..=1): lets a
+    /// caller with a small integer domain (16-bit linear) look the shaper up instead of doing a
+    /// `powf` per channel per pixel.
+    pub fn sample_shaped(&self, shaped: [f32; 3]) -> [f32; 3] {
         let n = self.size;
-        let coord = working_linear.map(|c| {
-            f64::from(c).clamp(0.0, 1.0).powf(1.0 / PROPHOTO_GAMMA) as f32 * (n - 1) as f32
-        });
+        let coord = shaped.map(|c| c.clamp(0.0, 1.0) * (n - 1) as f32);
         let base = coord.map(|c| (c.floor() as usize).min(n - 2));
         let frac = [
             coord[0] - base[0] as f32,

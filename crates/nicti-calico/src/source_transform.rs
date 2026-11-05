@@ -11,7 +11,10 @@
 
 use crate::icc::color_profile;
 use crate::space::OutputSpace;
-use crate::transform::{equivalent_space, DisplayKind, DisplayProfile, DisplayTransform, Lut3d};
+use crate::transform::{
+    equivalent_space, has_lifted_black, shaper_table_u16, DisplayKind, DisplayProfile,
+    DisplayTransform, Lut3d,
+};
 use moxcms::{ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformOptions};
 use moxcms::{Transform16BitExecutor, Transform8BitExecutor};
 use std::collections::hash_map::RandomState;
@@ -64,13 +67,21 @@ impl SourceTransforms {
     /// match the same photo in the Develop view.
     pub fn new_with(display: &DisplayProfile, bpc: bool) -> Self {
         let bpc_lut = if bpc {
-            // Same panic guard as every other `moxcms` use on an untrusted profile.
-            std::panic::catch_unwind(|| match DisplayTransform::build_with(display, None, true) {
-                Ok(DisplayTransform {
-                    kind: DisplayKind::Lut(lut),
-                    ..
-                }) => Some(Arc::new(lut)),
-                _ => None,
+            // Same panic guard as every other `moxcms` use on an untrusted profile. Only a monitor
+            // whose black really is lifted gets the (slower, LUT-based) compensated path.
+            std::panic::catch_unwind(|| {
+                if let DisplayProfile::Icc(p) = display {
+                    if !has_lifted_black(p) {
+                        return None;
+                    }
+                }
+                match DisplayTransform::build_with(display, None, true) {
+                    Ok(DisplayTransform {
+                        kind: DisplayKind::Lut(lut),
+                        ..
+                    }) => Some(Arc::new(lut)),
+                    _ => None,
+                }
             })
             .ok()
             .flatten()
@@ -85,13 +96,26 @@ impl SourceTransforms {
     pub fn with_lut_bpc(profile: &ColorProfile, bpc: bool) -> Result<Self, moxcms::CmsError> {
         let t = DisplayTransform::with_lut_bpc(profile, None, bpc)?;
         let lut = match t.kind {
-            DisplayKind::Lut(lut) => Some(Arc::new(lut)),
+            DisplayKind::Lut(lut) if bpc && has_lifted_black(profile) => Some(Arc::new(lut)),
             _ => None,
         };
         Ok(Self::build_new(
             &DisplayProfile::Icc(Arc::new(profile.clone())),
             lut,
         ))
+    }
+
+    /// A converter for `display` that compensates through `bpc_lut` -- the BPC-baked LUT the
+    /// caller's display transform already holds, so the 33^3 bake is not repeated. `None` = the
+    /// plain direct transform. Pass a LUT only when compensation applies
+    /// ([`has_lifted_black`]): it makes every preview pixel take the slower two-stage path.
+    pub fn from_bpc_lut(display: &DisplayProfile, bpc_lut: Option<Arc<Lut3d>>) -> Self {
+        Self::build_new(display, bpc_lut)
+    }
+
+    /// Whether this converter compensates (and so differs from a plain one for the same display).
+    pub fn bpc_active(&self) -> bool {
+        self.bpc_lut.is_some()
     }
 
     fn build_new(display: &DisplayProfile, bpc_lut: Option<Arc<Lut3d>>) -> Self {
@@ -226,6 +250,7 @@ fn convert_compensated(
     lut: &Lut3d,
     rgba: &mut [u8],
 ) {
+    let shaper = shaper_table_u16();
     let mut wide = vec![0u16; CHUNK_PIXELS * 4];
     let mut linear = vec![0u16; CHUNK_PIXELS * 3];
     for chunk in rgba.chunks_mut(CHUNK_PIXELS * 4) {
@@ -245,10 +270,10 @@ fn convert_compensated(
             .iter_mut()
             .zip(linear.as_chunks::<3>().0)
         {
-            let out = lut.sample([
-                f32::from(lin[0]) / 65535.0,
-                f32::from(lin[1]) / 65535.0,
-                f32::from(lin[2]) / 65535.0,
+            let out = lut.sample_shaped([
+                shaper[usize::from(lin[0])],
+                shaper[usize::from(lin[1])],
+                shaper[usize::from(lin[2])],
             ]);
             for c in 0..3 {
                 px[c] = (out[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
@@ -540,7 +565,7 @@ mod tests {
         // ...with it they stay distinct and ordered, black stays the darkest the monitor can
         // show, and white stays white.
         let (a, b, c) = (gray(&on, None, 6), gray(&on, None, 14), gray(&on, None, 40));
-        assert!(a < b && b < c, "on: {a} {b} {c}");
+        assert!(a + 2 <= b && b + 2 <= c, "on: {a} {b} {c}");
         assert!(gray(&on, None, 0) < 40, "black");
         assert!(gray(&on, None, 255) >= 253, "white");
     }
@@ -569,26 +594,53 @@ mod tests {
     }
 
     #[test]
-    fn compensation_is_a_no_op_for_a_true_black_monitor_and_off_is_the_plain_transform() {
+    fn a_true_black_monitor_and_a_builtin_display_keep_the_plain_path_byte_for_byte() {
+        // A true-black LUT monitor has nothing to compensate: it must not pay for the two-stage
+        // path (or lose accuracy to the LUT), whatever the flag says.
         let srgb_monitor = ColorProfile::new_srgb();
-        let off = SourceTransforms::with_lut_bpc(&srgb_monitor, false).unwrap();
         let on = SourceTransforms::with_lut_bpc(&srgb_monitor, true).unwrap();
-        for v in [0u8, 5, 30, 128, 255] {
-            let (a, b) = (gray(&off, None, v), gray(&on, None, v));
-            assert!(a.abs_diff(b) <= 1, "v={v}: {a} vs {b}");
-        }
-        // `new_with(.., false)` is `new`, and a built-in display ignores the flag.
+        assert!(!on.bpc_active());
+        let plain = SourceTransforms::new(&DisplayProfile::Icc(Arc::new(srgb_monitor)));
+        let aw = profile_bytes(OutputSpace::AdobeRgb).unwrap();
+        let mut a: Vec<u8> = (0..=255u8).flat_map(|v| [v, 255 - v, v / 2, 255]).collect();
+        let mut b = a.clone();
+        on.convert_rgba8(Some(&aw), &mut a);
+        plain.convert_rgba8(Some(&aw), &mut b);
+        assert_eq!(a, b);
+        // A built-in display ignores the flag too, and `new_with(.., false)` is `new`.
         let p3 = DisplayProfile::Space(OutputSpace::DisplayP3);
         let (x, y) = (
             SourceTransforms::new(&p3),
             SourceTransforms::new_with(&p3, true),
         );
-        let aw = profile_bytes(OutputSpace::AdobeRgb).unwrap();
+        assert!(!y.bpc_active());
         let mut a = vec![200, 40, 90, 255, 10, 220, 30, 255];
         let mut b = a.clone();
         x.convert_rgba8(Some(&aw), &mut a);
         y.convert_rgba8(Some(&aw), &mut b);
         assert_eq!(a, b);
+        // A lifted-black monitor with the option on is the compensated converter; off, it is not.
+        let lifted = lifted_black_monitor(0.02);
+        assert!(SourceTransforms::with_lut_bpc(&lifted, true)
+            .unwrap()
+            .bpc_active());
+        assert!(!SourceTransforms::with_lut_bpc(&lifted, false)
+            .unwrap()
+            .bpc_active());
+    }
+
+    #[test]
+    fn compensation_only_moves_the_shadows_midtones_and_highlights_stay_close_to_the_direct_transform(
+    ) {
+        // The compensated path goes through the 33^3 LUT, so away from the shadows it must stay
+        // within the LUT's own error of the exact direct transform (which has no compensation).
+        let monitor = lifted_black_monitor(0.02);
+        let on = SourceTransforms::with_lut_bpc(&monitor, true).unwrap();
+        let direct = SourceTransforms::new(&DisplayProfile::Icc(Arc::new(monitor)));
+        for v in (96..=255u16).step_by(8) {
+            let (a, b) = (gray(&on, None, v as u8), gray(&direct, None, v as u8));
+            assert!(a.abs_diff(b) <= 8, "v={v}: compensated {a} vs direct {b}");
+        }
     }
 
     #[test]
