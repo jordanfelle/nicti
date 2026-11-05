@@ -33,11 +33,14 @@ const MEAN_LSB: f32 = 0.5;
 const MAX_LSB: f32 = 3.0;
 
 /// Cases known to exceed [`MAX_LSB`] on a single pixel, with the bound they are held to instead.
-/// `tone shadows -1`: at full strength one strongly out-of-gamut pixel (input
-/// [0.52, 0.76, 0.76] -> output [1.0, ~0, 0.95]) differs by 3.6 LSB on the blue channel (GPU
-/// 0.953, CPU 0.939); the mean over the image is 0.03 LSB. Tracked in #701; delete the
-/// entry when it is fixed, and the test then holds the case to [`MAX_LSB`] again.
-const KNOWN_DIVERGENCES: &[(&str, f32)] = &[("tone shadows -1 [camera]", 4.5)];
+/// Empty: the one entry (`tone shadows -1`, #701) was the harness feeding the CPU twin f32 input
+/// while the GPU read the same image through an f16 texture, not a shader difference.
+const KNOWN_DIVERGENCES: &[(&str, f32)] = &[];
+
+/// `v` as the GPU sees it after the upload into an `Rgba16Float` frame.
+fn through_f16(v: f32) -> f32 {
+    half::f16::from_f32(v).to_f32()
+}
 
 const W: u32 = 32;
 const H: u32 = 16;
@@ -331,9 +334,12 @@ fn the_live_suffix_matches_its_cpu_twin_for_every_edit() {
                     failures.push(format!("{label}: a silent no-op (moved {moved:.3} LSB)"));
                 }
             }
+            // The GPU reads the image from an `Rgba16Float` texture, so it sees the f16-rounded
+            // input; the twin must start from the same values, or the comparison also measures
+            // that rounding (amplified by a steep curve such as `shadows -1`: #701).
             let expected: Vec<[f32; 3]> = data
                 .iter()
-                .map(|px| cpu_chain([px[0], px[1], px[2]], &params))
+                .map(|px| cpu_chain([px[0], px[1], px[2]].map(through_f16), &params))
                 .collect();
             let (mean, max) = lsb_error(&actual, &expected);
             if max > worst.0 {
