@@ -59,13 +59,13 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// An asset's RAW path as the catalog resolves it, and whether the file is actually there. The
-/// path is still meaningful when it isn't (an offline volume): dirtiness is recorded against it
-/// without ever creating a sidecar in a directory that may not exist.
 /// Test hook (#706): the asset id whose lookup panics, to prove the writer survives a panic.
 #[cfg(test)]
 const PANIC_ASSET_ID: i64 = 987_654_321;
 
+/// An asset's RAW path as the catalog resolves it, and whether the file is actually there. The
+/// path is still meaningful when it isn't (an offline volume): dirtiness is recorded against it
+/// without ever creating a sidecar in a directory that may not exist.
 fn raw_path_for(store: &dyn CatalogStore, asset_id: i64) -> Option<(PathBuf, bool)> {
     #[cfg(test)]
     if asset_id == PANIC_ASSET_ID {
@@ -169,6 +169,18 @@ impl XmpWriter {
                             }
                         });
                         if let Err(panic) = one {
+                            // Same rule as a failed write: the catalog is now newer than the
+                            // sidecar, so record it or a later rescan lets the stale file win.
+                            let _ = nicti_pounce::guard::catch_panic(|| {
+                                if let Some((raw, _)) = raw_path_for(&*writer_store, id) {
+                                    let _ = scent_sync::mark_catalog_dirty(
+                                        &*writer_store,
+                                        id,
+                                        &raw,
+                                        now_ms(),
+                                    );
+                                }
+                            });
                             lock_status(&st).last_error =
                                 Some(format!("The sidecar writer hit an internal error: {panic}"));
                         }

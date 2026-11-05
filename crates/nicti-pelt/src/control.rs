@@ -451,22 +451,24 @@ fn authenticates(first: &str, token: &str, nonce: &str) -> Option<String> {
     .then(|| cnonce.to_owned())
 }
 
-/// Runs one connection to completion.
 /// [`serve_connection`] with a panic contained (#706): the peer gets one `error` line instead of
 /// a silent close, and the connection's slots are released by their `Drop`s as the unwind
-/// passes. The accept loop is unaffected either way.
+/// passes. The accept loop is unaffected either way. The panic text is deliberately not sent (the
+/// peer may not have authenticated yet); and since a request may already be queued, the line says
+/// the command might still have run, so a client does not blindly retry a non-idempotent one.
 pub fn serve_guarded(stream: TcpStream, shared: &Shared) {
     let reply = stream.try_clone();
-    if let Err(panic) = nicti_pounce::guard::catch_panic(|| serve_connection(stream, shared)) {
+    if nicti_pounce::guard::catch_panic(|| serve_connection(stream, shared)).is_err() {
         if let Ok(mut reply) = reply {
             let _ = send_line(
                 &mut reply,
-                &json!({"ok": false, "error": format!("internal error in the control server: {panic}")}),
+                &json!({"ok": false, "error": "internal error in the control server; a submitted command may still have run"}),
             );
         }
     }
 }
 
+/// Runs one connection to completion.
 pub fn serve_connection(stream: TcpStream, shared: &Shared) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
@@ -1098,9 +1100,10 @@ mod tests {
         let out = ask(&mut s, &mut r, r#"{"id":1,"method":"ui.inspect"}"#);
         assert_eq!(out["ok"], false);
         let msg = out["error"].as_str().unwrap();
+        assert!(msg.contains("internal error"), "{msg}");
         assert!(
-            msg.contains("internal error") && msg.contains("simulated bug"),
-            "{msg}"
+            !msg.contains("simulated bug"),
+            "the panic text must not reach the peer: {msg}"
         );
         // The accept loop and its connection slots survived: a fresh client works.
         let (mut s2, mut r2) = rig.authed();

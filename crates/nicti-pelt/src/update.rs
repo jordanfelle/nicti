@@ -138,6 +138,9 @@ impl UpdateChecker {
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    // The worker died without answering (a panic): say so rather than looking
+                    // like "up to date" (#706).
+                    self.last_error = Some("The update check stopped unexpectedly.".into());
                     self.receiver = None;
                 }
             }
@@ -157,6 +160,7 @@ impl UpdateChecker {
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    self.last_error = Some("The update stopped unexpectedly.".into());
                     self.available = self.pending_release.take();
                     self.applying = false;
                     self.apply_receiver = None;
