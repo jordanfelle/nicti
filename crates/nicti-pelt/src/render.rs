@@ -982,10 +982,8 @@ impl DevelopEngine {
     /// Uses `document`'s edits, unless [`Self::show_before`] is set, in which case every stage
     /// renders at its default -- the same "no entry -> default" fallback `apply_document` already
     /// gives a document with no entry for a stage, just applied to the whole document at once.
-    // The `expect`s below are the static graph/registry invariants and the synthetic frame's own
-    // extent. `apply_document` can also refuse a document whose params the canonical hasher rejects
-    // (a hand-edited `null`), which this signature (a texture, not a `Result`) cannot report: making
-    // `render` fallible is tracked in the #749 follow-up.
+    // The remaining `expect`s are the synthetic frame's own graph/extent and NEUTRAL/HEAL lookups
+    // (static invariants); a user document the hasher refuses is handled by `apply_or_unedited`.
     #[allow(clippy::expect_used)]
     pub fn render(&mut self, dv: &mut DevelopDoc) -> Arc<FrameTexture> {
         let mut doc = if dv.show_before {
@@ -1031,9 +1029,7 @@ impl DevelopEngine {
             dv.view_scale
         };
         nicti_tapetum::effects::stamp_view_scale(&mut doc, view_scale);
-        dv.graph
-            .apply_document(&doc, &dv.registry)
-            .expect("build_registry covers every id build_graph adds");
+        apply_or_unedited(dv, &mut doc);
         dv.graph_lens = spine::resolve(&doc, LENS);
         if !dv.show_before {
             // The masks entry is stamped with which AI alphas are ready, so one arriving (or being
@@ -1047,9 +1043,7 @@ impl DevelopEngine {
                 .map(|(k, a)| (*k, a.content_hash))
                 .collect();
             mask_compose::stamp_ai_alpha_state(&mut doc, neutral_key, &ready);
-            dv.graph
-                .apply_document(&doc, &dv.registry)
-                .expect("build_registry covers every id build_graph adds");
+            apply_or_unedited(dv, &mut doc);
         }
         let doc = &doc;
 
@@ -1402,8 +1396,47 @@ fn fit_loaded_crop(doc: &mut EditDocument, extent: (f32, f32)) {
 /// level: below any visible change, and absorbs f32 noise between two runs on the same pixels.
 const UNCHANGED_ROTATION_EPSILON_DEGREES: f32 = 0.01;
 
+/// Applies `doc` to the view's graph. A document the canonical hasher refuses (a stage param that
+/// is `null`/NaN, say from a hand-edited catalog) must not crash Develop: it renders the photo
+/// unedited instead (the stored edit is untouched; export reports the same document as an error).
+// The fallback applies a document with no user params, with the registry that covers every
+// graph node: a static invariant.
+#[allow(clippy::expect_used)]
+fn apply_or_unedited(dv: &mut DevelopDoc, doc: &mut EditDocument) {
+    if dv.graph.apply_document(doc, &dv.registry).is_ok() {
+        return;
+    }
+    *doc = EditDocument::default();
+    spine::stamp_source_identity(doc, dv.identity);
+    dv.graph
+        .apply_document(doc, &dv.registry)
+        .expect("build_registry covers every id build_graph adds");
+}
+
 #[cfg(test)]
 mod tests {
+    /// A stage param that is `null` (a hand-edited catalog, an older build) makes the canonical
+    /// hasher refuse the document. Develop used to panic on the next frame; it now renders the
+    /// photo unedited and keeps going.
+    #[test]
+    fn a_document_the_hasher_refuses_renders_unedited_instead_of_panicking() {
+        let Some(gpu) = crate::test_gpu::shared() else {
+            return;
+        };
+        let mut view = DevelopView::new(Arc::clone(&gpu));
+        let mut doc = EditDocument::default();
+        doc.stages.insert(
+            LENS.to_string(),
+            StageEntry {
+                schema_version: 1,
+                params: serde_json::json!({ "remove_ca": null }),
+            },
+        );
+        view.load_real_frame(view.frame_arc(), blake3::hash(b"photo"), doc);
+        let _first = view.render();
+        let _again = view.render();
+    }
+
     /// #358: the pixels the CPU consumers (AI mask bakes, removal) read and the neutral key a bake
     /// is stored under must come from the same moment: both follow the last *render*, never the live
     /// document, so a lens change in the document cannot pair an old key with new-lens pixels.

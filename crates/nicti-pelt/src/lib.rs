@@ -13,10 +13,10 @@
 //! (#242); culling -- marking keys, undo, survey/compare and delete -- is `cull` (#32).
 
 /// A typed stage-params struct as JSON. These are derive-`Serialize` structs of numbers, strings
-/// and enums, which cannot fail to serialize (a NaN becomes `null`, not an error).
-#[allow(clippy::expect_used)]
+/// and enums, which cannot fail to serialize (a NaN becomes `null`, not an error); `Null` is the
+/// total fallback, and `stage_edit` already treats a `null` as the value to scrub.
 pub(crate) fn params_value<T: serde::Serialize>(value: &T) -> serde_json::Value {
-    serde_json::to_value(value).expect("a coat params struct always serializes")
+    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
 }
 
 /// The first eight bytes of a hash as a little-endian `u64` (total: no slicing).
