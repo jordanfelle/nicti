@@ -177,26 +177,27 @@ impl AutoHintUi {
 
 // Slider specs, one per control. `id` is unique across the panel (it salts the widget id), and the
 // defaults match what `Reset all` / a double-click restores.
-const TEMP: SliderSpec = SliderSpec::new("basic.temp", "Temp", 2000.0, 50000.0, 5500.0)
+pub(crate) const TEMP: SliderSpec = SliderSpec::new("basic.temp", "Temp", 2000.0, 50000.0, 5500.0)
     .step(1.0, 0)
     .track(Track::Temp);
-const TINT: SliderSpec = SliderSpec::new("basic.tint", "Tint", -150.0, 150.0, 0.0)
+pub(crate) const TINT: SliderSpec = SliderSpec::new("basic.tint", "Tint", -150.0, 150.0, 0.0)
     .step(1.0, 0)
     .track(Track::Tint)
     .signed();
-const EXPOSURE_STOPS: SliderSpec = SliderSpec::new("basic.exposure", "Exposure", -5.0, 5.0, 0.0)
-    .track(Track::Centered)
-    .signed();
-const CONTRAST: SliderSpec = SliderSpec::bipolar("basic.contrast", "Contrast");
-const HIGHLIGHTS: SliderSpec = SliderSpec::bipolar("basic.highlights", "Highlights");
-const SHADOWS: SliderSpec = SliderSpec::bipolar("basic.shadows", "Shadows");
-const WHITES: SliderSpec = SliderSpec::bipolar("basic.whites", "Whites");
-const BLACKS: SliderSpec = SliderSpec::bipolar("basic.blacks", "Blacks");
-const TEXTURE: SliderSpec = SliderSpec::bipolar("basic.texture", "Texture");
-const CLARITY: SliderSpec = SliderSpec::bipolar("basic.clarity", "Clarity");
-const DEHAZE: SliderSpec = SliderSpec::bipolar("basic.dehaze", "Dehaze");
-const VIBRANCE_AMOUNT: SliderSpec = SliderSpec::bipolar("basic.vibrance", "Vibrance");
-const SATURATION: SliderSpec = SliderSpec::bipolar("basic.saturation", "Saturation");
+pub(crate) const EXPOSURE_STOPS: SliderSpec =
+    SliderSpec::new("basic.exposure", "Exposure", -5.0, 5.0, 0.0)
+        .track(Track::Centered)
+        .signed();
+pub(crate) const CONTRAST: SliderSpec = SliderSpec::bipolar("basic.contrast", "Contrast");
+pub(crate) const HIGHLIGHTS: SliderSpec = SliderSpec::bipolar("basic.highlights", "Highlights");
+pub(crate) const SHADOWS: SliderSpec = SliderSpec::bipolar("basic.shadows", "Shadows");
+pub(crate) const WHITES: SliderSpec = SliderSpec::bipolar("basic.whites", "Whites");
+pub(crate) const BLACKS: SliderSpec = SliderSpec::bipolar("basic.blacks", "Blacks");
+pub(crate) const TEXTURE: SliderSpec = SliderSpec::bipolar("basic.texture", "Texture");
+pub(crate) const CLARITY: SliderSpec = SliderSpec::bipolar("basic.clarity", "Clarity");
+pub(crate) const DEHAZE: SliderSpec = SliderSpec::bipolar("basic.dehaze", "Dehaze");
+pub(crate) const VIBRANCE_AMOUNT: SliderSpec = SliderSpec::bipolar("basic.vibrance", "Vibrance");
+pub(crate) const SATURATION: SliderSpec = SliderSpec::bipolar("basic.saturation", "Saturation");
 
 const CURVE_SHADOWS: SliderSpec = SliderSpec::bipolar("curve.shadows", "Shadows");
 const CURVE_DARKS: SliderSpec = SliderSpec::bipolar("curve.darks", "Darks");

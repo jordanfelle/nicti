@@ -587,6 +587,11 @@ fn run_ui_screenshot(host: &mut dyn CommandHost, params: &Value) -> Result<Value
     Ok(json!({ "pending": true }))
 }
 
+fn run_develop_controls(_: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
+    only_keys(params, &[])?;
+    Ok(crate::develop_controls::listing())
+}
+
 fn run_export_status(host: &mut dyn CommandHost, params: &Value) -> Result<Value, String> {
     only_keys(params, &[])?;
     Ok(host.export_status())
@@ -647,6 +652,15 @@ pub const COMMANDS: &[Command] = &[
         risk_for: None,
         enabled: develop_enabled,
         run: run_develop_set,
+    },
+    Command {
+        id: "develop.controls",
+        label: "List the Develop controls (id, section, stage, field, range, default)",
+        params: "{}  -> [{id, label, section, stage, field, min, max, default, optional}]  (the panel's own slider specs; use stage + field with develop.get/set)",
+        risk: Risk::Read,
+        risk_for: None,
+        enabled: always,
+        run: run_develop_controls,
     },
     Command {
         id: "ui.widgets",
@@ -979,9 +993,13 @@ pub fn develop_stage_get(dev: &DevelopView, stage: &str) -> Result<Value, String
     Ok(match stage {
         WB => {
             let mut v = read_typed::<WbParams>(dev, stage);
-            // `temp_k` is left out of the document while the white balance is as-shot; show it.
-            if let Some(o) = v.as_object_mut() {
-                o.entry("temp_k").or_insert(Value::Null);
+            // `temp_k` is left out of the document while the white balance is as-shot; show it
+            // (from the registry's optional control, `null` = as-shot).
+            if let (Some(o), Some(temp)) = (
+                v.as_object_mut(),
+                crate::develop_controls::find(WB, "temp_k"),
+            ) {
+                o.insert("temp_k".to_owned(), json!(temp.get(dev)));
             }
             v
         }
@@ -992,79 +1010,35 @@ pub fn develop_stage_get(dev: &DevelopView, stage: &str) -> Result<Value, String
     })
 }
 
-/// Fields a stage may have that serialize only when set (so `read_typed` does not show them).
-fn optional_fields(stage: &str) -> &'static [&'static str] {
-    if stage == WB {
-        &["temp_k"]
-    } else {
-        &[]
-    }
-}
-
-/// The accepted range of a stage's numeric fields, from the documented slider ranges. A value
-/// outside it is refused rather than clamped, so an agent learns it was wrong.
-fn field_range(stage: &str, field: &str) -> (f64, f64) {
-    match (stage, field) {
-        (WB, "temp_k") => (2000.0, 50000.0),
-        (WB, _) => (-150.0, 150.0),
-        (EXPOSURE, _) => (-5.0, 5.0),
-        _ => (-1.0, 1.0),
-    }
-}
-
-/// Merges `patch` into `current` (a stage's serialized params), refusing unknown fields,
-/// non-numeric or out-of-range values (`null` clears an optional field). Pure, so it is tested
-/// without a `DevelopView`.
-fn merge_patch(
-    stage: &str,
-    mut current: Map<String, Value>,
-    patch: &Map<String, Value>,
-) -> Result<Map<String, Value>, String> {
-    let optional = optional_fields(stage);
-    for (k, v) in patch {
-        if !current.contains_key(k) && !optional.contains(&k.as_str()) {
-            return Err(format!("stage `{stage}` has no field `{k}`"));
-        }
-        if v.is_null() && optional.contains(&k.as_str()) {
-            current.remove(k);
-            continue;
-        }
-        let n = v
-            .as_f64()
-            .ok_or_else(|| format!("field `{k}` must be a number"))?;
-        let (lo, hi) = field_range(stage, k);
-        // `1e300` parses into an f32 as infinity, which would serialize back to `null` and poison
-        // the document, so the bound is checked on the caller's number, not on the parsed one.
-        if !(lo..=hi).contains(&n) {
-            return Err(format!("field `{k}` must be within {lo}..={hi}"));
-        }
-        current.insert(k.clone(), v.clone());
-    }
-    Ok(current)
-}
-
-fn apply_patch<T>(
-    dev: &mut DevelopView,
+/// The writes a `develop.set` patch asks for, checked against the control registry (the panel's
+/// own slider specs) before anything is touched: unknown fields, non-numbers, non-finite or
+/// out-of-range values are refused (`null` clears only an optional field such as `temp_k`). Pure,
+/// so it is tested without a `DevelopView`.
+fn plan_patch(
     stage: &str,
     patch: &Map<String, Value>,
-) -> Result<Value, String>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned + Default + 'static,
-{
-    let current = match read_typed::<T>(dev, stage) {
-        Value::Object(o) => o,
-        _ => return Err(format!("stage `{stage}` has no named fields")),
-    };
-    let merged = merge_patch(stage, current, patch)?;
-    let next: T = serde_json::from_value(Value::Object(merged))
-        .map_err(|e| format!("invalid params for `{stage}`: {e}"))?;
-    // Each scripted write is its own undo step, never folded into the user's last slider drag.
-    dev.without_gesture_merging(|dev| dev.set_stage_params(stage, &next));
-    develop_stage_get(dev, stage)
+) -> Result<Vec<(&'static crate::develop_controls::Control, Option<f32>)>, String> {
+    patch
+        .iter()
+        .map(|(k, v)| {
+            let control = crate::develop_controls::find(stage, k)
+                .ok_or_else(|| format!("stage `{stage}` has no field `{k}`"))?;
+            let number = if v.is_null() {
+                None
+            } else {
+                Some(
+                    v.as_f64()
+                        .ok_or_else(|| format!("field `{k}` must be a number"))?,
+                )
+            };
+            Ok((control, control.check(number)?))
+        })
+        .collect()
 }
 
-/// Sets the named fields of a stage (leaving the rest), through the undo history. Unknown fields,
-/// wrong types and non-finite numbers are refused before anything is written.
+/// Sets the named fields of a stage (leaving the rest), through the undo history, as one typed
+/// `stage_params`/`set_stage_params` round trip (the same path a slider edit takes) and so one undo
+/// step. Everything is checked before anything is written.
 pub fn develop_stage_set(
     dev: &mut DevelopView,
     stage: &str,
@@ -1075,13 +1049,15 @@ pub fn develop_stage_set(
     if patch.is_empty() {
         return Err("`set` is empty".into());
     }
-    match stage {
-        WB => apply_patch::<WbParams>(dev, stage, patch),
-        EXPOSURE => apply_patch::<ExposureParams>(dev, stage, patch),
-        TONE => apply_patch::<ToneParams>(dev, stage, patch),
-        VIBRANCE => apply_patch::<VibranceParams>(dev, stage, patch),
-        _ => apply_patch::<PresenceParams>(dev, stage, patch),
+    let plan = plan_patch(stage, patch)?;
+    let mut draft = crate::develop_controls::Draft::load(dev, stage)
+        .ok_or_else(|| format!("stage `{stage}` is not available"))?;
+    for (control, value) in plan {
+        control.write(&mut draft, value);
     }
+    // Each scripted write is its own undo step, never folded into the user's last slider drag.
+    dev.without_gesture_merging(|dev| draft.store(dev));
+    develop_stage_get(dev, stage)
 }
 
 #[cfg(test)]
@@ -1404,10 +1380,9 @@ mod tests {
     }
 
     #[test]
-    fn merge_patch_refuses_unknown_fields_wrong_types_and_out_of_range_numbers() {
-        let cur = obj(json!({"stops": 0.0}));
-        let ok = merge_patch(EXPOSURE, cur.clone(), &obj(json!({"stops": 2.5}))).unwrap();
-        assert_eq!(ok["stops"], 2.5);
+    fn plan_patch_refuses_unknown_fields_wrong_types_and_out_of_range_numbers() {
+        let ok = plan_patch(EXPOSURE, &obj(json!({"stops": 2.5}))).unwrap();
+        assert_eq!(ok[0].1, Some(2.5));
         for bad in [
             json!({"nope": 1}),
             json!({"stops": "high"}),
@@ -1419,38 +1394,26 @@ mod tests {
             json!({"stops": 1e300}),
             json!({"stops": 3e38}),
         ] {
-            assert!(
-                merge_patch(EXPOSURE, cur.clone(), &obj(bad.clone())).is_err(),
-                "{bad}"
-            );
+            assert!(plan_patch(EXPOSURE, &obj(bad.clone())).is_err(), "{bad}");
         }
         // The documented limits are inclusive.
-        assert!(merge_patch(EXPOSURE, cur.clone(), &obj(json!({"stops": 5.0}))).is_ok());
-        assert!(merge_patch(
-            TONE,
-            obj(json!({"contrast": 0.0})),
-            &obj(json!({"contrast": 1.0}))
-        )
-        .is_ok());
-        assert!(merge_patch(
-            TONE,
-            obj(json!({"contrast": 0.0})),
-            &obj(json!({"contrast": 1.5}))
-        )
-        .is_err());
+        assert!(plan_patch(EXPOSURE, &obj(json!({"stops": 5.0}))).is_ok());
+        assert!(plan_patch(TONE, &obj(json!({"contrast": 1.0}))).is_ok());
+        assert!(plan_patch(TONE, &obj(json!({"contrast": 1.5}))).is_err());
+        // One bad field refuses the whole patch.
+        assert!(plan_patch(TONE, &obj(json!({"contrast": 0.5, "nope": 1}))).is_err());
     }
 
     #[test]
     fn white_balance_temperature_can_be_set_and_cleared_although_as_shot_omits_it() {
-        let as_shot = obj(json!({"tint": 0.0})); // `temp_k` is not serialized while as-shot
-        let set = merge_patch(WB, as_shot, &obj(json!({"temp_k": 5500.0}))).unwrap();
-        assert_eq!(set["temp_k"], 5500.0);
-        let cleared = merge_patch(WB, set, &obj(json!({"temp_k": null}))).unwrap();
-        assert!(!cleared.contains_key("temp_k"), "null returns to as-shot");
-        assert!(merge_patch(WB, cleared.clone(), &obj(json!({"temp_k": 100.0}))).is_err());
-        assert!(merge_patch(WB, cleared.clone(), &obj(json!({"tint": 200.0}))).is_err());
+        let set = plan_patch(WB, &obj(json!({"temp_k": 5500.0}))).unwrap();
+        assert_eq!(set[0].1, Some(5500.0));
+        let cleared = plan_patch(WB, &obj(json!({"temp_k": null}))).unwrap();
+        assert_eq!(cleared[0].1, None, "null returns to as-shot");
+        assert!(plan_patch(WB, &obj(json!({"temp_k": 100.0}))).is_err());
+        assert!(plan_patch(WB, &obj(json!({"tint": 200.0}))).is_err());
         // `null` clears only optional fields.
-        assert!(merge_patch(WB, cleared, &obj(json!({"tint": null}))).is_err());
+        assert!(plan_patch(WB, &obj(json!({"tint": null}))).is_err());
     }
 
     #[test]
