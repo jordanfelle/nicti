@@ -387,6 +387,25 @@ impl PlanJob {
             }
         };
         let facts = facts_for(&asset, &source_path);
+        // The catalog's position (file, sidecar or GPX-geotagged); only looked up when the export
+        // would write a location at all, so a default export never even reads it (#632).
+        let catalog_gps = if self
+            .spec
+            .as_ref()
+            .is_some_and(|s| s.metadata.include_location)
+        {
+            env.store
+                .get_gps(&[id])
+                .map_err(catalog_err)?
+                .get(&id)
+                .map(|g| nicti_preen::metadata::CatalogGps {
+                    latitude: g.latitude,
+                    longitude: g.longitude,
+                    altitude: g.altitude,
+                })
+        } else {
+            None
+        };
         self.prepared.push(Prepared {
             plan_item: PlanItem { facts, source_dir },
             source_path,
@@ -401,6 +420,7 @@ impl PlanJob {
                 label: asset.label,
                 keywords,
                 keyword_paths,
+                catalog_gps,
             },
         });
         Ok(())
@@ -1485,6 +1505,47 @@ mod tests {
         assert!(report.failed[0].1.contains("decode"), "{:?}", report.failed);
         // The failed photo's number is not reused: names never depend on outcomes.
         assert_eq!(fx.out_files(), ["01_a.png", "03_c.png"]);
+    }
+
+    #[test]
+    fn a_catalog_position_is_exported_only_when_the_export_asks_for_a_location() {
+        let Some(fx) = fixture(&["a.NEF", "b.NEF"]) else {
+            return;
+        };
+        // Photo a was geotagged (say from a GPX track); photo b has no position.
+        fx.store
+            .set_gps(
+                fx.ids[0],
+                Some(nicti_lair::Gps {
+                    latitude: 48.858_4,
+                    longitude: 2.294_5,
+                    altitude: Some(35.0),
+                }),
+            )
+            .unwrap();
+        let gps_of = |name: &str| {
+            nicti_preen::metadata::SourceExif::from_path(&fx.out.path().join(name)).gps
+        };
+
+        // Default: the location stays private, even though the catalog has one.
+        let report = wait(&ExportRun::start(fx.env(), &fx.ids, fx.spec()).unwrap());
+        assert_eq!(report.exported.len(), 2, "{report:?}");
+        assert!(gps_of("01_a.png").is_none() && gps_of("02_b.png").is_none());
+
+        // Opted in: a carries the catalog position, b (none stored) carries none.
+        let mut spec = fx.spec();
+        spec.metadata.include_location = true;
+        spec.collision = CollisionPolicy::Overwrite;
+        let report = wait(&ExportRun::start(fx.env(), &fx.ids, spec).unwrap());
+        assert_eq!(report.exported.len(), 2, "{report:?}");
+        let (lat, lon) = gps_of("01_a.png")
+            .expect("the catalog position is exported")
+            .degrees();
+        assert!(
+            (lat - 48.858_4).abs() < 1e-4 && (lon - 2.294_5).abs() < 1e-4,
+            "{lat} {lon}"
+        );
+        assert!(gps_of("02_b.png").is_none());
     }
 
     #[test]

@@ -8,7 +8,9 @@
 //! - `ColorSpace` is 1 (sRGB) only for sRGB output and 0xFFFF (uncalibrated) otherwise -- the spike
 //!   hardcoded 1, which is wrong for P3/AdobeRGB. The embedded ICC profile carries the real space.
 //! - Orientation is always 1: the render was already rotated upright.
-//! - GPS is never written (it isn't stored or read anywhere in the catalog yet).
+//! - GPS is written only when the export opts in (`MetadataSpec::include_location`, `All` policy only), to
+//!   both EXIF and XMP: the catalog's position when it has one (so a GPX-geotagged photo exports its
+//!   position), else the file's own fix, with that fix's date/time, speed and directions (#632).
 
 use std::io::{BufRead, Seek};
 use std::path::Path;
@@ -58,7 +60,7 @@ pub struct SourceExif {
 }
 
 /// A validated GPS fix from the source EXIF, in EXIF's own degrees/minutes/seconds rationals.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Gps {
     /// `b'N'` or `b'S'`.
     pub lat_ref: u8,
@@ -68,6 +70,67 @@ pub struct Gps {
     pub lon: [(u32, u32); 3],
     /// Metres above (`false`) or below (`true`) sea level.
     pub altitude: Option<((u32, u32), bool)>,
+    /// `GPSDateStamp`: the UTC date of the fix, `YYYY:MM:DD`.
+    pub date: Option<String>,
+    /// `GPSTimeStamp`: the UTC time of the fix, hours/minutes/seconds.
+    pub time: Option<[(u32, u32); 3]>,
+    /// `GPSSpeed` and its unit: `b'K'` km/h, `b'M'` mph, `b'N'` knots.
+    pub speed: Option<((u32, u32), u8)>,
+    /// `GPSTrack` (direction of movement, degrees) and its reference: `b'T'` true, `b'M'` magnetic.
+    pub track: Option<((u32, u32), u8)>,
+    /// `GPSImgDirection` (direction the camera faced, degrees) and its reference.
+    pub img_direction: Option<((u32, u32), u8)>,
+}
+
+impl Gps {
+    /// A position from signed decimal degrees (south and west negative), `None` for anything not
+    /// finite or out of range. The seconds keep four decimals (about 3 mm), the altitude two.
+    pub fn from_degrees(latitude: f64, longitude: f64, altitude: Option<f64>) -> Option<Gps> {
+        if !(latitude.is_finite() && longitude.is_finite())
+            || latitude.abs() > 90.0
+            || longitude.abs() > 180.0
+            || altitude.is_some_and(|a| !a.is_finite() || a.abs() > 100_000.0)
+        {
+            return None;
+        }
+        Some(Gps {
+            lat_ref: if latitude < 0.0 { b'S' } else { b'N' },
+            lat: to_dms(latitude.abs()),
+            lon_ref: if longitude < 0.0 { b'W' } else { b'E' },
+            lon: to_dms(longitude.abs()),
+            altitude: altitude.map(|a| ((((a.abs() * 100.0).round()) as u32, 100), a < 0.0)),
+            ..Gps::default()
+        })
+    }
+
+    /// Signed decimal degrees `(latitude, longitude)`.
+    pub fn degrees(&self) -> (f64, f64) {
+        let sign = |r: u8, neg: u8| if r == neg { -1.0 } else { 1.0 };
+        (
+            sign(self.lat_ref, b'S') * degrees(&self.lat),
+            sign(self.lon_ref, b'W') * degrees(&self.lon),
+        )
+    }
+}
+
+/// Non-negative decimal degrees as degrees/minutes/seconds rationals (seconds in 1/10000ths).
+fn to_dms(abs: f64) -> [(u32, u32); 3] {
+    let mut deg = abs.floor();
+    let mut min = ((abs - deg) * 60.0).floor();
+    let mut sec = (((abs - deg) * 60.0 - min) * 60.0 * 10_000.0).round() / 10_000.0;
+    if sec >= 60.0 {
+        sec -= 60.0;
+        min += 1.0;
+    }
+    if min >= 60.0 {
+        min -= 60.0;
+        deg += 1.0;
+    }
+    [
+        (deg as u32, 1),
+        (min as u32, 1),
+        ((sec * 10_000.0).round() as u32, 10_000),
+    ]
 }
 
 fn dms(field: &exif::Field) -> Option<[(u32, u32); 3]> {
@@ -128,13 +191,48 @@ fn read_gps(exif: &exif::Exif) -> Option<Gps> {
             .is_some_and(|v| v == 1);
         (alt, below)
     });
+    // Optional extras of the same fix (#632); each is taken only when well-formed.
+    let reference = |tag, allowed: &[u8]| {
+        get(tag)
+            .and_then(ascii)
+            .and_then(|s| s.trim().bytes().next())
+            .map(|b| b.to_ascii_uppercase())
+            .filter(|b| allowed.contains(b))
+    };
+    let with_ref = |value: exif::Tag, r: exif::Tag, allowed: &[u8], default: u8| {
+        let v = get(value).and_then(rational)?;
+        Some((v, reference(r, allowed).unwrap_or(default)))
+    };
     Some(Gps {
         lat_ref,
         lat,
         lon_ref,
         lon,
         altitude,
+        date: get(exif::Tag::GPSDateStamp)
+            .and_then(ascii)
+            .filter(|d| valid_gps_date(d)),
+        time: get(exif::Tag::GPSTimeStamp).and_then(dms),
+        speed: with_ref(exif::Tag::GPSSpeed, exif::Tag::GPSSpeedRef, b"KMN", b'K'),
+        track: with_ref(exif::Tag::GPSTrack, exif::Tag::GPSTrackRef, b"TM", b'T'),
+        img_direction: with_ref(
+            exif::Tag::GPSImgDirection,
+            exif::Tag::GPSImgDirectionRef,
+            b"TM",
+            b'T',
+        ),
     })
+}
+
+/// `YYYY:MM:DD` with plausible digits (EXIF's own format).
+fn valid_gps_date(d: &str) -> bool {
+    let b = d.as_bytes();
+    b.len() == 10
+        && b[4] == b':'
+        && b[7] == b':'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
 }
 
 fn ascii(field: &exif::Field) -> Option<String> {
@@ -214,9 +312,42 @@ pub struct SourceMetadata {
     /// 1-segment path), already canonicalised like the sidecar's. Written as
     /// `lr:hierarchicalSubject`, the same way `nicti-scent` does for a sidecar.
     pub keyword_paths: Vec<Vec<String>>,
+    /// The catalog's stored position (read from the file, the XMP sidecar, or geotagged from a
+    /// GPX track; `asset_gps`), as signed decimal degrees. Preferred over the file's own EXIF.
+    pub catalog_gps: Option<CatalogGps>,
+}
+
+/// A catalog position: signed decimal degrees and an optional altitude in metres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CatalogGps {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub altitude: Option<f64>,
 }
 
 impl SourceMetadata {
+    /// The position to export (still subject to `include_location`): the catalog's when it has
+    /// one, so a position geotagged into the sidecar is exported too, else the file's EXIF. When
+    /// the catalog agrees with the file's own fix to within about a metre, the file's fix is kept
+    /// as-is so its date/time, speed and direction (which describe that fix) travel with it; when
+    /// the catalog position differs those extras describe a different place and are dropped.
+    pub fn effective_gps(&self) -> Option<Gps> {
+        let Some(c) = self.catalog_gps else {
+            return self.exif.gps.clone();
+        };
+        let Some(catalog) = Gps::from_degrees(c.latitude, c.longitude, c.altitude) else {
+            // An unusable catalog value must not hide a good fix in the file.
+            return self.exif.gps.clone();
+        };
+        if let Some(file) = &self.exif.gps {
+            let (flat, flon) = file.degrees();
+            if (flat - c.latitude).abs() < 1e-5 && (flon - c.longitude).abs() < 1e-5 {
+                return Some(file.clone());
+            }
+        }
+        Some(catalog)
+    }
+
     fn make(&self) -> Option<&str> {
         self.exif.make.as_deref().or(self.catalog_make.as_deref())
     }
@@ -245,6 +376,22 @@ fn set_gps(exif: &mut Metadata, gps: &Gps) {
     if let Some(((n, d), below)) = gps.altitude {
         exif.set_tag(ExifTag::GPSAltitudeRef(vec![u8::from(below)]));
         exif.set_tag(ExifTag::GPSAltitude(vec![urat(n, d)]));
+    }
+    if let (Some(date), Some(time)) = (&gps.date, &gps.time) {
+        exif.set_tag(ExifTag::GPSDateStamp(date.clone()));
+        exif.set_tag(ExifTag::GPSTimeStamp(rats(time)));
+    }
+    if let Some(((n, d), unit)) = gps.speed {
+        exif.set_tag(ExifTag::GPSSpeedRef((unit as char).to_string()));
+        exif.set_tag(ExifTag::GPSSpeed(vec![urat(n, d)]));
+    }
+    if let Some(((n, d), r)) = gps.track {
+        exif.set_tag(ExifTag::GPSTrackRef((r as char).to_string()));
+        exif.set_tag(ExifTag::GPSTrack(vec![urat(n, d)]));
+    }
+    if let Some(((n, d), r)) = gps.img_direction {
+        exif.set_tag(ExifTag::GPSImgDirectionRef((r as char).to_string()));
+        exif.set_tag(ExifTag::GPSImgDirection(vec![urat(n, d)]));
     }
 }
 
@@ -350,7 +497,7 @@ pub fn build_exif(ctx: &ExifContext<'_>) -> Option<ExifPayload> {
         exif.set_tag(ExifTag::Software(ctx.software.to_string()));
         // Location is private by default: written only when the export explicitly asks for it.
         if ctx.spec.include_location {
-            if let Some(gps) = &s.exif.gps {
+            if let Some(gps) = &s.effective_gps() {
                 set_gps(&mut exif, gps);
             }
         }
@@ -418,6 +565,60 @@ pub fn wrap_xpacket(xmp: &str) -> String {
     format!("<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n{xmp}\n<?xpacket end=\"w\"?>")
 }
 
+/// XMP `exif:GPS*` properties for `gps` (the XMP spelling differs from EXIF's: coordinates are
+/// `DDD,MM.mmmmk` text, rationals are `n/d` text, the stamp is one UTC date-time).
+fn gps_xmp_properties(gps: &Gps) -> String {
+    let coordinate = |dms: &[(u32, u32); 3], reference: u8| {
+        let part = |(n, d): (u32, u32)| f64::from(n) / f64::from(d);
+        let deg = part(dms[0]).floor();
+        let minutes = part(dms[1]) + part(dms[2]) / 60.0;
+        format!("{deg:.0},{minutes:.4}{}", reference as char)
+    };
+    let rational = |(n, d): (u32, u32)| format!("{n}/{d}");
+    let mut out = String::new();
+    out.push_str("   <exif:GPSVersionID>2.3.0.0</exif:GPSVersionID>\n");
+    out.push_str(&format!(
+        "   <exif:GPSLatitude>{}</exif:GPSLatitude>\n",
+        coordinate(&gps.lat, gps.lat_ref)
+    ));
+    out.push_str(&format!(
+        "   <exif:GPSLongitude>{}</exif:GPSLongitude>\n",
+        coordinate(&gps.lon, gps.lon_ref)
+    ));
+    if let Some((alt, below)) = gps.altitude {
+        out.push_str(&format!(
+            "   <exif:GPSAltitudeRef>{}</exif:GPSAltitudeRef>\n   <exif:GPSAltitude>{}</exif:GPSAltitude>\n",
+            u8::from(below),
+            rational(alt)
+        ));
+    }
+    if let (Some(date), Some(t)) = (&gps.date, &gps.time) {
+        let part = |(n, d): (u32, u32)| f64::from(n) / f64::from(d);
+        let seconds = part(t[2]);
+        out.push_str(&format!(
+            "   <exif:GPSTimeStamp>{}T{:02.0}:{:02.0}:{:02.0}Z</exif:GPSTimeStamp>\n",
+            date.replace(':', "-"),
+            part(t[0]),
+            part(t[1]),
+            seconds.floor()
+        ));
+    }
+    for (name, value) in [
+        ("GPSSpeed", gps.speed),
+        ("GPSTrack", gps.track),
+        ("GPSImgDirection", gps.img_direction),
+    ] {
+        if let Some((v, r)) = value {
+            out.push_str(&format!(
+                "   <exif:{name}Ref>{}</exif:{name}Ref>\n   <exif:{name}>{}</exif:{name}>\n",
+                r as char,
+                rational(v)
+            ));
+        }
+    }
+    out
+}
+
 /// The XMP packet for an export, or `None` under [`MetadataPolicy::None`].
 pub fn build_xmp(spec: &MetadataSpec, source: &SourceMetadata, software: &str) -> Option<String> {
     if spec.policy == MetadataPolicy::None {
@@ -471,16 +672,28 @@ pub fn build_xmp(spec: &MetadataSpec, source: &SourceMetadata, software: &str) -
         }
         body.push_str("   </rdf:Bag></lr:hierarchicalSubject>\n");
     }
+    // Location is private by default, and only under `All`, exactly like the EXIF GPS block.
+    let gps_xmp = (spec.policy == MetadataPolicy::All && spec.include_location)
+        .then(|| source.effective_gps())
+        .flatten();
+    if let Some(gps) = &gps_xmp {
+        body.push_str(&gps_xmp_properties(gps));
+    }
     if body.is_empty() {
         return None;
     }
+    let exif_ns = if gps_xmp.is_some() {
+        "\n   xmlns:exif=\"http://ns.adobe.com/exif/1.0/\""
+    } else {
+        ""
+    };
     let lr_ns = if has_paths {
         "\n   xmlns:lr=\"http://ns.adobe.com/lightroom/1.0/\""
     } else {
         ""
     };
     let xmp = format!(
-        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  <rdf:Description rdf:about=\"\"\n   xmlns:dc=\"http://purl.org/dc/elements/1.1/\"\n   xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"\n   xmlns:xmpRights=\"http://ns.adobe.com/xap/1.0/rights/\"{lr_ns}>\n{body}  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>"
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  <rdf:Description rdf:about=\"\"\n   xmlns:dc=\"http://purl.org/dc/elements/1.1/\"\n   xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"\n   xmlns:xmpRights=\"http://ns.adobe.com/xap/1.0/rights/\"{exif_ns}{lr_ns}>\n{body}  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>"
     );
     Some(wrap_xpacket(&xmp))
 }
@@ -753,6 +966,206 @@ mod tests {
             .join(" ")
     }
 
+    fn on() -> MetadataSpec {
+        MetadataSpec {
+            include_location: true,
+            ..MetadataSpec::default()
+        }
+    }
+
+    fn extra_tags() -> Vec<ExifTag> {
+        let mut t = gps_tags("N", [40, 26, 46], "W", [79, 58, 56]);
+        t.extend([
+            ExifTag::GPSDateStamp("2026:10:31".into()),
+            ExifTag::GPSTimeStamp(vec![urat(14, 1), urat(5, 1), urat(9, 1)]),
+            ExifTag::GPSSpeedRef("K".into()),
+            ExifTag::GPSSpeed(vec![urat(87, 10)]),
+            ExifTag::GPSTrackRef("T".into()),
+            ExifTag::GPSTrack(vec![urat(2705, 10)]),
+            ExifTag::GPSImgDirectionRef("M".into()),
+            ExifTag::GPSImgDirection(vec![urat(90, 1)]),
+        ]);
+        t
+    }
+
+    fn exported_gps_text(spec: &MetadataSpec, src: &SourceMetadata) -> String {
+        let payload = build_exif(&ctx(spec, src, ExportSpace::Srgb)).unwrap();
+        let out = write_exif_jpeg(&tiny_jpeg(), &payload).unwrap();
+        let back = read_exif(&out, FileExtension::JPEG).unwrap();
+        [
+            ExifTag::GPSLatitude(vec![]),
+            ExifTag::GPSLongitude(vec![]),
+            ExifTag::GPSDateStamp(String::new()),
+            ExifTag::GPSTimeStamp(vec![]),
+            ExifTag::GPSSpeed(vec![]),
+            ExifTag::GPSTrack(vec![]),
+            ExifTag::GPSImgDirection(vec![]),
+        ]
+        .iter()
+        .filter_map(|p| back.get_tag(p).next())
+        .map(|t| format!("{t:?}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+    }
+
+    #[test]
+    fn decimal_degrees_round_trip_through_dms_and_invalid_ones_are_refused() {
+        let g = Gps::from_degrees(40.446_111, -79.982_222, Some(-12.34)).unwrap();
+        assert_eq!((g.lat_ref, g.lon_ref), (b'N', b'W'));
+        assert_eq!(g.altitude, Some(((1234, 100), true)));
+        let (lat, lon) = g.degrees();
+        assert!((lat - 40.446_111).abs() < 1e-6 && (lon + 79.982_222).abs() < 1e-6);
+        // Southern/eastern, and a value whose seconds round up to 60 carries into the minutes.
+        let s = Gps::from_degrees(-33.999_999_99, 151.0, None).unwrap();
+        assert_eq!((s.lat_ref, s.lat), (b'S', [(34, 1), (0, 1), (0, 10_000)]));
+        for bad in [
+            (91.0, 0.0),
+            (0.0, 181.0),
+            (f64::NAN, 0.0),
+            (0.0, f64::INFINITY),
+        ] {
+            assert!(Gps::from_degrees(bad.0, bad.1, None).is_none(), "{bad:?}");
+        }
+        assert!(Gps::from_degrees(0.0, 0.0, Some(1e9)).is_none());
+    }
+
+    #[test]
+    fn date_time_speed_and_directions_are_read_from_the_source_fix() {
+        let gps = source_with_gps(extra_tags()).gps.unwrap();
+        assert_eq!(gps.date.as_deref(), Some("2026:10:31"));
+        assert_eq!(gps.time, Some([(14, 1), (5, 1), (9, 1)]));
+        assert_eq!(gps.speed, Some(((87, 10), b'K')));
+        assert_eq!(gps.track, Some(((2705, 10), b'T')));
+        assert_eq!(gps.img_direction, Some(((90, 1), b'M')));
+        // A malformed date is dropped, not carried.
+        let mut bad = extra_tags();
+        bad.push(ExifTag::GPSDateStamp("yesterday".into()));
+        assert!(source_with_gps(bad).gps.unwrap().date.is_none());
+    }
+
+    #[test]
+    fn a_catalog_position_is_exported_in_place_of_the_files_only_when_asked() {
+        // The file has no fix; the catalog has one geotagged from a GPX track.
+        let src = SourceMetadata {
+            catalog_gps: Some(CatalogGps {
+                latitude: 48.858_4,
+                longitude: 2.294_5,
+                altitude: Some(35.0),
+            }),
+            ..source()
+        };
+        assert_eq!(exported_gps_text(&MetadataSpec::default(), &src), "");
+        let text = exported_gps_text(&on(), &src);
+        assert!(
+            text.contains("GPSLatitude") && text.contains("GPSLongitude"),
+            "{text}"
+        );
+        // CopyrightOnly never carries it, whatever else is set.
+        let copyright_only = MetadataSpec {
+            policy: MetadataPolicy::CopyrightOnly,
+            ..on()
+        };
+        assert_eq!(exported_gps_text(&copyright_only, &src), "");
+    }
+
+    #[test]
+    fn extras_travel_only_with_the_fix_they_describe() {
+        let file = source_with_gps(extra_tags());
+        let same = SourceMetadata {
+            exif: file.clone(),
+            catalog_gps: Some(CatalogGps {
+                latitude: 40.446_111,
+                longitude: -79.982_222,
+                altitude: None,
+            }),
+            ..source()
+        };
+        let text = exported_gps_text(&on(), &same);
+        for tag in [
+            "GPSDateStamp",
+            "GPSTimeStamp",
+            "GPSSpeed",
+            "GPSTrack",
+            "GPSImgDirection",
+        ] {
+            assert!(text.contains(tag), "{tag} missing from {text}");
+        }
+        // The catalog moved the photo elsewhere: the old fix's speed/time must not follow it.
+        let moved = SourceMetadata {
+            exif: file,
+            catalog_gps: Some(CatalogGps {
+                latitude: -33.8568,
+                longitude: 151.2153,
+                altitude: None,
+            }),
+            ..source()
+        };
+        let text = exported_gps_text(&on(), &moved);
+        assert!(text.contains("GPSLatitude"), "{text}");
+        for tag in [
+            "GPSDateStamp",
+            "GPSTimeStamp",
+            "GPSSpeed",
+            "GPSTrack",
+            "GPSImgDirection",
+        ] {
+            assert!(!text.contains(tag), "{tag} leaked into {text}");
+        }
+    }
+
+    #[test]
+    fn xmp_carries_the_location_only_under_all_with_include_location() {
+        let src = SourceMetadata {
+            exif: source_with_gps(extra_tags()),
+            ..source()
+        };
+        let xmp = build_xmp(&on(), &src, "Nicti").unwrap();
+        assert!(
+            xmp.contains("xmlns:exif=\"http://ns.adobe.com/exif/1.0/\""),
+            "{xmp}"
+        );
+        assert!(
+            xmp.contains("<exif:GPSLatitude>40,26.7667N</exif:GPSLatitude>"),
+            "{xmp}"
+        );
+        assert!(
+            xmp.contains("<exif:GPSLongitude>79,58.9333W</exif:GPSLongitude>"),
+            "{xmp}"
+        );
+        assert!(
+            xmp.contains("<exif:GPSAltitude>1523/10</exif:GPSAltitude>"),
+            "{xmp}"
+        );
+        assert!(
+            xmp.contains("<exif:GPSTimeStamp>2026-10-31T14:05:09Z</exif:GPSTimeStamp>"),
+            "{xmp}"
+        );
+        assert!(
+            xmp.contains("<exif:GPSSpeed>87/10</exif:GPSSpeed>"),
+            "{xmp}"
+        );
+        assert!(
+            xmp.contains("<exif:GPSTrackRef>T</exif:GPSTrackRef>"),
+            "{xmp}"
+        );
+        assert!(
+            xmp.contains("<exif:GPSImgDirectionRef>M</exif:GPSImgDirectionRef>"),
+            "{xmp}"
+        );
+        // Default (off), CopyrightOnly: no location in the XMP at all.
+        for spec in [
+            MetadataSpec::default(),
+            MetadataSpec {
+                policy: MetadataPolicy::CopyrightOnly,
+                artist: Some("A".into()),
+                ..on()
+            },
+        ] {
+            let xmp = build_xmp(&spec, &src, "Nicti").unwrap_or_default();
+            assert!(!xmp.contains("GPS") && !xmp.contains("xmlns:exif"), "{xmp}");
+        }
+    }
+
     #[test]
     fn gps_is_read_from_the_source_and_validated() {
         let ok = source_with_gps(gps_tags("N", [40, 26, 46], "W", [79, 58, 56]));
@@ -880,12 +1293,14 @@ mod tests {
     }
 
     #[test]
-    fn the_xmp_never_carries_a_location() {
+    fn the_xmp_carries_no_location_unless_the_export_asks_for_one() {
+        // This used to pin "never" (#340); #632 adds the opt-in, so what stays pinned is the
+        // default: a fix in the source never reaches the XMP while `include_location` is off.
         let exif = source_with_gps(gps_tags("N", [40, 26, 46], "W", [79, 58, 56]));
         let src = SourceMetadata { exif, ..source() };
         let keep = MetadataSpec {
             policy: MetadataPolicy::All,
-            include_location: true,
+            include_location: false,
             include_keywords: true,
             ..MetadataSpec::default()
         };

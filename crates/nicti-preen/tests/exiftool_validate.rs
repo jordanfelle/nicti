@@ -315,6 +315,12 @@ fn location_is_opt_in_and_reads_back_in_every_exif_format() {
         lon_ref: b'W',
         lon: [(79, 1), (58, 1), (56, 1)],
         altitude: Some(((1523, 10), false)),
+        // The optional extras of the fix (#632) go through exiftool's validation too.
+        date: Some("2026:10:31".into()),
+        time: Some([(14, 1), (5, 1), (9, 1)]),
+        speed: Some(((87, 10), b'K')),
+        track: Some(((2705, 10), b'T')),
+        img_direction: Some(((90, 1), b'M')),
     });
     let dir = tempfile::tempdir().unwrap();
     let cases = [
