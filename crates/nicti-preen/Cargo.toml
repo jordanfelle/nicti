@@ -7,7 +7,10 @@ publish = false
 description = "Export engine (ADR-0019 §8, ADR-0056, #57): the Exporter extension point plus everything format-independent about turning a rendered linear working-space frame into a delivered file -- export presets/spec (spec.rs), filename tokens (naming.rs), batch planning and collision-safe writes (plan.rs/write.rs), linear-light resize (resize.rs), orientation (orient.rs), output color conversion (color.rs), watermark (watermark.rs), EXIF/XMP/ICC metadata (metadata.rs) and the built-in JPEG/PNG/TIFF exporters (exporters.rs). Pure Rust and GPU-free: it consumes a host-memory frame, so it depends on neither nicti-tapetum nor nicti-lair."
 
 [features]
-# AVIF export (8/10-bit). Off by default: rav1e dominates the build time.
+# AVIF export (8/10-bit). On by default (#680): `rav1e`/`ravif` are already compiled into the app
+# through nicti-lair, so enabling it recompiles three workspace crates (~16 s) and adds ~2 MB to the
+# binary. `--no-default-features` still drops the exporter.
+default = ["avif"]
 avif = ["dep:ravif"]
 
 [dependencies]
