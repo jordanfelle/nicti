@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! AI object removal and heal-source picking (#51, ADR-0051), promoted from `spikes/groom`.
 //!
 //! The flow for one removal ([`remove::RemovalEngine::remove`]): a click/box prompt on the photo

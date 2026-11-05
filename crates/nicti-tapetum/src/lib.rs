@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! Render stage extension point (ADR-0019 §7/§8) and Tapetum's (#44/#45) stage-cached render
 //! engine. `graph`/`cache`/`prefetch` are the CPU-only render graph, promoted from `spikes/loaf`
 //! (#45's first slice). `gpu`/`frame` are the shared wgpu device and GPU-resident RGBA16F frame
@@ -5,6 +9,13 @@
 //! `Renderer` that dispatches against it (#45's second slice). `color`/`geometry`/`stages` are the
 //! concrete decode/live-suffix/geometry pipeline wired to a real `nicti_cornea::LinearFrame`
 //! (#45's third slice) -- denoise/lens/heal stay passthrough slots for their own tickets.
+
+/// Locks `m`, recovering the data if another thread panicked while holding it: these locks guard
+/// plain cached state (uniform staging, memo tables), so a poisoned flag must not cascade a panic
+/// into every later render.
+pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 pub mod auto;
 pub mod autolevel;

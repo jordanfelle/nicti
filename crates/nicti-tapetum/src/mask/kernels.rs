@@ -122,20 +122,13 @@ impl FieldTexture {
             },
         );
         gpu.queue.submit(Some(encoder.finish()));
-        let slice = staging.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        gpu.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("device poll failed");
-        let raw = slice.get_mapped_range().expect("readback not mapped");
+        let raw = crate::gpu::read_mapped(gpu, &staging);
         let mut data = Vec::with_capacity((self.width * self.height) as usize);
         for y in 0..self.height {
             let start = (y * padded) as usize;
             let row: &[f32] = bytemuck::cast_slice(&raw[start..start + unpadded as usize]);
             data.extend_from_slice(row);
         }
-        drop(raw);
-        staging.unmap();
         Field {
             width: self.width as usize,
             height: self.height as usize,

@@ -275,6 +275,12 @@ impl RemovalBackend for LazyBackend {
     }
 }
 
+/// `load_*` just populated the engine, so a missing one is an internal bug; report it as an error
+/// the caller already handles instead of panicking the removal worker.
+fn engine_missing() -> RemovalError {
+    RemovalError::Ort("internal error: the removal engine is not loaded".into())
+}
+
 impl LazyBackend {
     fn remove_inner(&mut self, req: &RemovalRequest<'_>) -> Result<RemovalPatch, RemovalError> {
         if self.engine.is_none() {
@@ -287,7 +293,7 @@ impl LazyBackend {
             let requested = self.loader.requested(&self.models);
             self.load_preferred(requested)?;
         }
-        let result = match self.engine.as_mut().expect("just loaded").remove(req) {
+        let result = match self.engine.as_mut().ok_or_else(engine_missing)?.remove(req) {
             // Only an error that says the GPU provider can't run (cuDNN missing from the pack, out
             // of VRAM beside the renderer, a driver reset) falls back: redo this removal on the CPU
             // and stay there until the cool-down passes. A deterministic model/input error is
@@ -301,7 +307,7 @@ impl LazyBackend {
                 );
                 self.load_engine(ExecutionProvider::Cpu)?;
                 self.demotion.demote(Instant::now());
-                self.engine.as_mut().expect("just loaded").remove(req)
+                self.engine.as_mut().ok_or_else(engine_missing)?.remove(req)
             }
             other => {
                 if other.is_ok() && self.active != ExecutionProvider::Cpu {

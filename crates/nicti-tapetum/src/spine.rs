@@ -8,6 +8,11 @@
 //! `build_graph`'s node ids and `build_registry`'s entries must stay in sync:
 //! `RenderGraph::apply_document` errors on any graph node id missing from the registry.
 
+// Every `expect` in this module is a static-table invariant (unique stage ids, the registry covering
+// every graph node), pinned by this module's tests; a failure is a programming error in the constant
+// tables, never input-dependent, so it surfaces loudly rather than being papered over.
+#![allow(clippy::expect_used)]
+
 use std::sync::Arc;
 
 use nicti_calico::dcp::DcpProfile;

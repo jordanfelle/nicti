@@ -476,7 +476,7 @@ impl BakedExec for DecodeExec<'_> {
         let expected_pixels = (frame.width as usize)
             .checked_mul(frame.height as usize)
             .and_then(|count| count.checked_mul(3))
-            .expect("LinearFrame dimensions overflow a usize");
+            .unwrap_or(usize::MAX); // overflow: the assert below reports it
         assert_eq!(
             frame.pixels.len(),
             expected_pixels,
@@ -614,7 +614,8 @@ impl BakedExec for PassthroughExec {
         input: Option<&FrameTexture>,
         output: &FrameTexture,
     ) {
-        let input = input.expect("a passthrough stage always has an upstream baked node");
+        // The graph always gives a passthrough stage an upstream baked node.
+        let Some(input) = input else { return };
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &input.texture,
@@ -1199,7 +1200,7 @@ impl LiveSuffixKernel {
             block[32..32 + bytes.len()].copy_from_slice(bytes);
         }
         gpu.queue.write_buffer(&self.mask_buf, 0, &block);
-        let mut state = self.mask_state.lock().unwrap();
+        let mut state = crate::lock(&self.mask_state);
         state.local_detail = frame.is_some_and(|f| {
             f.uniforms[..count]
                 .iter()
@@ -1270,9 +1271,9 @@ impl LiveSuffixKernel {
             let luts = color::build_point_curve_luts(&params.point_curve, &params.look_curve);
             let fp = luts.as_ref().map(|l| {
                 let hash = blake3::hash(bytemuck::cast_slice(l.as_slice()));
-                u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"))
+                crate::slit::first_u64(hash.as_bytes())
             });
-            let mut tex = self.point_curve_tex.lock().unwrap();
+            let mut tex = crate::lock(&self.point_curve_tex);
             if fp != tex.fp {
                 tex.view = upload_point_curve_luts(gpu, luts.as_ref());
                 tex.fp = fp;
@@ -1280,7 +1281,7 @@ impl LiveSuffixKernel {
             u.point_curve[0] = f32::from(luts.is_some());
         }
         {
-            let mut tables = self.profile_tables.lock().unwrap();
+            let mut tables = crate::lock(&self.profile_tables);
             let srgb = |e: TableEncoding| f32::from(e == TableEncoding::Srgb);
             let (hsm, look) = match &params.camera_profile {
                 Some(p) => (p.hue_sat_map.as_ref(), p.look_table.as_ref()),
@@ -1337,7 +1338,7 @@ impl LiveSuffixKernel {
         gpu.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
 
-        *self.detail_state.lock().unwrap() = DetailState {
+        *crate::lock(&self.detail_state) = DetailState {
             sharpen: params.sharpen,
             noise_reduction: params.noise_reduction,
             pixel_scale: params.pixel_scale,
@@ -1352,9 +1353,9 @@ impl LiveSuffixKernel {
         output: &FrameTexture,
     ) {
         let bind_group_layout = self.pipeline.get_bind_group_layout(0);
-        let tables = self.profile_tables.lock().unwrap();
-        let point_curve = self.point_curve_tex.lock().unwrap();
-        let mask_state = self.mask_state.lock().unwrap();
+        let tables = crate::lock(&self.profile_tables);
+        let point_curve = crate::lock(&self.point_curve_tex);
+        let mask_state = crate::lock(&self.mask_state);
         let atlas_view = match &mask_state.frame {
             Some(f) => &f.atlas.array_view,
             None => &mask_state.dummy.array_view,
@@ -1564,8 +1565,8 @@ impl LiveExec for LiveSuffixKernel {
         input: &FrameTexture,
         output: &FrameTexture,
     ) {
-        let detail = *self.detail_state.lock().unwrap();
-        let local_detail = self.mask_state.lock().unwrap().local_detail;
+        let detail = *crate::lock(&self.detail_state);
+        let local_detail = crate::lock(&self.mask_state).local_detail;
         if detail.sharpen.is_noop() && detail.noise_reduction.is_noop() && !local_detail {
             self.dispatch_pointwise(gpu, encoder, input, output);
             return;
@@ -1607,7 +1608,7 @@ impl LiveExec for LiveSuffixKernel {
         gpu.queue
             .write_buffer(&self.combine_buf, 0, bytemuck::bytes_of(&cu));
 
-        let mask_state = self.mask_state.lock().unwrap();
+        let mask_state = crate::lock(&self.mask_state);
         let atlas_view = match &mask_state.frame {
             Some(f) => &f.atlas.array_view,
             None => &mask_state.dummy.array_view,
@@ -1759,7 +1760,7 @@ impl CropKernel {
     /// in the corrected frame, and every export tile shares it unchanged. Like the effects, call
     /// it every render: the kernel is reused across photos.
     pub fn set_upright(&self, homography: Option<[f32; 9]>) {
-        *self.upright.lock().unwrap() = homography;
+        *crate::lock(&self.upright) = homography;
     }
 
     /// Records this render's post-crop effects (#380): `crop_transform` is the same output ->
@@ -1789,13 +1790,13 @@ impl CropKernel {
                 view_scale,
             })
         };
-        *self.effects.lock().unwrap() = state;
+        *crate::lock(&self.effects) = state;
     }
 
     /// Records this render's crop transform -- the actual uniform-buffer write is deferred to
     /// `encode` (which also needs the output extent, only known once a `FrameTexture` exists).
     pub fn set_transform(&self, transform: Affine2D) {
-        *self.transform.lock().unwrap() = transform;
+        *crate::lock(&self.transform) = transform;
     }
 }
 
@@ -1807,9 +1808,9 @@ impl GeometryExec for CropKernel {
         input: &FrameTexture,
         output: &FrameTexture,
     ) {
-        let transform = *self.transform.lock().unwrap();
-        let fx = *self.effects.lock().unwrap();
-        let upright = *self.upright.lock().unwrap();
+        let transform = *crate::lock(&self.transform);
+        let fx = *crate::lock(&self.effects);
+        let upright = *crate::lock(&self.upright);
         let mut u = PresentUniforms {
             a: transform.a,
             b: transform.b,

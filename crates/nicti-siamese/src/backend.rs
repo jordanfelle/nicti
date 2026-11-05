@@ -136,7 +136,9 @@ impl RegistryBackend {
         });
         self.loaded
             .get_mut(&key)
-            .expect("just loaded")
+            .ok_or_else(|| {
+                SegmentError::Load("internal error: the model is not loaded".to_owned())
+            })?
             .segment(&neutral.as_model_image(), &recipe.params)
     }
 }

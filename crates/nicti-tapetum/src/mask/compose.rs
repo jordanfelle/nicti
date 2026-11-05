@@ -246,7 +246,7 @@ pub fn stamp_ai_alpha_state(
     if let Value::Object(map) = &mut entry.params {
         map.insert(
             "ai_alphas".to_owned(),
-            serde_json::to_value(stamped).expect("a string map serializes"),
+            serde_json::to_value(stamped).unwrap_or(Value::Null),
         );
     }
 }

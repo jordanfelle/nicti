@@ -218,6 +218,26 @@ pub fn make_compute_pipeline(
     })
 }
 
+/// Maps `staging` for reading, waits for the GPU, and copies the bytes out. If the device fails
+/// (lost, timed out) the readback cannot succeed; rather than panicking the render thread this
+/// returns zeroed bytes of the buffer's size -- a black frame -- and leaves reporting to wgpu's own
+/// device-lost / uncaptured-error handling.
+pub(crate) fn read_mapped(gpu: &GpuContext, staging: &wgpu::Buffer) -> Vec<u8> {
+    let slice = staging.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    let polled = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let copied = polled
+        .ok()
+        .and_then(|_| slice.get_mapped_range().ok().map(|raw| raw.to_vec()));
+    match copied {
+        Some(bytes) => {
+            staging.unmap();
+            bytes
+        }
+        None => vec![0; staging.size() as usize],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

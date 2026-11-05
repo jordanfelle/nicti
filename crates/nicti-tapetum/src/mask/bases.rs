@@ -245,12 +245,7 @@ impl ThumbTexture {
             },
         );
         gpu.queue.submit(Some(enc.finish()));
-        let slice = staging.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        gpu.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("device poll failed");
-        let raw = slice.get_mapped_range().expect("thumbnail not mapped");
+        let raw = crate::gpu::read_mapped(gpu, &staging);
         let mut out = Vec::with_capacity((self.width * self.height) as usize);
         for y in 0..self.height {
             let start = (y * padded) as usize;
@@ -259,8 +254,6 @@ impl ThumbTexture {
                 out.push([px[0], px[1], px[2], px[3]]);
             }
         }
-        drop(raw);
-        staging.unmap();
         out
     }
 }

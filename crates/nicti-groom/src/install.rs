@@ -118,7 +118,7 @@ impl InstallModelsJob {
     }
 
     fn resolve(&self, r: Result<(), String>) {
-        *self.result.lock().unwrap() = Some(r);
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
     }
 }
 

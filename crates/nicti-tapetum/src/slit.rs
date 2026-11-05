@@ -75,7 +75,14 @@ fn ca_key(frame: &LinearFrame, center: Option<[f64; 2]>) -> u64 {
             h.update(&v.to_le_bytes());
         }
     }
-    u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().unwrap())
+    first_u64(h.finalize().as_bytes())
+}
+
+/// The first eight bytes of a hash as a little-endian `u64`.
+pub(crate) fn first_u64(bytes: &[u8; 32]) -> u64 {
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 /// Serialises estimator runs so several workers hitting a cold memo for the same frame (AI mask
@@ -83,9 +90,7 @@ fn ca_key(frame: &LinearFrame, center: Option<[f64; 2]>) -> u64 {
 static CA_COMPUTE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn memo_lookup(key: u64) -> Option<[f64; 2]> {
-    CA_MEMO
-        .lock()
-        .unwrap()
+    crate::lock(&CA_MEMO)
         .iter()
         .find(|(k, _)| *k == key)
         .map(|(_, v)| *v)
@@ -110,7 +115,7 @@ fn estimate_ca_memoised(frame: &LinearFrame, center: Option<[f64; 2]>) -> [f64; 
         white: frame.maximum as f32,
     };
     let v = lateral_ca::estimate(&img, center);
-    let mut memo = CA_MEMO.lock().unwrap();
+    let mut memo = crate::lock(&CA_MEMO);
     memo.push((key, v));
     if memo.len() > CA_MEMO_ENTRIES {
         memo.remove(0);
@@ -505,7 +510,9 @@ impl BakedExec for LensExec<'_> {
         input: Option<&FrameTexture>,
         output: &FrameTexture,
     ) {
-        let input = input.expect("the lens stage always has an upstream baked node");
+        // The graph always gives the lens stage an upstream baked node; with none there is nothing
+        // to correct and nothing to write.
+        let Some(input) = input else { return };
         let plan = LensPlan::resolve(self.params, self.frame, output.extent);
         if plan.is_identity() {
             PassthroughExec.encode(gpu, encoder, Some(input), output);

@@ -16,6 +16,9 @@ use crate::birefnet::{BiRefNetProvider, BIREFNET_ID, BIREFNET_VERSION};
 use crate::sky::{SkyProvider, SKY_ID, SKY_VERSION};
 
 /// Every segmentation provider this build ships.
+// The ids are fixed valid, distinct constants; registration can only fail on a programming error in
+// them, which the registry tests below would catch.
+#[allow(clippy::expect_used)]
 pub fn segmentation_registry() -> SegmentationRegistry {
     let mut registry: SegmentationRegistry = Registry::new();
     registry
