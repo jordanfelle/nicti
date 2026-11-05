@@ -1050,12 +1050,12 @@ pub fn develop_stage_set(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use nicti_tapetum::stages::{EXPOSURE, TONE};
 
     #[derive(Default)]
-    struct Mock {
+    pub(crate) struct Mock {
         view: &'static str,
         selected: Option<i64>,
         rated: Vec<(Vec<i64>, Option<i64>)>,

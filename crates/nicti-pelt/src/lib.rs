@@ -45,6 +45,7 @@ mod mask_models;
 mod mask_panel;
 mod mask_tool;
 mod notices;
+mod palette;
 mod pending;
 mod prebake;
 mod preview_color;
