@@ -356,6 +356,61 @@ pub fn attention_items(open: &[RootMove], move_running: bool) -> Vec<AttentionIt
         .collect()
 }
 
+/// A drive's heading. The catch-all `/` holds everything outside a conventional mount parent
+/// (`/tmp`, `/home`, ...), so it says so instead of posing as a disk (#761).
+fn drive_label(path: &str) -> String {
+    if path == "/" {
+        "/ (other locations)".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+/// A path with Windows verbatim prefixes removed and every `\` as `/`, for comparing a root with
+/// its drive: `\\?\D:\x` -> `D:/x`, `\\?\UNC\srv\share\x` -> `//srv/share/x`.
+fn normalised(path: &str) -> String {
+    let p = if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+    };
+    p.replace('\\', "/")
+}
+
+/// A root's row text: its path below the drive (`photos/2026`, not just `2026`), so two folders
+/// with the same leaf name are told apart and the location is readable at a glance. Over 40
+/// characters it keeps the first and the last two components around an ellipsis (the first one
+/// is usually what tells `2025/...` from `2026/...`); a path of three components or fewer is
+/// never shortened. The full path is the hover text.
+fn root_label(root_path: &str, drive_path: &str) -> String {
+    const MAX_CHARS: usize = 40;
+    let root = normalised(root_path);
+    let drive = normalised(drive_path);
+    let drive = drive.trim_end_matches('/');
+    let below = root
+        .get(..drive.len())
+        .filter(|head| head.eq_ignore_ascii_case(drive))
+        .map_or(root.as_str(), |_| &root[drive.len()..]);
+    let rel = below.trim_matches('/');
+    if rel.is_empty() {
+        return folder_name(root_path).to_string();
+    }
+    // Windows-looking paths keep their backslashes in the label.
+    let bytes = root_path.as_bytes();
+    let windows = root_path.starts_with(r"\\")
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':');
+    let sep = if windows { "\\" } else { "/" };
+    let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    if rel.chars().count() <= MAX_CHARS || parts.len() <= 3 {
+        return parts.join(sep);
+    }
+    format!(
+        "{first}{sep}\u{2026}{sep}{}",
+        parts[parts.len() - 2..].join(sep),
+        first = parts[0]
+    )
+}
+
 fn folder_name(path: &str) -> &str {
     path.trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
@@ -411,18 +466,22 @@ pub fn show(
         let is_archive = archive.is_location(&drive.path);
         let badge = if is_archive { " \u{1F5C4} archive" } else { "" };
         let (_, dropped) = ui.dnd_drop_zone::<i64, ()>(egui::Frame::group(ui.style()), |ui| {
-            egui::CollapsingHeader::new(format!("\u{1F4BF} {}{badge}", drive.path))
+            egui::CollapsingHeader::new(format!("\u{1F4BF} {}{badge}", drive_label(&drive.path)))
                 .id_salt(("folder_panel_drive", &drive.path))
                 .default_open(true)
                 .show(ui, |ui| {
                     let mut flag = is_archive;
-                    if ui
-                        .checkbox(&mut flag, "Archive drive")
-                        .on_hover_text(
-                            "Folders moved here keep their thumbnails as .thumb.jpg files \
+                    // Not offered for the `/` catch-all: it is not one disk, and a location of `/` would
+                    // claim every path on the machine. An old saved `/` location still shows it
+                    // so it can be switched off.
+                    if (drive.path != "/" || is_archive)
+                        && ui
+                            .checkbox(&mut flag, "Archive drive")
+                            .on_hover_text(
+                                "Folders moved here keep their thumbnails as .thumb.jpg files \
                              next to the photos instead of in the catalog.",
-                        )
-                        .changed()
+                            )
+                            .changed()
                     {
                         *set_archive = Some((drive.path.clone(), flag));
                     }
@@ -446,6 +505,7 @@ pub fn show(
                         let row = show_root(
                             ui,
                             root,
+                            &drive.path,
                             moving,
                             selected_root == Some(root.id),
                             verify_enabled,
@@ -662,12 +722,13 @@ struct RowOutput {
 fn show_root(
     ui: &mut egui::Ui,
     root: &Root,
+    drive_path: &str,
     moving: bool,
     selected: bool,
     verify_enabled: bool,
 ) -> RowOutput {
     let id = egui::Id::unique(("folder_panel_root", root.id));
-    let label = folder_name(&root.path);
+    let label = root_label(&root.path, drive_path);
     let icon = if root.archived {
         "\u{1F5C4}"
     } else {
@@ -1261,6 +1322,109 @@ mod tests {
         h.get_by_label("Keep destination").click();
         h.run();
         assert_eq!(h.state().0.resolve, Some((5, Resolution::KeepDestination)));
+    }
+
+    #[test]
+    fn a_root_row_shows_its_path_below_the_drive() {
+        assert_eq!(root_label("/mnt/d/Photos/2026", "/mnt/d"), "Photos/2026");
+        assert_eq!(root_label(r"D:\Photos\2026\", r"D:\"), r"Photos\2026");
+        assert_eq!(
+            root_label(r"d:\Photos", r"D:\"),
+            "Photos",
+            "drive letters ignore case"
+        );
+        assert_eq!(root_label("/tmp/x/jpgs", "/"), "tmp/x/jpgs");
+        // The drive itself imported as a root: its own name, not an empty label.
+        assert_eq!(root_label("/mnt/d", "/mnt/d"), "d");
+        // A path that is not under the drive falls back to the whole path.
+        assert_eq!(root_label("/other/place", "/mnt/d"), "other/place");
+    }
+
+    #[test]
+    fn a_long_root_path_keeps_its_first_and_last_two_components() {
+        let p = "/mnt/d/Photography/Conventions/2026/Furpocalypse/Day1/Selects";
+        assert_eq!(root_label(p, "/mnt/d"), "Photography/\u{2026}/Day1/Selects");
+        // The distinguishing leading folder survives, so these two stay apart.
+        let a = "/mnt/d/2025/Conventions/Furpocalypse/Day1/Selects";
+        let b = "/mnt/d/2026/Conventions/Furpocalypse/Day1/Selects";
+        assert_ne!(root_label(a, "/mnt/d"), root_label(b, "/mnt/d"));
+        // Three components or fewer are never shortened, however long.
+        let long = format!(
+            "/mnt/d/{}/{}/{}",
+            "a".repeat(30),
+            "b".repeat(30),
+            "c".repeat(30)
+        );
+        assert!(!root_label(&long, "/mnt/d").contains('\u{2026}'));
+    }
+
+    #[test]
+    fn windows_prefix_forms_are_matched_to_their_drive() {
+        assert_eq!(root_label(r"\\?\D:\Photos\2026", r"D:\"), r"Photos\2026");
+        assert_eq!(root_label("d:/Photos", r"D:\"), r"Photos");
+        assert_eq!(root_label(r"\\?\UNC\srv\share\x\y", r"\\srv\share"), r"x\y");
+        assert_eq!(root_label("//srv/share/x", r"\\srv\share"), "x");
+        assert_eq!(
+            root_label("D:", r"D:\"),
+            "D:",
+            "the drive itself keeps a label"
+        );
+    }
+
+    #[test]
+    fn multibyte_paths_never_panic() {
+        assert_eq!(
+            root_label("/mnt/d/\u{5199}\u{771f}/\u{1F4F7}", "/mnt/d"),
+            "\u{5199}\u{771f}/\u{1F4F7}"
+        );
+        assert_eq!(root_label("/m", "/mnt/\u{5199}\u{771f}"), "m");
+    }
+
+    /// Whether the panel offers "Archive drive" for a root on the `/` catch-all.
+    fn archive_checkbox_on_catch_all(locations: &[&'static str]) -> bool {
+        use egui_kittest::kittest::Queryable;
+        let tree = build_tree(&[root(5, "/tmp/shoot")], &[]);
+        assert_eq!(tree[0].path, "/");
+        let locations: Vec<&'static str> = locations.to_vec();
+        let mut h = egui_kittest::Harness::new_ui_state(
+            move |ui, tree: &mut Vec<DriveNode>| {
+                let archive = ArchiveDrives::with_locations(&locations);
+                let mut set_archive = None;
+                show(
+                    ui,
+                    tree,
+                    &[],
+                    None,
+                    false,
+                    &archive,
+                    &mut set_archive,
+                    None,
+                    true,
+                    &mut crate::folder_browse::Browse::already_revealed(5),
+                );
+            },
+            tree,
+        );
+        h.run();
+        h.query_by_label("Archive drive").is_some()
+    }
+
+    #[test]
+    fn the_catch_all_offers_archive_only_to_switch_an_old_location_off() {
+        assert!(
+            !archive_checkbox_on_catch_all(&[]),
+            "never offered to turn on"
+        );
+        assert!(
+            archive_checkbox_on_catch_all(&["/"]),
+            "an old saved / location can still be switched off"
+        );
+    }
+
+    #[test]
+    fn the_catch_all_drive_is_not_presented_as_a_disk() {
+        assert_eq!(drive_label("/"), "/ (other locations)");
+        assert_eq!(drive_label("/mnt/d"), "/mnt/d");
     }
 
     #[test]
