@@ -114,7 +114,10 @@ pub fn run_with(version: &str, control: Option<ControlOptions>) -> eframe::Resul
     });
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        viewport: egui::ViewportBuilder::default().with_title("Nicti"),
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Nicti")
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([900.0, 600.0]),
         wgpu_options: egui_wgpu::WgpuConfiguration {
             wgpu_setup,
             ..Default::default()

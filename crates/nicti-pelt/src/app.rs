@@ -145,6 +145,9 @@ pub struct PeltApp {
     /// returns `None` that whole time), distinct from a classified `Idle`.
     bottleneck: Option<hackles::Verdict>,
     import_path_input: String,
+    /// Whether the Library tools drawer has already been folded away once for a non-empty
+    /// catalog (#757): after that it is the user's to open and close.
+    library_tools_settled: bool,
     /// #342: Browse dialogs for the Import/Sync folder and the Move destination.
     import_picker: FolderPicker,
     move_picker: FolderPicker,
@@ -304,6 +307,29 @@ pub struct PeltApp {
 /// How often `poll_backup` even bothers checking `NineLives::due` -- `due` itself is cheap (one
 /// directory listing), but there's no reason to run it every single frame.
 const BACKUP_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How the Library tools drawer starts and when it folds away (#757).
+#[derive(Debug, PartialEq, Eq)]
+struct ToolsDrawerPlan {
+    /// Open the first time it is drawn: only on an empty catalog, where Import is the call to action.
+    default_open: bool,
+    /// Fold it now: the first time a non-empty catalog is seen, so importing into an empty one
+    /// hands the screen to the grid. After that the user's open/closed choice stands.
+    fold_now: bool,
+    label: &'static str,
+}
+
+fn tools_drawer_plan(total: usize, settled: bool) -> ToolsDrawerPlan {
+    ToolsDrawerPlan {
+        default_open: total == 0,
+        fold_now: total > 0 && !settled,
+        label: if total == 0 {
+            "Import and library tools"
+        } else {
+            "Library tools: import, sync, move, backup, cache"
+        },
+    }
+}
 
 impl PeltApp {
     /// `store` is the already-opened catalog at `catalog_path`: opening is the launcher's job
@@ -504,6 +530,7 @@ impl PeltApp {
             telemetry,
             bottleneck: None,
             import_path_input: String::new(),
+            library_tools_settled: false,
             import_picker: FolderPicker::default(),
             move_picker: FolderPicker::default(),
             import_status: None,
@@ -1906,7 +1933,7 @@ impl PeltApp {
         let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
         egui::CollapsingHeader::new(header)
             .id_salt("nicti_pelt_library_filters")
-            .default_open(true)
+            .default_open(false)
             .show(ui, |ui| {
                 self.filter_bar.show(ui, &dyn_store, &mut self.grid_root);
             });
@@ -2077,10 +2104,43 @@ impl PeltApp {
         if let Some(chosen) = self.move_picker.poll() {
             self.move_dest_input = chosen.to_string_lossy().into_owned();
         }
-        egui::CollapsingHeader::new("Folders: import, sync, move")
-            .id_salt("nicti_pelt_library_folders")
-            .default_open(true)
-            .show(ui, |ui| self.show_library_controls(ui));
+        // #757: the photo grid is the main surface. The admin tools (import, sync, move, backup,
+        // preview cache, XMP, Lightroom import) live in a drawer that is open on an empty
+        // catalog, where Import is the call to action, and folds away once there are photos.
+        // Nothing is drawn until the grid has loaded, so the first state is never a guess.
+        if let Some((loaded, total)) = self.grid.as_ref().map(|g| (g.is_loaded(), g.len())) {
+            if loaded {
+                let id = ui.make_persistent_id("nicti_pelt_library_folders");
+                let plan = tools_drawer_plan(total, self.library_tools_settled);
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    plan.default_open,
+                );
+                if plan.fold_now {
+                    state.set_open(false);
+                    self.library_tools_settled = true;
+                }
+                // A tool that is working shows its own progress inside the drawer: keep it open.
+                if self.card_copy.is_busy()
+                    || self.backup_copy.is_running()
+                    || self.geotag_ui.is_running()
+                {
+                    state.set_open(true);
+                }
+                state
+                    .show_header(ui, |ui| ui.label(plan.label))
+                    .body(|ui| self.show_library_controls(ui));
+            }
+        }
+        // Outside the drawer: the sidebar's "Import here..." and Repair thumbnails report here
+        // too, and must stay visible with the drawer folded.
+        if let Some(msg) = &self.import_status {
+            ui.colored_label(egui::Color32::RED, msg);
+        }
+        if let Some(msg) = &self.righting.status {
+            ui.label(msg.as_str());
+        }
         ui.separator();
 
         let outcome = match self.grid.as_mut() {
@@ -2406,12 +2466,6 @@ impl PeltApp {
                         self.open_in_loupe(&store);
                     }
                 });
-                if let Some(msg) = &self.import_status {
-                    ui.colored_label(egui::Color32::RED, msg);
-                }
-                if let Some(msg) = &self.righting.status {
-                    ui.label(msg.clone());
-                }
 
                 // #602: copy a camera card into a folder (verified copy, then registered).
                 let other_running = self.righting.is_running()
@@ -4371,5 +4425,32 @@ mod screenshot_tests {
         // Narrower than the cap: untouched.
         let v = encode_screenshot(&img, 1600).unwrap();
         assert_eq!(v["width"], 400);
+    }
+}
+
+#[cfg(test)]
+mod library_drawer_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_catalog_opens_the_drawer_so_import_is_the_call_to_action() {
+        let p = tools_drawer_plan(0, false);
+        assert!(p.default_open);
+        assert!(!p.fold_now);
+    }
+
+    #[test]
+    fn the_first_non_empty_catalog_folds_the_drawer_once() {
+        assert!(tools_drawer_plan(12, false).fold_now);
+        assert!(!tools_drawer_plan(12, false).default_open);
+        // Settled: the user's own open/closed choice is never overridden again.
+        assert!(!tools_drawer_plan(12, true).fold_now);
+    }
+
+    #[test]
+    fn importing_into_an_empty_catalog_folds_it_when_the_photos_arrive() {
+        // Empty: open and not yet settled; then photos appear, still unsettled -> fold.
+        assert!(!tools_drawer_plan(0, false).fold_now);
+        assert!(tools_drawer_plan(3, false).fold_now);
     }
 }
