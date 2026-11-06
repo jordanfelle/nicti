@@ -34,6 +34,46 @@ const PREFETCH_RADIUS: usize = 1;
 /// to disambiguate its own baked-output cache across different real photos at the same pixel
 /// extent -- today's `render.rs::build_graph` uses a constant hash, correct only because it always
 /// renders the one synthetic frame.
+/// The one-line description of a photo the Loupe shows under its header (#760): filename, capture
+/// time, camera, lens, ISO and pixel size, whichever the catalog has, joined by ` \u{b7} `.
+/// Shutter and aperture are not in the catalog, so they are not shown.
+pub fn info_line(asset: &Asset) -> String {
+    let name = asset
+        .rel_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&asset.rel_path)
+        .to_string();
+    let mut parts = vec![name];
+    if let Some(t) = asset.captured_at.as_deref().filter(|t| !t.is_empty()) {
+        parts.push(t.to_string());
+    }
+    // `Model` usually repeats the make ("NIKON CORPORATION" / "NIKON Z 8"): show it once.
+    let camera = match (asset.make.as_deref(), asset.model.as_deref()) {
+        (Some(make), Some(model))
+            if make
+                .split_whitespace()
+                .next()
+                .is_some_and(|brand| model.to_lowercase().starts_with(&brand.to_lowercase())) =>
+        {
+            Some(model.to_string())
+        }
+        (Some(make), Some(model)) => Some(format!("{make} {model}")),
+        (None, Some(model)) => Some(model.to_string()),
+        (Some(make), None) => Some(make.to_string()),
+        (None, None) => None,
+    };
+    parts.extend(camera.filter(|c| !c.trim().is_empty()));
+    parts.extend(asset.lens.clone().filter(|l| !l.trim().is_empty()));
+    if let Some(iso) = asset.iso {
+        parts.push(format!("ISO {iso}"));
+    }
+    if let (Some(w), Some(h)) = (asset.width, asset.height) {
+        parts.push(format!("{w}\u{d7}{h}"));
+    }
+    parts.join(" \u{b7} ")
+}
+
 pub fn asset_cache_key(asset: &Asset) -> blake3::Hash {
     match &asset.fingerprint {
         Some(fp) => blake3::hash(fp.as_bytes()),
@@ -503,6 +543,61 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    fn asset_with(rel_path: &str) -> Asset {
+        Asset {
+            id: 1,
+            root_id: 1,
+            rel_path: rel_path.into(),
+            rel_path_fold: rel_path.to_lowercase(),
+            size_bytes: 1,
+            mtime_unix: 0,
+            fingerprint: None,
+            natural_key: None,
+            make: None,
+            model: None,
+            captured_at: None,
+            rating: None,
+            flag: None,
+            label: None,
+            width: None,
+            height: None,
+            imported_at: 0,
+            lens: None,
+            iso: None,
+            missing_since: None,
+            orientation: None,
+        }
+    }
+
+    #[test]
+    fn the_info_line_names_the_file_and_whatever_the_catalog_knows() {
+        let mut a = asset_with("2026/11/DSC_0042.NEF");
+        assert_eq!(info_line(&a), "DSC_0042.NEF");
+        a.captured_at = Some("2026-11-05 14:03:09".into());
+        a.make = Some("NIKON CORPORATION".into());
+        a.model = Some("NIKON Z 8".into());
+        a.lens = Some("NIKKOR Z 70-200mm f/2.8 VR S".into());
+        a.iso = Some(800);
+        a.width = Some(8256);
+        a.height = Some(5504);
+        assert_eq!(
+            info_line(&a),
+            "DSC_0042.NEF \u{b7} 2026-11-05 14:03:09 \u{b7} NIKON Z 8 \u{b7} \
+             NIKKOR Z 70-200mm f/2.8 VR S \u{b7} ISO 800 \u{b7} 8256\u{d7}5504"
+        );
+    }
+
+    #[test]
+    fn the_info_line_handles_windows_paths_and_a_make_that_the_model_does_not_repeat() {
+        let mut a = asset_with("shoot\\day1\\IMG_1.jpg");
+        a.make = Some("Canon".into());
+        a.model = Some("EOS R5".into());
+        assert_eq!(info_line(&a), "IMG_1.jpg \u{b7} Canon EOS R5");
+        a.make = None;
+        a.model = Some("  ".into());
+        assert_eq!(info_line(&a), "IMG_1.jpg");
+    }
 
     struct CountingDecoder {
         calls: AtomicUsize,

@@ -50,7 +50,7 @@ use crate::keyword_tag::KeywordUi;
 use crate::knead::batch::{run_batch, run_rotation_batch};
 use crate::knead::ui::{Command as KneadCommand, KneadUi, PanelAction};
 use crate::knead::Clipboard;
-use crate::loupe::{asset_cache_key, LoupeSession};
+use crate::loupe::{asset_cache_key, info_line, LoupeSession};
 use crate::lrc_import::{self, LrcImportUi};
 use crate::mask_panel::MaskUi;
 use crate::prebake::{self, PrebakeService};
@@ -212,6 +212,8 @@ pub struct PeltApp {
     /// `false` = "Fit" (aspect-correct, the default on every fresh cursor move), `true` = "100%"
     /// (1:1 pixel zoom for focus-checking, #31's own ticket title). Toggled by Space.
     loupe_zoomed: bool,
+    /// The Loupe's info line for one asset (#760), so the catalog is not read every frame.
+    loupe_info: Option<(i64, String)>,
     /// Pan offset in texture-UV units, only meaningful (and only adjustable, via drag) in 100%
     /// mode -- reset to `[0.0, 0.0]` on every cursor move, matching a fresh image's own natural
     /// centered view rather than wherever the previous image happened to be panned to.
@@ -567,6 +569,7 @@ impl PeltApp {
             render_due: eyeshine::RenderDebounce::default(),
             prefetch_at: None,
             loupe_zoomed: false,
+            loupe_info: None,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
             preview_color_generation: 0,
@@ -3307,6 +3310,49 @@ impl PeltApp {
             // retry() only clears the error -- request_prefetch has to actually run again to
             // resubmit it, same as any other cursor-move-triggered prefetch.
             let _ = loupe.set_cursor(cursor, store.as_ref(), &self.pounce);
+        }
+
+        // #760: what the photo is, how to move on, and the keys that work here.
+        if self.loupe_info.as_ref().map(|(id, _)| *id) != Some(asset_id) {
+            let line = store
+                .get_asset(asset_id)
+                .ok()
+                .flatten()
+                .map(|a| info_line(&a))
+                .unwrap_or_default();
+            self.loupe_info = Some((asset_id, line));
+        }
+        let mut step: i64 = 0;
+        ui.horizontal(|ui| {
+            let total = self.loupe.as_ref().map_or(0, |l| l.len());
+            if ui
+                .add_enabled(cursor > 0, egui::Button::new("\u{25c0} Prev"))
+                .clicked()
+            {
+                step = -1;
+            }
+            if ui
+                .add_enabled(cursor + 1 < total, egui::Button::new("Next \u{25b6}"))
+                .clicked()
+            {
+                step = 1;
+            }
+            if let Some((_, line)) = &self.loupe_info {
+                ui.label(line.as_str());
+            }
+        });
+        ui.weak(
+            "\u{2190}/\u{2192} photo \u{b7} Space zoom \u{b7} 1-5 stars (0 clear) \u{b7} \
+             P pick \u{b7} X reject \u{b7} U unflag \u{b7} 6-9 colour label",
+        );
+        if step != 0 {
+            if let Some(loupe) = self.loupe.as_mut() {
+                let target = (cursor as i64 + step).clamp(0, loupe.len() as i64 - 1) as usize;
+                let _ = loupe.set_cursor(target, store.as_ref(), &self.pounce);
+                self.loupe_zoomed = false;
+                self.loupe_pan = [0.0, 0.0];
+                ui.ctx().request_repaint();
+            }
         }
 
         match frame {
