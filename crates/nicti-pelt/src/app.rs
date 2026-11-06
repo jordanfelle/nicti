@@ -212,6 +212,9 @@ pub struct PeltApp {
     /// `false` = "Fit" (aspect-correct, the default on every fresh cursor move), `true` = "100%"
     /// (1:1 pixel zoom for focus-checking, #31's own ticket title). Toggled by Space.
     loupe_zoomed: bool,
+    /// The photo whose "Rendering..." frame has been shown (#768): its first full-resolution
+    /// render runs on the next frame.
+    loupe_render_announced: Option<i64>,
     /// The Loupe's info line for one asset (#760), so the catalog is not read every frame.
     loupe_info: Option<(i64, String)>,
     /// Pan offset in texture-UV units, only meaningful (and only adjustable, via drag) in 100%
@@ -309,6 +312,12 @@ pub struct PeltApp {
 /// How often `poll_backup` even bothers checking `NineLives::due` -- `due` itself is cheap (one
 /// directory listing), but there's no reason to run it every single frame.
 const BACKUP_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Whether the Loupe must paint a "Rendering..." frame before it starts `asset_id`'s first
+/// full-resolution render: once per photo, so the notice is on screen while the UI thread is busy.
+fn loupe_first_render_needs_notice(announced: Option<i64>, asset_id: i64) -> bool {
+    announced != Some(asset_id)
+}
 
 /// How the Library tools drawer starts and when it folds away (#757).
 #[derive(Debug, PartialEq, Eq)]
@@ -569,6 +578,7 @@ impl PeltApp {
             render_due: eyeshine::RenderDebounce::default(),
             prefetch_at: None,
             loupe_zoomed: false,
+            loupe_render_announced: None,
             loupe_info: None,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
@@ -1700,7 +1710,9 @@ impl eframe::App for PeltApp {
             }
         }
         let panel_frame = if self.view == View::Develop {
-            self.develop.as_mut().map(|d| d.render())
+            crate::slow_trace::section("develop.render (panels)", || {
+                self.develop.as_mut().map(|d| d.render())
+            })
         } else {
             None
         };
@@ -1738,7 +1750,9 @@ impl eframe::App for PeltApp {
             d.uncropped_keeps_upright = self.heal_ui.crop_active() && !d.upright_guide_mode;
         }
         let viewport_frame = if self.view == View::Develop {
-            self.develop.as_mut().map(|d| d.render())
+            crate::slow_trace::section("develop.render (viewport)", || {
+                self.develop.as_mut().map(|d| d.render())
+            })
         } else {
             None
         };
@@ -2767,6 +2781,7 @@ impl PeltApp {
         let _ = session.set_cursor(cursor, store.as_ref(), &self.pounce);
         self.loupe = Some(session);
         self.loupe_info = None;
+        self.loupe_render_announced = None;
         self.loupe_from_grid = from_grid;
         // Deliberately NOT resetting `loupe_loaded_asset` here: it tracks which asset id is
         // currently loaded into the shared `develop` view, independent of which `LoupeSession`
@@ -3233,7 +3248,7 @@ impl PeltApp {
             return;
         };
 
-        loupe.poll(store.as_ref(), &self.pounce);
+        crate::slow_trace::section("loupe.poll", || loupe.poll(store.as_ref(), &self.pounce));
 
         if loupe.is_empty() {
             ui.heading("Loupe");
@@ -3269,7 +3284,9 @@ impl PeltApp {
         let Some(asset_id) = loupe.current_asset_id() else {
             return; // is_empty() already checked above; unreachable in practice
         };
-        let frame = loupe.current_frame(store.as_ref());
+        let frame = crate::slow_trace::section("loupe.current_frame", || {
+            loupe.current_frame(store.as_ref())
+        });
         let cursor_label = format!("{} / {}", loupe.cursor() + 1, loupe.len());
         let error_label = loupe.current_error(store.as_ref()).map(str::to_string);
         let cursor = loupe.cursor();
@@ -3410,11 +3427,28 @@ impl PeltApp {
                     if let (Some(develop), Some(asset)) = (self.develop.as_mut(), &current_asset) {
                         let identity = asset_cache_key(asset);
                         let doc = stored_edit_document(store.as_ref(), asset_id);
-                        develop.load_real_frame(frame, identity, doc);
+                        crate::slow_trace::section("develop.load_real_frame", || {
+                            develop.load_real_frame(frame, identity, doc)
+                        });
                         self.loupe_loaded_asset = Some((asset_id, identity));
                     }
                 }
-                self.paint_loupe_viewport(ui);
+                // #768: the first render of a photo runs on this thread and can take seconds. Show
+                // a frame that says so (over the preview) before it starts, so the UI reads as
+                // working, not frozen.
+                if loupe_first_render_needs_notice(self.loupe_render_announced, asset_id) {
+                    self.loupe_render_announced = Some(asset_id);
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Rendering the full-resolution photo\u{2026}");
+                    });
+                    self.show_loupe_t0_fallback(ui, store.as_ref(), asset_id);
+                    ui.ctx().request_repaint();
+                    return;
+                }
+                crate::slow_trace::section("paint_loupe_viewport", || {
+                    self.paint_loupe_viewport(ui)
+                });
             }
             None => {
                 if self.develop_holds_current_revision(store.as_ref(), asset_id) {
@@ -3831,7 +3865,11 @@ impl PeltApp {
             }
         }
 
-        ui.label("Decoding full-resolution image...");
+        // While the first render is pending the decode is already done: the Rendering notice above
+        // says what is happening, so this line would be wrong.
+        if self.loupe_render_announced != Some(asset_id) {
+            ui.label("Decoding full-resolution image...");
+        }
         if let Some(r) = &resolved {
             let rendered = self.loupe_rendered.as_ref().map(|(_, h)| h.as_str());
             let have = eyeshine::Available {
@@ -4477,6 +4515,19 @@ mod screenshot_tests {
 #[cfg(test)]
 mod library_drawer_tests {
     use super::*;
+
+    #[test]
+    fn the_first_render_of_each_photo_is_announced_once() {
+        assert!(loupe_first_render_needs_notice(None, 5));
+        assert!(
+            !loupe_first_render_needs_notice(Some(5), 5),
+            "second frame renders"
+        );
+        assert!(
+            loupe_first_render_needs_notice(Some(5), 6),
+            "a new photo is announced again"
+        );
+    }
 
     #[test]
     fn an_empty_catalog_opens_the_drawer_so_import_is_the_call_to_action() {
