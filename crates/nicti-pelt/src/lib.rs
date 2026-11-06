@@ -71,6 +71,7 @@ mod render;
 mod repaint_trace;
 mod righting_ui;
 mod section_state;
+mod slow_trace;
 mod stash;
 #[cfg(test)]
 mod swat;

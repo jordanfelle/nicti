@@ -229,16 +229,77 @@ pub enum ReadbackError {
     NotMapped(String),
 }
 
-/// Maps `staging` for reading, waits for the GPU, and copies the bytes out.
+/// How long a readback waits for the GPU before it fails (#768). A full-resolution readback on a
+/// slow adapter takes seconds; a GPU job that never finishes must not hang the UI forever.
+pub const READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// After a readback times out, further readbacks fail at once for this long instead of blocking
+/// the calling thread for another [`READBACK_TIMEOUT`] each time (a wedged GPU would otherwise
+/// freeze the UI periodically instead of once).
+pub const READBACK_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Seconds since process start of the last readback timeout; 0 = none yet.
+static LAST_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn process_secs() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    // +1 so "now" is never 0, the "no timeout yet" sentinel.
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs()
+        + 1
+}
+
+/// Whether a timeout at `last` (0 = never) still puts readbacks on cooldown at `now`.
+fn in_cooldown(last: u64, now: u64, cooldown: std::time::Duration) -> bool {
+    last != 0 && now.saturating_sub(last) < cooldown.as_secs()
+}
+
+/// The error a bounded wait that did not complete maps to.
+fn wait_error(e: wgpu::PollError, timeout: std::time::Duration) -> ReadbackError {
+    match e {
+        wgpu::PollError::Timeout => ReadbackError::Device(format!(
+            "the GPU did not finish within {} s",
+            timeout.as_secs()
+        )),
+        other => ReadbackError::Device(other.to_string()),
+    }
+}
+
+/// Maps `staging` for reading, waits for the GPU (at most [`READBACK_TIMEOUT`]), and copies the
+/// bytes out.
 pub(crate) fn read_mapped(
     gpu: &GpuContext,
     staging: &wgpu::Buffer,
 ) -> Result<Vec<u8>, ReadbackError> {
+    read_mapped_within(gpu, staging, READBACK_TIMEOUT)
+}
+
+fn read_mapped_within(
+    gpu: &GpuContext,
+    staging: &wgpu::Buffer,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, ReadbackError> {
+    let last = LAST_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed);
+    if in_cooldown(last, process_secs(), READBACK_COOLDOWN) {
+        return Err(ReadbackError::Device(
+            "the GPU timed out on an earlier readback; not waiting again yet".into(),
+        ));
+    }
     let slice = staging.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
     gpu.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| ReadbackError::Device(e.to_string()))?;
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(timeout),
+        })
+        .map_err(|e| {
+            if matches!(e, wgpu::PollError::Timeout) {
+                LAST_TIMEOUT_SECS.store(process_secs(), std::sync::atomic::Ordering::Relaxed);
+            }
+            wait_error(e, timeout)
+        })?;
     let bytes = slice
         .get_mapped_range()
         .map_err(|e| ReadbackError::NotMapped(e.to_string()))?
@@ -258,6 +319,29 @@ pub(crate) fn expect_readback<T>(result: Result<T, ReadbackError>) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn after_a_timeout_readbacks_fail_fast_until_the_cooldown_ends() {
+        let cd = std::time::Duration::from_secs(120);
+        assert!(!in_cooldown(0, 500, cd), "no timeout yet");
+        assert!(in_cooldown(100, 150, cd), "50 s after a timeout");
+        assert!(in_cooldown(100, 219, cd));
+        assert!(!in_cooldown(100, 220, cd), "120 s later it tries again");
+    }
+
+    #[test]
+    fn a_timed_out_wait_is_a_readback_error_not_a_hang() {
+        let e = wait_error(wgpu::PollError::Timeout, std::time::Duration::from_secs(60));
+        assert!(
+            matches!(&e, ReadbackError::Device(m) if m.contains("did not finish within 60 s")),
+            "{e}"
+        );
+        let other = wait_error(
+            wgpu::PollError::WrongSubmissionIndex(1, 2),
+            std::time::Duration::from_secs(1),
+        );
+        assert!(matches!(other, ReadbackError::Device(_)));
+    }
 
     #[test]
     fn small_workload_stays_1d() {
