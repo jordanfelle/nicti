@@ -122,6 +122,9 @@ pub struct ExportUi {
     start_error: Option<String>,
 }
 
+/// Height kept under the scrolling options for the pinned footer (messages + buttons).
+const FOOTER_RESERVE: f32 = 120.0;
+
 impl ExportUi {
     pub fn new(catalog_path: &Path) -> Self {
         let presets_path = presets_file_for(catalog_path);
@@ -269,11 +272,17 @@ impl ExportUi {
         let mut action = Action::None;
         let modal = egui::Modal::new(egui::Id::unique("nicti_export_dialog")).show(ctx, |ui| {
             ui.set_max_width(560.0);
+            // #759: the options scroll, the footer (problems + Export/Cancel) never does, and
+            // the dialog gets the window's height instead of what is left below the Area's
+            // anchor (a centred Area otherwise hands the scroll area about half the window).
+            let body_h = (ctx.content_rect().height() * 0.9 - FOOTER_RESERVE).max(200.0);
             egui::ScrollArea::vertical()
-                .max_height(ctx.content_rect().height() * 0.8)
-                .show(ui, |ui| {
-                    action = self.contents(ui, &mut dialog);
-                });
+                .max_height(body_h)
+                .min_scrolled_height(body_h)
+                .auto_shrink([false, true])
+                .show(ui, |ui| self.body(ui, &mut dialog));
+            ui.separator();
+            action = self.footer(ui, &mut dialog);
         });
         if modal.should_close() {
             action = Action::Close;
@@ -379,7 +388,7 @@ impl ExportUi {
 
     // --- dialog contents ------------------------------------------------------------------------
 
-    fn contents(&mut self, ui: &mut egui::Ui, d: &mut Dialog) -> Action {
+    fn body(&mut self, ui: &mut egui::Ui, d: &mut Dialog) {
         ui.heading("Export");
         ui.label(format!("Exporting {}.", d.scope));
         ui.add_space(4.0);
@@ -397,8 +406,10 @@ impl ExportUi {
         naming_section(ui, d);
         ui.separator();
         destination_section(ui, &mut d.spec, &mut d.folder_picker);
-        ui.add_space(6.0);
+    }
 
+    /// Validation problems and the Export/Cancel buttons: pinned under the scrolling options.
+    fn footer(&mut self, ui: &mut egui::Ui, d: &mut Dialog) -> Action {
         let validity = d.spec.validate();
         if let Err(e) = &validity {
             ui.colored_label(egui::Color32::LIGHT_RED, e.to_string());
@@ -1136,6 +1147,58 @@ mod tests {
                 "drawing alone never closes the dialog"
             );
         }
+    }
+
+    /// Height of the dialog's area after a few frames on a `w` x `h` window.
+    fn dialog_height(w: f32, h: f32) -> f32 {
+        let screen_h = h;
+        let dir = tempfile::tempdir().unwrap();
+        let mut ui_state = ExportUi::new(&dir.path().join("catalog.db"));
+        ui_state.request(vec![1], "1 photo".into(), vec![facts("a")]);
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(w, h),
+            )),
+            ..Default::default()
+        };
+        let mut height = 0.0;
+        for _ in 0..4 {
+            let out = ctx.run_ui(input.clone(), |ui| {
+                ui_state.show_dialog(ui.ctx(), &|| None);
+                // The dialog's own Area: the tallest one that is not the full-window backdrop.
+                height = ui.ctx().memory(|m| {
+                    m.layer_ids()
+                        .filter_map(|l| m.area_rect(l.id))
+                        .map(|r| r.height())
+                        .filter(|h| *h < screen_h - 1.0)
+                        .fold(0.0_f32, f32::max)
+                });
+            });
+            out.drop_without_applying_deltas();
+        }
+        height
+    }
+
+    /// #759: on a tall window the dialog used about 40% of it (a centred Area handed the scroll
+    /// area what was left below its anchor), hiding the destination and Export button.
+    #[test]
+    fn the_dialog_uses_a_tall_window_instead_of_a_fixed_slice() {
+        let tall = dialog_height(1600.0, 1000.0);
+        assert!(
+            tall >= 600.0,
+            "dialog is only {tall} px tall on a 1000 px window"
+        );
+    }
+
+    #[test]
+    fn the_dialog_never_outgrows_a_short_window() {
+        let short = dialog_height(900.0, 500.0);
+        assert!(
+            short <= 500.0,
+            "dialog is {short} px tall on a 500 px window"
+        );
     }
 
     #[test]
