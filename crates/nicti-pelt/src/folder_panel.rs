@@ -366,28 +366,49 @@ fn drive_label(path: &str) -> String {
     }
 }
 
+/// A path with Windows verbatim prefixes removed and every `\` as `/`, for comparing a root with
+/// its drive: `\\?\D:\x` -> `D:/x`, `\\?\UNC\srv\share\x` -> `//srv/share/x`.
+fn normalised(path: &str) -> String {
+    let p = if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+    };
+    p.replace('\\', "/")
+}
+
 /// A root's row text: its path below the drive (`photos/2026`, not just `2026`), so two folders
-/// with the same leaf name are told apart and the location is readable at a glance. A long
-/// path keeps its last two components behind an ellipsis; the full path is the hover text.
+/// with the same leaf name are told apart and the location is readable at a glance. Over 40
+/// characters it keeps the first and the last two components around an ellipsis (the first one
+/// is usually what tells `2025/...` from `2026/...`); a path of three components or fewer is
+/// never shortened. The full path is the hover text.
 fn root_label(root_path: &str, drive_path: &str) -> String {
     const MAX_CHARS: usize = 40;
-    let is_sep = |c: char| c == '/' || c == '\\';
-    let below = root_path
-        .get(..drive_path.len())
-        .filter(|head| head.eq_ignore_ascii_case(drive_path))
-        .map(|_| &root_path[drive_path.len()..])
-        .unwrap_or(root_path);
-    let rel = below.trim_matches(is_sep);
+    let root = normalised(root_path);
+    let drive = normalised(drive_path);
+    let drive = drive.trim_end_matches('/');
+    let below = root
+        .get(..drive.len())
+        .filter(|head| head.eq_ignore_ascii_case(drive))
+        .map_or(root.as_str(), |_| &root[drive.len()..]);
+    let rel = below.trim_matches('/');
     if rel.is_empty() {
         return folder_name(root_path).to_string();
     }
-    if rel.chars().count() <= MAX_CHARS {
-        return rel.to_string();
+    // Windows-looking paths keep their backslashes in the label.
+    let bytes = root_path.as_bytes();
+    let windows = root_path.starts_with(r"\\")
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':');
+    let sep = if windows { "\\" } else { "/" };
+    let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    if rel.chars().count() <= MAX_CHARS || parts.len() <= 3 {
+        return parts.join(sep);
     }
-    let parts: Vec<&str> = rel.split(is_sep).filter(|p| !p.is_empty()).collect();
-    let tail = &parts[parts.len().saturating_sub(2)..];
-    let sep = if rel.contains('\\') { '\\' } else { '/' };
-    format!("\u{2026}{sep}{}", tail.join(&sep.to_string()))
+    format!(
+        "{first}{sep}\u{2026}{sep}{}",
+        parts[parts.len() - 2..].join(sep),
+        first = parts[0]
+    )
 }
 
 fn folder_name(path: &str) -> &str {
@@ -450,8 +471,9 @@ pub fn show(
                 .default_open(true)
                 .show(ui, |ui| {
                     let mut flag = is_archive;
-                    // Not for the `/` catch-all: it is not one disk, and a location of `/` would
-                    // claim every path on the machine.
+                    // Not offered for the `/` catch-all: it is not one disk, and a location of `/` would
+                    // claim every path on the machine. An old saved `/` location still shows it
+                    // so it can be switched off.
                     if drive.path != "/"
                         && ui
                             .checkbox(&mut flag, "Archive drive")
@@ -1319,9 +1341,43 @@ mod tests {
     }
 
     #[test]
-    fn a_long_root_path_keeps_its_last_two_components() {
+    fn a_long_root_path_keeps_its_first_and_last_two_components() {
         let p = "/mnt/d/Photography/Conventions/2026/Furpocalypse/Day1/Selects";
-        assert_eq!(root_label(p, "/mnt/d"), "\u{2026}/Day1/Selects");
+        assert_eq!(root_label(p, "/mnt/d"), "Photography/\u{2026}/Day1/Selects");
+        // The distinguishing leading folder survives, so these two stay apart.
+        let a = "/mnt/d/2025/Conventions/Furpocalypse/Day1/Selects";
+        let b = "/mnt/d/2026/Conventions/Furpocalypse/Day1/Selects";
+        assert_ne!(root_label(a, "/mnt/d"), root_label(b, "/mnt/d"));
+        // Three components or fewer are never shortened, however long.
+        let long = format!(
+            "/mnt/d/{}/{}/{}",
+            "a".repeat(30),
+            "b".repeat(30),
+            "c".repeat(30)
+        );
+        assert!(!root_label(&long, "/mnt/d").contains('\u{2026}'));
+    }
+
+    #[test]
+    fn windows_prefix_forms_are_matched_to_their_drive() {
+        assert_eq!(root_label(r"\\?\D:\Photos\2026", r"D:\"), r"Photos\2026");
+        assert_eq!(root_label("d:/Photos", r"D:\"), r"Photos");
+        assert_eq!(root_label(r"\\?\UNC\srv\share\x\y", r"\\srv\share"), r"x\y");
+        assert_eq!(root_label("//srv/share/x", r"\\srv\share"), "x");
+        assert_eq!(
+            root_label("D:", r"D:\"),
+            "D:",
+            "the drive itself keeps a label"
+        );
+    }
+
+    #[test]
+    fn multibyte_paths_never_panic() {
+        assert_eq!(
+            root_label("/mnt/d/\u{5199}\u{771f}/\u{1F4F7}", "/mnt/d"),
+            "\u{5199}\u{771f}/\u{1F4F7}"
+        );
+        assert_eq!(root_label("/m", "/mnt/\u{5199}\u{771f}"), "m");
     }
 
     #[test]
