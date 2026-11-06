@@ -27,29 +27,26 @@ use crate::t2::{self, try_lock_larder, CompactJob, CompactResult, SharedLarder, 
 /// later, not this ticket's scope.
 const PREFETCH_RADIUS: usize = 1;
 
-/// A stable per-asset cache key: fingerprint when the catalog has one (every real ingested asset
-/// does, `scruff::Ingest` always computes one), falling back to `(id, mtime_unix)` for the
-/// pathological case of a row with none recorded, so this stays total rather than panicking.
-/// This is also what #31 phase 3 must feed into Tapetum's `RenderGraph::set_own_hash(DECODE, ...)`
-/// to disambiguate its own baked-output cache across different real photos at the same pixel
-/// extent -- today's `render.rs::build_graph` uses a constant hash, correct only because it always
-/// renders the one synthetic frame.
 /// The one-line description of a photo the Loupe shows under its header (#760): filename, capture
 /// time, camera, lens, ISO and pixel size, whichever the catalog has, joined by ` \u{b7} `.
 /// Shutter and aperture are not in the catalog, so they are not shown.
 pub fn info_line(asset: &Asset) -> String {
+    fn blank(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|v| !v.is_empty())
+    }
+    // The last non-empty path segment (a trailing separator must not blank the name).
     let name = asset
         .rel_path
         .rsplit(['/', '\\'])
-        .next()
+        .find(|seg| !seg.is_empty())
         .unwrap_or(&asset.rel_path)
         .to_string();
     let mut parts = vec![name];
-    if let Some(t) = asset.captured_at.as_deref().filter(|t| !t.is_empty()) {
+    if let Some(t) = blank(asset.captured_at.as_deref()) {
         parts.push(t.to_string());
     }
     // `Model` usually repeats the make ("NIKON CORPORATION" / "NIKON Z 8"): show it once.
-    let camera = match (asset.make.as_deref(), asset.model.as_deref()) {
+    let camera = match (blank(asset.make.as_deref()), blank(asset.model.as_deref())) {
         (Some(make), Some(model))
             if make
                 .split_whitespace()
@@ -63,7 +60,7 @@ pub fn info_line(asset: &Asset) -> String {
         (Some(make), None) => Some(make.to_string()),
         (None, None) => None,
     };
-    parts.extend(camera.filter(|c| !c.trim().is_empty()));
+    parts.extend(camera);
     parts.extend(asset.lens.clone().filter(|l| !l.trim().is_empty()));
     if let Some(iso) = asset.iso {
         parts.push(format!("ISO {iso}"));
@@ -74,6 +71,13 @@ pub fn info_line(asset: &Asset) -> String {
     parts.join(" \u{b7} ")
 }
 
+/// A stable per-asset cache key: fingerprint when the catalog has one (every real ingested asset
+/// does, `scruff::Ingest` always computes one), falling back to `(id, mtime_unix)` for the
+/// pathological case of a row with none recorded, so this stays total rather than panicking.
+/// This is also what #31 phase 3 must feed into Tapetum's `RenderGraph::set_own_hash(DECODE, ...)`
+/// to disambiguate its own baked-output cache across different real photos at the same pixel
+/// extent -- today's `render.rs::build_graph` uses a constant hash, correct only because it always
+/// renders the one synthetic frame.
 pub fn asset_cache_key(asset: &Asset) -> blake3::Hash {
     match &asset.fingerprint {
         Some(fp) => blake3::hash(fp.as_bytes()),
@@ -586,6 +590,22 @@ mod tests {
             "DSC_0042.NEF \u{b7} 2026-11-05 14:03:09 \u{b7} NIKON Z 8 \u{b7} \
              NIKKOR Z 70-200mm f/2.8 VR S \u{b7} ISO 800 \u{b7} 8256\u{d7}5504"
         );
+    }
+
+    #[test]
+    fn blank_fields_and_odd_paths_never_leave_stray_separators() {
+        let mut a = asset_with("dir/");
+        a.make = Some(String::new());
+        a.model = Some("Z 8".into());
+        a.captured_at = Some("  ".into());
+        a.lens = Some(String::new());
+        a.width = Some(100); // no height: no size
+        assert_eq!(info_line(&a), "dir \u{b7} Z 8");
+        assert_eq!(info_line(&asset_with("a/b\\c.jpg")), "c.jpg");
+        let mut same = asset_with("x.jpg");
+        same.make = Some("Leica".into());
+        same.model = Some("Leica".into());
+        assert_eq!(info_line(&same), "x.jpg \u{b7} Leica");
     }
 
     #[test]

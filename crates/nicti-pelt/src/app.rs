@@ -2766,6 +2766,7 @@ impl PeltApp {
         }
         let _ = session.set_cursor(cursor, store.as_ref(), &self.pounce);
         self.loupe = Some(session);
+        self.loupe_info = None;
         self.loupe_from_grid = from_grid;
         // Deliberately NOT resetting `loupe_loaded_asset` here: it tracks which asset id is
         // currently loaded into the shared `develop` view, independent of which `LoupeSession`
@@ -3314,13 +3315,10 @@ impl PeltApp {
 
         // #760: what the photo is, how to move on, and the keys that work here.
         if self.loupe_info.as_ref().map(|(id, _)| *id) != Some(asset_id) {
-            let line = store
-                .get_asset(asset_id)
-                .ok()
-                .flatten()
-                .map(|a| info_line(&a))
-                .unwrap_or_default();
-            self.loupe_info = Some((asset_id, line));
+            // Cached only when the row was read: a failed read is retried next frame.
+            if let Some(asset) = store.get_asset(asset_id).ok().flatten() {
+                self.loupe_info = Some((asset_id, info_line(&asset)));
+            }
         }
         let mut step: i64 = 0;
         ui.horizontal(|ui| {
@@ -3338,7 +3336,9 @@ impl PeltApp {
                 step = 1;
             }
             if let Some((_, line)) = &self.loupe_info {
-                ui.label(line.as_str());
+                // Truncated with an ellipsis (full text on hover) rather than clipped or wrapped.
+                ui.add(egui::Label::new(line.as_str()).truncate())
+                    .on_hover_text(line.as_str());
             }
         });
         ui.weak(
