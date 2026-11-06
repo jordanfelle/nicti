@@ -27,6 +27,50 @@ use crate::t2::{self, try_lock_larder, CompactJob, CompactResult, SharedLarder, 
 /// later, not this ticket's scope.
 const PREFETCH_RADIUS: usize = 1;
 
+/// The one-line description of a photo the Loupe shows under its header (#760): filename, capture
+/// time, camera, lens, ISO and pixel size, whichever the catalog has, joined by ` \u{b7} `.
+/// Shutter and aperture are not in the catalog, so they are not shown.
+pub fn info_line(asset: &Asset) -> String {
+    fn blank(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|v| !v.is_empty())
+    }
+    // The last non-empty path segment (a trailing separator must not blank the name).
+    let name = asset
+        .rel_path
+        .rsplit(['/', '\\'])
+        .find(|seg| !seg.is_empty())
+        .unwrap_or(&asset.rel_path)
+        .to_string();
+    let mut parts = vec![name];
+    if let Some(t) = blank(asset.captured_at.as_deref()) {
+        parts.push(t.to_string());
+    }
+    // `Model` usually repeats the make ("NIKON CORPORATION" / "NIKON Z 8"): show it once.
+    let camera = match (blank(asset.make.as_deref()), blank(asset.model.as_deref())) {
+        (Some(make), Some(model))
+            if make
+                .split_whitespace()
+                .next()
+                .is_some_and(|brand| model.to_lowercase().starts_with(&brand.to_lowercase())) =>
+        {
+            Some(model.to_string())
+        }
+        (Some(make), Some(model)) => Some(format!("{make} {model}")),
+        (None, Some(model)) => Some(model.to_string()),
+        (Some(make), None) => Some(make.to_string()),
+        (None, None) => None,
+    };
+    parts.extend(camera);
+    parts.extend(asset.lens.clone().filter(|l| !l.trim().is_empty()));
+    if let Some(iso) = asset.iso {
+        parts.push(format!("ISO {iso}"));
+    }
+    if let (Some(w), Some(h)) = (asset.width, asset.height) {
+        parts.push(format!("{w}\u{d7}{h}"));
+    }
+    parts.join(" \u{b7} ")
+}
+
 /// A stable per-asset cache key: fingerprint when the catalog has one (every real ingested asset
 /// does, `scruff::Ingest` always computes one), falling back to `(id, mtime_unix)` for the
 /// pathological case of a row with none recorded, so this stays total rather than panicking.
@@ -503,6 +547,77 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    fn asset_with(rel_path: &str) -> Asset {
+        Asset {
+            id: 1,
+            root_id: 1,
+            rel_path: rel_path.into(),
+            rel_path_fold: rel_path.to_lowercase(),
+            size_bytes: 1,
+            mtime_unix: 0,
+            fingerprint: None,
+            natural_key: None,
+            make: None,
+            model: None,
+            captured_at: None,
+            rating: None,
+            flag: None,
+            label: None,
+            width: None,
+            height: None,
+            imported_at: 0,
+            lens: None,
+            iso: None,
+            missing_since: None,
+            orientation: None,
+        }
+    }
+
+    #[test]
+    fn the_info_line_names_the_file_and_whatever_the_catalog_knows() {
+        let mut a = asset_with("2026/11/DSC_0042.NEF");
+        assert_eq!(info_line(&a), "DSC_0042.NEF");
+        a.captured_at = Some("2026-11-05 14:03:09".into());
+        a.make = Some("NIKON CORPORATION".into());
+        a.model = Some("NIKON Z 8".into());
+        a.lens = Some("NIKKOR Z 70-200mm f/2.8 VR S".into());
+        a.iso = Some(800);
+        a.width = Some(8256);
+        a.height = Some(5504);
+        assert_eq!(
+            info_line(&a),
+            "DSC_0042.NEF \u{b7} 2026-11-05 14:03:09 \u{b7} NIKON Z 8 \u{b7} \
+             NIKKOR Z 70-200mm f/2.8 VR S \u{b7} ISO 800 \u{b7} 8256\u{d7}5504"
+        );
+    }
+
+    #[test]
+    fn blank_fields_and_odd_paths_never_leave_stray_separators() {
+        let mut a = asset_with("dir/");
+        a.make = Some(String::new());
+        a.model = Some("Z 8".into());
+        a.captured_at = Some("  ".into());
+        a.lens = Some(String::new());
+        a.width = Some(100); // no height: no size
+        assert_eq!(info_line(&a), "dir \u{b7} Z 8");
+        assert_eq!(info_line(&asset_with("a/b\\c.jpg")), "c.jpg");
+        let mut same = asset_with("x.jpg");
+        same.make = Some("Leica".into());
+        same.model = Some("Leica".into());
+        assert_eq!(info_line(&same), "x.jpg \u{b7} Leica");
+    }
+
+    #[test]
+    fn the_info_line_handles_windows_paths_and_a_make_that_the_model_does_not_repeat() {
+        let mut a = asset_with("shoot\\day1\\IMG_1.jpg");
+        a.make = Some("Canon".into());
+        a.model = Some("EOS R5".into());
+        assert_eq!(info_line(&a), "IMG_1.jpg \u{b7} Canon EOS R5");
+        a.make = None;
+        a.model = Some("  ".into());
+        assert_eq!(info_line(&a), "IMG_1.jpg");
+    }
 
     struct CountingDecoder {
         calls: AtomicUsize,
