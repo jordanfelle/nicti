@@ -100,3 +100,5 @@ box) and signals sRGB or Display P3 in the codestream, but does not embed an ICC
 AVIF's sRGB-only rule. Tests decode with `jxl-oxide` (lossless is bit-exact at 8-bit; lossy mean error < 3/255 at
 quality 95) and `tests/exiftool_validate.rs` covers lossy P3 and lossless 16-bit. Not measured: encode speed on
 full-size frames (libjxl-tiny is a speed-oriented port, so compression is below libjxl at the same quality).
+
+- **Export dialog height (#759)** — found in the headless UI audit: on a 1000 px window the dialog stopped at about 400 px, so Destination and the Export/Cancel buttons sat behind a thin scrollbar. A centred egui `Modal` hands its scroll area only the space below its anchor, so the 80% `max_height` never applied. Now the options scroll (`ScrollArea` with `max_height` and `min_scrolled_height` = 90% of the window minus `FOOTER_RESERVE`) and the footer (validation messages, Export, Cancel) is pinned underneath. Tests measure the dialog's Area height on a tall and a short window (mutation-proved: the old sizing gives 446 px on 1000). Verified in the real app under Xvfb.
