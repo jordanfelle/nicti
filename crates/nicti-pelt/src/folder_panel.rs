@@ -356,6 +356,40 @@ pub fn attention_items(open: &[RootMove], move_running: bool) -> Vec<AttentionIt
         .collect()
 }
 
+/// A drive's heading. The catch-all `/` holds everything outside a conventional mount parent
+/// (`/tmp`, `/home`, ...), so it says so instead of posing as a disk (#761).
+fn drive_label(path: &str) -> String {
+    if path == "/" {
+        "/ (other locations)".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+/// A root's row text: its path below the drive (`photos/2026`, not just `2026`), so two folders
+/// with the same leaf name are told apart and the location is readable at a glance. A long
+/// path keeps its last two components behind an ellipsis; the full path is the hover text.
+fn root_label(root_path: &str, drive_path: &str) -> String {
+    const MAX_CHARS: usize = 40;
+    let is_sep = |c: char| c == '/' || c == '\\';
+    let below = root_path
+        .get(..drive_path.len())
+        .filter(|head| head.eq_ignore_ascii_case(drive_path))
+        .map(|_| &root_path[drive_path.len()..])
+        .unwrap_or(root_path);
+    let rel = below.trim_matches(is_sep);
+    if rel.is_empty() {
+        return folder_name(root_path).to_string();
+    }
+    if rel.chars().count() <= MAX_CHARS {
+        return rel.to_string();
+    }
+    let parts: Vec<&str> = rel.split(is_sep).filter(|p| !p.is_empty()).collect();
+    let tail = &parts[parts.len().saturating_sub(2)..];
+    let sep = if rel.contains('\\') { '\\' } else { '/' };
+    format!("\u{2026}{sep}{}", tail.join(&sep.to_string()))
+}
+
 fn folder_name(path: &str) -> &str {
     path.trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
@@ -411,18 +445,21 @@ pub fn show(
         let is_archive = archive.is_location(&drive.path);
         let badge = if is_archive { " \u{1F5C4} archive" } else { "" };
         let (_, dropped) = ui.dnd_drop_zone::<i64, ()>(egui::Frame::group(ui.style()), |ui| {
-            egui::CollapsingHeader::new(format!("\u{1F4BF} {}{badge}", drive.path))
+            egui::CollapsingHeader::new(format!("\u{1F4BF} {}{badge}", drive_label(&drive.path)))
                 .id_salt(("folder_panel_drive", &drive.path))
                 .default_open(true)
                 .show(ui, |ui| {
                     let mut flag = is_archive;
-                    if ui
-                        .checkbox(&mut flag, "Archive drive")
-                        .on_hover_text(
-                            "Folders moved here keep their thumbnails as .thumb.jpg files \
+                    // Not for the `/` catch-all: it is not one disk, and a location of `/` would
+                    // claim every path on the machine.
+                    if drive.path != "/"
+                        && ui
+                            .checkbox(&mut flag, "Archive drive")
+                            .on_hover_text(
+                                "Folders moved here keep their thumbnails as .thumb.jpg files \
                              next to the photos instead of in the catalog.",
-                        )
-                        .changed()
+                            )
+                            .changed()
                     {
                         *set_archive = Some((drive.path.clone(), flag));
                     }
@@ -446,6 +483,7 @@ pub fn show(
                         let row = show_root(
                             ui,
                             root,
+                            &drive.path,
                             moving,
                             selected_root == Some(root.id),
                             verify_enabled,
@@ -662,12 +700,13 @@ struct RowOutput {
 fn show_root(
     ui: &mut egui::Ui,
     root: &Root,
+    drive_path: &str,
     moving: bool,
     selected: bool,
     verify_enabled: bool,
 ) -> RowOutput {
     let id = egui::Id::unique(("folder_panel_root", root.id));
-    let label = folder_name(&root.path);
+    let label = root_label(&root.path, drive_path);
     let icon = if root.archived {
         "\u{1F5C4}"
     } else {
@@ -1261,6 +1300,34 @@ mod tests {
         h.get_by_label("Keep destination").click();
         h.run();
         assert_eq!(h.state().0.resolve, Some((5, Resolution::KeepDestination)));
+    }
+
+    #[test]
+    fn a_root_row_shows_its_path_below_the_drive() {
+        assert_eq!(root_label("/mnt/d/Photos/2026", "/mnt/d"), "Photos/2026");
+        assert_eq!(root_label(r"D:\Photos\2026\", r"D:\"), r"Photos\2026");
+        assert_eq!(
+            root_label(r"d:\Photos", r"D:\"),
+            "Photos",
+            "drive letters ignore case"
+        );
+        assert_eq!(root_label("/tmp/x/jpgs", "/"), "tmp/x/jpgs");
+        // The drive itself imported as a root: its own name, not an empty label.
+        assert_eq!(root_label("/mnt/d", "/mnt/d"), "d");
+        // A path that is not under the drive falls back to the whole path.
+        assert_eq!(root_label("/other/place", "/mnt/d"), "other/place");
+    }
+
+    #[test]
+    fn a_long_root_path_keeps_its_last_two_components() {
+        let p = "/mnt/d/Photography/Conventions/2026/Furpocalypse/Day1/Selects";
+        assert_eq!(root_label(p, "/mnt/d"), "\u{2026}/Day1/Selects");
+    }
+
+    #[test]
+    fn the_catch_all_drive_is_not_presented_as_a_disk() {
+        assert_eq!(drive_label("/"), "/ (other locations)");
+        assert_eq!(drive_label("/mnt/d"), "/mnt/d");
     }
 
     #[test]
