@@ -53,7 +53,7 @@ nicti-mcp --token-file ./nicti-control-<pid>.json --port 5555
 ## 3. A first session
 
 1. `ui_inspect`: view, selection, what is open.
-2. `ui_widgets`: the names you may click (`button:...`, `cell:<id>`).
+2. `ui_widgets`: the names you may click (`button:...`, `cell:<id>`). The Library's Import, Sync and Open in Loupe buttons live in the *Library tools* drawer, which is folded once the catalog has photos (#757): they are listed only while it is open (an empty catalog opens it).
 3. `ui_click` / `ui_key` / `ui_drag`, then `ui_settle` (waits for the input to play out; a deadline,
    never a fixed sleep).
 4. `ui_screenshot`: an image block (PNG). `max_width` scales it down; it needs a painted window.

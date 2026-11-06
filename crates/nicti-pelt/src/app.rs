@@ -2121,10 +2121,25 @@ impl PeltApp {
                     state.set_open(false);
                     self.library_tools_settled = true;
                 }
+                // A tool that is working shows its own progress inside the drawer: keep it open.
+                if self.card_copy.is_busy()
+                    || self.backup_copy.is_running()
+                    || self.geotag_ui.is_running()
+                {
+                    state.set_open(true);
+                }
                 state
                     .show_header(ui, |ui| ui.label(plan.label))
                     .body(|ui| self.show_library_controls(ui));
             }
+        }
+        // Outside the drawer: the sidebar's "Import here..." and Repair thumbnails report here
+        // too, and must stay visible with the drawer folded.
+        if let Some(msg) = &self.import_status {
+            ui.colored_label(egui::Color32::RED, msg);
+        }
+        if let Some(msg) = &self.righting.status {
+            ui.label(msg.clone());
         }
         ui.separator();
 
@@ -2451,12 +2466,6 @@ impl PeltApp {
                         self.open_in_loupe(&store);
                     }
                 });
-                if let Some(msg) = &self.import_status {
-                    ui.colored_label(egui::Color32::RED, msg);
-                }
-                if let Some(msg) = &self.righting.status {
-                    ui.label(msg.clone());
-                }
 
                 // #602: copy a camera card into a folder (verified copy, then registered).
                 let other_running = self.righting.is_running()
