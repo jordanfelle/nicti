@@ -109,6 +109,8 @@ struct Dialog {
     message: Option<String>,
     /// #342: the destination folder's native Browse dialog.
     folder_picker: FolderPicker,
+    /// The footer's height last frame, so the scrolling body leaves exactly that much room.
+    footer_h: f32,
 }
 
 pub struct ExportUi {
@@ -122,8 +124,12 @@ pub struct ExportUi {
     start_error: Option<String>,
 }
 
-/// Height kept under the scrolling options for the pinned footer (messages + buttons).
-const FOOTER_RESERVE: f32 = 120.0;
+/// Slack added to the measured footer height (the separator and the frame margins).
+const FOOTER_RESERVE: f32 = 40.0;
+/// The scrolling options never shrink below this (a window shorter than this overflows).
+const MIN_BODY: f32 = 80.0;
+/// The footer's messages scroll past this height so the buttons stay on screen.
+const FOOTER_MESSAGES_MAX: f32 = 90.0;
 
 impl ExportUi {
     pub fn new(catalog_path: &Path) -> Self {
@@ -162,6 +168,7 @@ impl ExportUi {
         self.report = None;
         self.start_error = None;
         self.dialog = Some(Dialog {
+            footer_h: FOOTER_RESERVE + 40.0,
             ids,
             scope,
             // The GPS opt-in is per export, never remembered: reopen with location stripped.
@@ -275,14 +282,16 @@ impl ExportUi {
             // #759: the options scroll, the footer (problems + Export/Cancel) never does, and
             // the dialog gets the window's height instead of what is left below the Area's
             // anchor (a centred Area otherwise hands the scroll area about half the window).
-            let body_h = (ctx.content_rect().height() * 0.9 - FOOTER_RESERVE).max(200.0);
+            let body_h = (ctx.content_rect().height() * 0.9 - dialog.footer_h).max(MIN_BODY);
             egui::ScrollArea::vertical()
                 .max_height(body_h)
                 .min_scrolled_height(body_h)
                 .auto_shrink([false, true])
                 .show(ui, |ui| self.body(ui, &mut dialog));
             ui.separator();
+            let top = ui.cursor().top();
             action = self.footer(ui, &mut dialog);
+            dialog.footer_h = (ui.min_rect().bottom() - top).max(0.0) + FOOTER_RESERVE;
         });
         if modal.should_close() {
             action = Action::Close;
@@ -411,14 +420,22 @@ impl ExportUi {
     /// Validation problems and the Export/Cancel buttons: pinned under the scrolling options.
     fn footer(&mut self, ui: &mut egui::Ui, d: &mut Dialog) -> Action {
         let validity = d.spec.validate();
-        if let Err(e) = &validity {
-            ui.colored_label(egui::Color32::LIGHT_RED, e.to_string());
-        }
-        if let Some(e) = &self.start_error {
-            ui.colored_label(egui::Color32::LIGHT_RED, e);
-        }
-        if let Some(m) = &d.message {
-            ui.label(m);
+        let has_messages = validity.is_err() || self.start_error.is_some() || d.message.is_some();
+        if has_messages {
+            egui::ScrollArea::vertical()
+                .max_height(FOOTER_MESSAGES_MAX)
+                .id_salt("export_footer_messages")
+                .show(ui, |ui| {
+                    if let Err(e) = &validity {
+                        ui.colored_label(egui::Color32::LIGHT_RED, e.to_string());
+                    }
+                    if let Some(e) = &self.start_error {
+                        ui.colored_label(egui::Color32::LIGHT_RED, e);
+                    }
+                    if let Some(m) = &d.message {
+                        ui.label(m);
+                    }
+                });
         }
 
         let mut action = Action::None;
@@ -1149,56 +1166,63 @@ mod tests {
         }
     }
 
-    /// Height of the dialog's area after a few frames on a `w` x `h` window.
-    fn dialog_height(w: f32, h: f32) -> f32 {
-        let screen_h = h;
+    /// The dialog's Area rect after a few frames on a `w` x `h` window: the largest rect that is
+    /// not the full-window Modal backdrop (identified by being exactly the screen).
+    fn dialog_rect(w: f32, h: f32, break_footer: bool) -> egui::Rect {
         let dir = tempfile::tempdir().unwrap();
         let mut ui_state = ExportUi::new(&dir.path().join("catalog.db"));
         ui_state.request(vec![1], "1 photo".into(), vec![facts("a")]);
+        if break_footer {
+            // A long start error: the footer's messages must scroll, not push the buttons away.
+            ui_state.start_error = Some("could not write the file because ".repeat(40));
+        }
         let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(w, h),
-            )),
+            screen_rect: Some(screen),
             ..Default::default()
         };
-        let mut height = 0.0;
+        let mut rect = egui::Rect::NOTHING;
         for _ in 0..4 {
             let out = ctx.run_ui(input.clone(), |ui| {
                 ui_state.show_dialog(ui.ctx(), &|| None);
-                // The dialog's own Area: the tallest one that is not the full-window backdrop.
-                height = ui.ctx().memory(|m| {
+                rect = ui.ctx().memory(|m| {
                     m.layer_ids()
                         .filter_map(|l| m.area_rect(l.id))
-                        .map(|r| r.height())
-                        .filter(|h| *h < screen_h - 1.0)
-                        .fold(0.0_f32, f32::max)
+                        .filter(|r| *r != screen)
+                        .fold(egui::Rect::NOTHING, |acc, r| {
+                            if r.height() > acc.height() {
+                                r
+                            } else {
+                                acc
+                            }
+                        })
                 });
             });
             out.drop_without_applying_deltas();
         }
-        height
+        rect
     }
 
     /// #759: on a tall window the dialog used about 40% of it (a centred Area handed the scroll
     /// area what was left below its anchor), hiding the destination and Export button.
     #[test]
     fn the_dialog_uses_a_tall_window_instead_of_a_fixed_slice() {
-        let tall = dialog_height(1600.0, 1000.0);
-        assert!(
-            tall >= 600.0,
-            "dialog is only {tall} px tall on a 1000 px window"
-        );
+        let r = dialog_rect(1600.0, 1000.0, false);
+        assert!(r.height() >= 600.0, "dialog is only {} px tall", r.height());
+        assert!(r.bottom() <= 1000.0, "dialog overflows: {r:?}");
     }
 
     #[test]
-    fn the_dialog_never_outgrows_a_short_window() {
-        let short = dialog_height(900.0, 500.0);
-        assert!(
-            short <= 500.0,
-            "dialog is {short} px tall on a 500 px window"
-        );
+    fn the_dialog_stays_inside_a_short_window_even_with_a_long_error() {
+        for (h, long) in [(500.0, false), (500.0, true), (420.0, true)] {
+            let r = dialog_rect(900.0, h, long);
+            assert!(r.height() > 100.0, "no dialog found at h={h}: {r:?}");
+            assert!(
+                r.top() >= -0.5 && r.bottom() <= h + 0.5,
+                "h={h} long_error={long}: dialog {r:?} leaves the window"
+            );
+        }
     }
 
     #[test]
