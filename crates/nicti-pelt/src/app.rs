@@ -2139,7 +2139,7 @@ impl PeltApp {
             ui.colored_label(egui::Color32::RED, msg);
         }
         if let Some(msg) = &self.righting.status {
-            ui.label(msg.clone());
+            ui.label(msg.as_str());
         }
         ui.separator();
 
