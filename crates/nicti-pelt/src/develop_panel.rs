@@ -1181,7 +1181,9 @@ fn show_upright(
 
 fn show_histogram(ui: &mut egui::Ui, gpu: Option<(&DevelopEngine, &FrameTexture)>) {
     let hist = gpu
-        .map(|(engine, frame)| engine.histogram(frame))
+        .map(|(engine, frame)| {
+            crate::slow_trace::section("develop.histogram", || engine.histogram(frame))
+        })
         .unwrap_or_else(|| nicti_tapetum::histogram::from_display_pixels(&[]));
     let (rect, _response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 80.0), egui::Sense::hover());

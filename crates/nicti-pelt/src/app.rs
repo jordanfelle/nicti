@@ -212,9 +212,11 @@ pub struct PeltApp {
     /// `false` = "Fit" (aspect-correct, the default on every fresh cursor move), `true` = "100%"
     /// (1:1 pixel zoom for focus-checking, #31's own ticket title). Toggled by Space.
     loupe_zoomed: bool,
-    /// The photo whose "Rendering..." frame has been shown (#768): its first full-resolution
-    /// render runs on the next frame.
-    loupe_render_announced: Option<i64>,
+    /// A photo was just loaded into Develop and its first full-resolution render has not run
+    /// yet (#768): the next paint shows a "Rendering..." frame first.
+    loupe_render_pending: bool,
+    /// True only while that notice frame is being drawn (it hides the "Decoding..." line).
+    loupe_render_notice: bool,
     /// The Loupe's info line for one asset (#760), so the catalog is not read every frame.
     loupe_info: Option<(i64, String)>,
     /// Pan offset in texture-UV units, only meaningful (and only adjustable, via drag) in 100%
@@ -313,10 +315,11 @@ pub struct PeltApp {
 /// directory listing), but there's no reason to run it every single frame.
 const BACKUP_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Whether the Loupe must paint a "Rendering..." frame before it starts `asset_id`'s first
-/// full-resolution render: once per photo, so the notice is on screen while the UI thread is busy.
-fn loupe_first_render_needs_notice(announced: Option<i64>, asset_id: i64) -> bool {
-    announced != Some(asset_id)
+/// Consumes the "a photo was just loaded, its first render is pending" flag: true exactly once
+/// per load, so the Loupe paints a "Rendering..." frame (and presents it) before the render that
+/// blocks the UI thread starts (#768).
+fn take_render_notice(pending: &mut bool) -> bool {
+    std::mem::take(pending)
 }
 
 /// How the Library tools drawer starts and when it folds away (#757).
@@ -578,7 +581,8 @@ impl PeltApp {
             render_due: eyeshine::RenderDebounce::default(),
             prefetch_at: None,
             loupe_zoomed: false,
-            loupe_render_announced: None,
+            loupe_render_pending: false,
+            loupe_render_notice: false,
             loupe_info: None,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
@@ -2781,7 +2785,7 @@ impl PeltApp {
         let _ = session.set_cursor(cursor, store.as_ref(), &self.pounce);
         self.loupe = Some(session);
         self.loupe_info = None;
-        self.loupe_render_announced = None;
+        self.loupe_render_pending = false;
         self.loupe_from_grid = from_grid;
         // Deliberately NOT resetting `loupe_loaded_asset` here: it tracks which asset id is
         // currently loaded into the shared `develop` view, independent of which `LoupeSession`
@@ -3419,6 +3423,7 @@ impl PeltApp {
                                 let doc = stored_edit_document(store.as_ref(), asset_id);
                                 develop.load_real_frame(frame, identity, doc);
                                 self.loupe_loaded_asset = Some((asset_id, identity));
+                                self.loupe_render_pending = true;
                                 self.edit_save_failed = None;
                             }
                         }
@@ -3431,18 +3436,20 @@ impl PeltApp {
                             develop.load_real_frame(frame, identity, doc)
                         });
                         self.loupe_loaded_asset = Some((asset_id, identity));
+                        self.loupe_render_pending = true;
                     }
                 }
                 // #768: the first render of a photo runs on this thread and can take seconds. Show
                 // a frame that says so (over the preview) before it starts, so the UI reads as
                 // working, not frozen.
-                if loupe_first_render_needs_notice(self.loupe_render_announced, asset_id) {
-                    self.loupe_render_announced = Some(asset_id);
+                if take_render_notice(&mut self.loupe_render_pending) {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label("Rendering the full-resolution photo\u{2026}");
                     });
+                    self.loupe_render_notice = true;
                     self.show_loupe_t0_fallback(ui, store.as_ref(), asset_id);
+                    self.loupe_render_notice = false;
                     ui.ctx().request_repaint();
                     return;
                 }
@@ -3867,7 +3874,7 @@ impl PeltApp {
 
         // While the first render is pending the decode is already done: the Rendering notice above
         // says what is happening, so this line would be wrong.
-        if self.loupe_render_announced != Some(asset_id) {
+        if !self.loupe_render_notice {
             ui.label("Decoding full-resolution image...");
         }
         if let Some(r) = &resolved {
@@ -4517,16 +4524,20 @@ mod library_drawer_tests {
     use super::*;
 
     #[test]
-    fn the_first_render_of_each_photo_is_announced_once() {
-        assert!(loupe_first_render_needs_notice(None, 5));
+    fn each_load_is_announced_exactly_once() {
+        let mut pending = false;
         assert!(
-            !loupe_first_render_needs_notice(Some(5), 5),
-            "second frame renders"
+            !take_render_notice(&mut pending),
+            "nothing loaded, no notice"
         );
+        pending = true; // a photo was loaded
         assert!(
-            loupe_first_render_needs_notice(Some(5), 6),
-            "a new photo is announced again"
+            take_render_notice(&mut pending),
+            "the frame before the render"
         );
+        assert!(!take_render_notice(&mut pending), "then the render itself");
+        pending = true; // A -> B -> A: the reload of A is a new load
+        assert!(take_render_notice(&mut pending));
     }
 
     #[test]
