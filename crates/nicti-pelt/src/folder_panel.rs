@@ -474,7 +474,7 @@ pub fn show(
                     // Not offered for the `/` catch-all: it is not one disk, and a location of `/` would
                     // claim every path on the machine. An old saved `/` location still shows it
                     // so it can be switched off.
-                    if drive.path != "/"
+                    if (drive.path != "/" || is_archive)
                         && ui
                             .checkbox(&mut flag, "Archive drive")
                             .on_hover_text(
@@ -1378,6 +1378,47 @@ mod tests {
             "\u{5199}\u{771f}/\u{1F4F7}"
         );
         assert_eq!(root_label("/m", "/mnt/\u{5199}\u{771f}"), "m");
+    }
+
+    /// Whether the panel offers "Archive drive" for a root on the `/` catch-all.
+    fn archive_checkbox_on_catch_all(locations: &[&'static str]) -> bool {
+        use egui_kittest::kittest::Queryable;
+        let tree = build_tree(&[root(5, "/tmp/shoot")], &[]);
+        assert_eq!(tree[0].path, "/");
+        let locations: Vec<&'static str> = locations.to_vec();
+        let mut h = egui_kittest::Harness::new_ui_state(
+            move |ui, tree: &mut Vec<DriveNode>| {
+                let archive = ArchiveDrives::with_locations(&locations);
+                let mut set_archive = None;
+                show(
+                    ui,
+                    tree,
+                    &[],
+                    None,
+                    false,
+                    &archive,
+                    &mut set_archive,
+                    None,
+                    true,
+                    &mut crate::folder_browse::Browse::already_revealed(5),
+                );
+            },
+            tree,
+        );
+        h.run();
+        h.query_by_label("Archive drive").is_some()
+    }
+
+    #[test]
+    fn the_catch_all_offers_archive_only_to_switch_an_old_location_off() {
+        assert!(
+            !archive_checkbox_on_catch_all(&[]),
+            "never offered to turn on"
+        );
+        assert!(
+            archive_checkbox_on_catch_all(&["/"]),
+            "an old saved / location can still be switched off"
+        );
     }
 
     #[test]
