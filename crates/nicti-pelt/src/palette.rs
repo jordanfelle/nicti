@@ -20,6 +20,8 @@ pub enum Action {
     /// `develop.set` putting a Develop control back to its default (the loaded photo is named at
     /// run time).
     ResetControl(&'static Control),
+    /// Opens the Preferences window (#772); the app handles it, it is not a table command.
+    OpenPreferences,
 }
 
 #[derive(Clone)]
@@ -42,6 +44,10 @@ pub fn entries() -> Vec<Entry> {
             json!({"view": "loupe"}),
         ),
         cmd("Export the selected photos...", "export.open", json!({})),
+        Entry {
+            label: "Open Preferences".to_owned(),
+            action: Action::OpenPreferences,
+        },
     ];
     for stars in 1..=5 {
         v.push(cmd(
@@ -156,6 +162,7 @@ pub fn status(host: &dyn CommandHost, e: &Entry) -> Result<(), String> {
             }
             Ok(())
         }
+        Action::OpenPreferences => Ok(()),
         Action::ResetControl(_) => {
             host.develop_ready()?;
             // Develop keeps the photo it loaded after you leave it: only offer a reset while you
@@ -172,6 +179,8 @@ pub fn status(host: &dyn CommandHost, e: &Entry) -> Result<(), String> {
 pub fn run(host: &mut dyn CommandHost, e: &Entry) -> Result<Value, String> {
     match &e.action {
         Action::Command { id, params } => cmd::dispatch(host, Policy::default(), id, params),
+        // The app opens the window itself before `run` is reached.
+        Action::OpenPreferences => Err("opens the Preferences window".into()),
         Action::ResetControl(c) => {
             let asset = host
                 .develop_asset()
@@ -420,6 +429,7 @@ mod tests {
                 Action::ResetControl(c) => {
                     assert!(e.label.contains(c.id), "{}", e.label);
                 }
+                Action::OpenPreferences => assert_eq!(e.label, "Open Preferences"),
             }
         }
         let n = entries().len();

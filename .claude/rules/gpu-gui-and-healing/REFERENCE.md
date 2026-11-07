@@ -59,6 +59,10 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 
 - `render_job::FirstRenderJob` hands `DevelopView` to a GPU-lane job for the photo's first render (view back via slot, warm baked cache); `develop` is `None` meanwhile. Detail: `docs/decisions/gpu-gui-and-healing.md`.
 
+## #772: Preferences / first run / window state
+
+- Preferences window (cache, XMP, notices, backup line) out of the drawer; `is_first_run` screen on an empty catalog; `window_state.rs` saves size/position/maximized beside the catalog. Detail: `docs/decisions/gpu-gui-and-healing.md`.
+
 ## Package contents
 
 - **`spikes/glint`** (#16/ADR-0016) — wgpu-vs-CUDA measured comparison: correctness, feature/limit

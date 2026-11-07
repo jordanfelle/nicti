@@ -222,6 +222,14 @@ pub struct PeltApp {
     render_job: Option<crate::render_job::RenderSlot>,
     /// Photos a batch edit touched while `develop` was out with that job: re-read when it returns.
     render_job_touched: Vec<i64>,
+    /// The Preferences window (#772) is open.
+    prefs_open: bool,
+    /// Debounced saving of the window's size/position/maximized state (#772).
+    window_tracker: crate::window_state::Tracker,
+    /// The last non-maximized geometry, kept so a maximized window restores to its normal size.
+    window_normal: Option<crate::window_state::WindowState>,
+    /// Whether the restored position has been checked against the monitor (once).
+    window_rescue_checked: bool,
     /// The Loupe's info line for one asset (#760), so the catalog is not read every frame.
     loupe_info: Option<(i64, String)>,
     /// Pan offset in texture-UV units, only meaningful (and only adjustable, via drag) in 100%
@@ -345,9 +353,16 @@ fn tools_drawer_plan(total: usize, settled: bool) -> ToolsDrawerPlan {
         label: if total == 0 {
             "Import and library tools"
         } else {
-            "Library tools: import, sync, move, backup, cache"
+            "Library tools: import, sync, move, backup"
         },
     }
+}
+
+/// Whether the Library shows the first-run screen (#772): the grid has loaded, nothing matches,
+/// and the catalog has no registered folder at all (an empty *result* of a filter is not first
+/// run).
+fn is_first_run(grid_loaded: bool, total: usize, roots_loaded: bool, root_count: usize) -> bool {
+    grid_loaded && total == 0 && roots_loaded && root_count == 0
 }
 
 impl PeltApp {
@@ -368,6 +383,7 @@ impl PeltApp {
             render_state.device.clone(),
             render_state.queue.clone(),
         ));
+        let window_loaded = crate::window_state::load(&catalog_path);
         let develop = DevelopView::new(gpu.clone());
 
         let resources = ViewportResources::new(&render_state.device, render_state.target_format);
@@ -590,6 +606,10 @@ impl PeltApp {
             loupe_render_notice: false,
             render_job: None,
             render_job_touched: Vec::new(),
+            prefs_open: false,
+            window_tracker: crate::window_state::Tracker::new(window_loaded),
+            window_normal: window_loaded,
+            window_rescue_checked: false,
             loupe_info: None,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
@@ -1472,6 +1492,7 @@ impl eframe::App for PeltApp {
         self.poll_move();
         self.poll_recovery();
         self.poll_render_job(ui.ctx());
+        self.persist_window_state(ui.ctx());
         // The pass runs under `JobKind::Sync`, so the grid's busy -> idle edge refreshes it.
         self.righting.poll(&self.catalog_path);
         self.geotag_ui.poll();
@@ -1596,6 +1617,11 @@ impl eframe::App for PeltApp {
                     ui.separator();
                 }
                 self.color.show_menu(ui);
+                let prefs = ui.button("Preferences");
+                crate::widgets::reg(ui.ctx(), "button:preferences", &prefs);
+                if prefs.clicked() {
+                    self.prefs_open = !self.prefs_open;
+                }
                 ui.separator();
                 ui.label(format!("Catalog: {}", self.catalog_path.display()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1885,6 +1911,7 @@ impl eframe::App for PeltApp {
 
         self.show_delete_modal(ui.ctx());
         self.show_export_dialog(ui.ctx());
+        self.show_preferences(ui.ctx());
         self.show_knead_modal(ui.ctx());
         self.show_palette(ui.ctx());
     }
@@ -2196,7 +2223,17 @@ impl PeltApp {
         // preview cache, XMP, Lightroom import) live in a drawer that is open on an empty
         // catalog, where Import is the call to action, and folds away once there are photos.
         // Nothing is drawn until the grid has loaded, so the first state is never a guess.
-        if let Some((loaded, total)) = self.grid.as_ref().map(|g| (g.is_loaded(), g.len())) {
+        let first_run = self.grid.as_ref().is_some_and(|g| {
+            is_first_run(
+                g.is_loaded(),
+                g.len(),
+                self.folder_cache.loaded(),
+                self.folder_cache.roots.len(),
+            )
+        });
+        if first_run {
+            self.show_first_run(ui);
+        } else if let Some((loaded, total)) = self.grid.as_ref().map(|g| (g.is_loaded(), g.len())) {
             if loaded {
                 let id = ui.make_persistent_id("nicti_pelt_library_folders");
                 let plan = tools_drawer_plan(total, self.library_tools_settled);
@@ -2479,83 +2516,90 @@ impl PeltApp {
 
     /// The import/sync/move controls and their status lines -- everything the Library view had
     /// before the grid (#30) except the asset count, which the grid's own snapshot now supplies.
+    /// The Folder field with Browse and Import; `compact` leaves out Sync, Repair thumbnails and
+    /// Open in Loupe (the first-run screen, #772, where there is nothing to sync yet).
+    fn show_import_row(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let store = self.catalog.clone();
+        ui.horizontal(|ui| {
+            ui.label("Folder:");
+            // Read-only while Browse is open, so a pick can't clobber a newer edit.
+            if ui
+                .add_enabled(
+                    !self.import_picker.is_open(),
+                    egui::TextEdit::singleline(&mut self.import_path_input)
+                        .align(egui::Align2::LEFT_TOP),
+                )
+                .changed()
+            {
+                self.import_status = None;
+            }
+            if ui
+                .add_enabled(
+                    !self.import_picker.is_open(),
+                    egui::Button::new("Browse..."),
+                )
+                .clicked()
+            {
+                self.import_picker
+                    .open(ui.ctx(), "Choose a folder", &self.import_path_input);
+            }
+            let r = ui.button("Import");
+            crate::widgets::reg(ui.ctx(), "button:import", &r);
+            if r.clicked() {
+                self.submit_root_job(&store, RootAction::Import);
+            }
+            if compact {
+                return;
+            }
+            let r = ui.button("Sync");
+            crate::widgets::reg(ui.ctx(), "button:sync", &r);
+            if r.clicked() {
+                self.submit_root_job(&store, RootAction::Sync);
+            }
+            if ui
+                .add_enabled(
+                    !self.righting.is_running()
+                        && !self.job_active(&[
+                            JobKind::Import,
+                            JobKind::Sync,
+                            JobKind::Move,
+                            JobKind::Delete,
+                            JobKind::Export,
+                            JobKind::Verify,
+                            JobKind::Baseline,
+                        ]),
+                    egui::Button::new("Repair thumbnails"),
+                )
+                .on_hover_text(
+                    "Re-checks every photo's rotation and fixes thumbnails that show \
+                     sideways. Safe to repeat; the files are not modified.",
+                )
+                .clicked()
+            {
+                let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+                self.righting.start(
+                    dyn_store,
+                    &self.pounce,
+                    &std::collections::HashSet::new(),
+                    false,
+                );
+            }
+            // #31: a folder-ordered asset list, not real grid/filter-driven selection
+            // (#30/#242's job, confirmed not a hard blocker for the loupe) -- reuses the
+            // same path field and root-registration path Import/Sync already use.
+            let r = ui.button("Open in Loupe");
+            crate::widgets::reg(ui.ctx(), "button:open-in-loupe", &r);
+            if r.clicked() {
+                self.open_in_loupe(&store);
+            }
+        });
+    }
+
     fn show_library_controls(&mut self, ui: &mut egui::Ui) {
         {
             {
                 let store = self.catalog.clone();
-                ui.horizontal(|ui| {
-                    ui.label("Folder:");
-                    // Read-only while Browse is open, so a pick can't clobber a newer edit.
-                    if ui
-                        .add_enabled(
-                            !self.import_picker.is_open(),
-                            egui::TextEdit::singleline(&mut self.import_path_input)
-                                .align(egui::Align2::LEFT_TOP),
-                        )
-                        .changed()
-                    {
-                        self.import_status = None;
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.import_picker.is_open(),
-                            egui::Button::new("Browse..."),
-                        )
-                        .clicked()
-                    {
-                        self.import_picker.open(
-                            ui.ctx(),
-                            "Choose a folder",
-                            &self.import_path_input,
-                        );
-                    }
-                    let r = ui.button("Import");
-                    crate::widgets::reg(ui.ctx(), "button:import", &r);
-                    if r.clicked() {
-                        self.submit_root_job(&store, RootAction::Import);
-                    }
-                    let r = ui.button("Sync");
-                    crate::widgets::reg(ui.ctx(), "button:sync", &r);
-                    if r.clicked() {
-                        self.submit_root_job(&store, RootAction::Sync);
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.righting.is_running()
-                                && !self.job_active(&[
-                                    JobKind::Import,
-                                    JobKind::Sync,
-                                    JobKind::Move,
-                                    JobKind::Delete,
-                                    JobKind::Export,
-                                    JobKind::Verify,
-                                    JobKind::Baseline,
-                                ]),
-                            egui::Button::new("Repair thumbnails"),
-                        )
-                        .on_hover_text(
-                            "Re-checks every photo's rotation and fixes thumbnails that show \
-                             sideways. Safe to repeat; the files are not modified.",
-                        )
-                        .clicked()
-                    {
-                        let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
-                        self.righting.start(
-                            dyn_store,
-                            &self.pounce,
-                            &std::collections::HashSet::new(),
-                            false,
-                        );
-                    }
-                    // #31: a folder-ordered asset list, not real grid/filter-driven selection
-                    // (#30/#242's job, confirmed not a hard blocker for the loupe) -- reuses the
-                    // same path field and root-registration path Import/Sync already use.
-                    let r = ui.button("Open in Loupe");
-                    crate::widgets::reg(ui.ctx(), "button:open-in-loupe", &r);
-                    if r.clicked() {
-                        self.open_in_loupe(&store);
-                    }
-                });
+                self.show_import_row(ui, false);
 
                 // #602: copy a camera card into a folder (verified copy, then registered).
                 let other_running = self.righting.is_running()
@@ -2643,34 +2687,6 @@ impl PeltApp {
             }
         }
         ui.separator();
-        cache_settings::show(
-            ui,
-            &mut self.cache_settings,
-            self.larder.as_ref(),
-            &self.catalog_path,
-            &self.pounce,
-        );
-        if preview_settings::show(ui, &mut self.preview_settings) {
-            self.apply_preview_settings();
-        }
-        crate::notices::show(ui);
-        ui.separator();
-        {
-            let dyn_store: Arc<dyn CatalogStore + Send + Sync> = self.catalog.clone();
-            if xmp_sync::show(
-                ui,
-                &mut self.xmp_ui,
-                &dyn_store,
-                &self.xmp,
-                &self.catalog_path,
-            ) {
-                // "Use file" rewrote markers in the catalog; the grid's cached ones are stale.
-                self.cull.invalidate();
-                self.filter_bar.invalidate_options();
-                self.filter_bar.invalidate_facets();
-            }
-            ui.separator();
-        }
         {
             let store = &self.catalog;
             let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
@@ -2689,9 +2705,6 @@ impl PeltApp {
                 );
             lrc_import::show(ui, &mut self.lrc_ui, &dyn_store, &self.pounce, blocked);
             ui.separator();
-        }
-        if let Some(summary) = &self.last_backup_summary {
-            ui.label(summary);
         }
         if let Some(summary) = &self.last_move_summary {
             ui.label(summary);
@@ -3111,6 +3124,13 @@ impl PeltApp {
         let outcome = palette.show(ctx, &*self);
         if let crate::palette::Outcome::Run(i) = outcome {
             if let Some(entry) = palette.entry(i) {
+                if matches!(entry.action, crate::palette::Action::OpenPreferences) {
+                    self.prefs_open = true;
+                    palette.close();
+                    ctx.request_repaint();
+                    self.palette = palette;
+                    return;
+                }
                 match crate::palette::run(self, &entry) {
                     Ok(_) => palette.close(),
                     Err(e) => palette.fail(e),
@@ -3570,6 +3590,135 @@ impl PeltApp {
         self.loupe_render_notice = true;
         self.show_loupe_t0_fallback(ui, store, asset_id);
         self.loupe_render_notice = false;
+    }
+
+    /// #772: pulls a window restored off the monitor back, then saves the window's geometry
+    /// (debounced) so the next launch opens the same way.
+    fn persist_window_state(&mut self, ctx: &egui::Context) {
+        use crate::window_state::{needs_rescue, save, WindowState};
+        let vp = ctx.input(|i| i.viewport().clone());
+        if !self.window_rescue_checked {
+            if let (Some(outer), Some(monitor)) = (vp.outer_rect, vp.monitor_size) {
+                self.window_rescue_checked = true;
+                if needs_rescue([outer.min.x, outer.min.y], [monitor.x, monitor.y]) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                        40.0, 40.0,
+                    )));
+                }
+            }
+        }
+        if vp.minimized == Some(true) || vp.fullscreen == Some(true) {
+            return;
+        }
+        let Some(inner) = vp.inner_rect else { return };
+        let maximized = vp.maximized.unwrap_or(false);
+        let here = WindowState {
+            size: [inner.width(), inner.height()],
+            pos: vp.outer_rect.map(|r| [r.min.x, r.min.y]),
+            maximized,
+        };
+        let state = if maximized {
+            // Keep the normal size/position: restoring should not open maximized-sized.
+            WindowState {
+                maximized: true,
+                ..self.window_normal.unwrap_or(here)
+            }
+        } else {
+            self.window_normal = Some(here);
+            here
+        };
+        if let Some(s) = self.window_tracker.observe(Instant::now(), state) {
+            let _ = save(&self.catalog_path, &s);
+        }
+        if self.window_tracker.is_pending() {
+            ctx.request_repaint_after(Duration::from_millis(400));
+        }
+    }
+
+    /// #772: the Preferences window: the settings that used to sit in the Library tools drawer
+    /// (preview cache, rendered previews, third-party notices, XMP sync, last backup).
+    fn show_preferences(&mut self, ctx: &egui::Context) {
+        if !self.prefs_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Preferences")
+            .open(&mut open)
+            .default_width(520.0)
+            .default_height(480.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| self.show_preferences_body(ui));
+            });
+        self.prefs_open = open;
+    }
+
+    fn show_preferences_body(&mut self, ui: &mut egui::Ui) {
+        cache_settings::show(
+            ui,
+            &mut self.cache_settings,
+            self.larder.as_ref(),
+            &self.catalog_path,
+            &self.pounce,
+        );
+        if preview_settings::show(ui, &mut self.preview_settings) {
+            self.apply_preview_settings();
+        }
+        ui.separator();
+        {
+            let dyn_store: Arc<dyn CatalogStore + Send + Sync> = self.catalog.clone();
+            if xmp_sync::show(
+                ui,
+                &mut self.xmp_ui,
+                &dyn_store,
+                &self.xmp,
+                &self.catalog_path,
+            ) {
+                // "Use file" rewrote markers in the catalog; the grid's cached ones are stale.
+                self.cull.invalidate();
+                self.filter_bar.invalidate_options();
+                self.filter_bar.invalidate_facets();
+            }
+        }
+        ui.separator();
+        crate::notices::show(ui);
+        if let Some(summary) = &self.last_backup_summary {
+            ui.separator();
+            ui.label(summary);
+        }
+    }
+
+    /// #772: what an empty catalog shows instead of the Library tools drawer: the three ways to
+    /// get photos in, and nothing else.
+    fn show_first_run(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        ui.heading("Welcome to Nicti");
+        ui.label("Your library is empty. Add photos to get started:");
+        ui.add_space(6.0);
+        ui.strong("Import a folder");
+        ui.weak("Registers the folder and reads its photos in place; the files are not moved or changed.");
+        self.show_import_row(ui, true);
+        ui.add_space(8.0);
+        ui.separator();
+        let store = self.catalog.clone();
+        let other_running = self.righting.is_running()
+            || self.pounce_job_active(&[
+                JobKind::Import,
+                JobKind::Sync,
+                JobKind::Move,
+                JobKind::Delete,
+                JobKind::Verify,
+                JobKind::Baseline,
+            ]);
+        // Copy from a camera card (verified copy into a folder, then registered).
+        self.card_copy.show(ui, &self.pounce, &store, other_running);
+        ui.separator();
+        // Import from Lightroom Classic (catalog migration).
+        let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
+        let blocked = other_running.then_some("An import or sync is running; wait for it.");
+        lrc_import::show(ui, &mut self.lrc_ui, &dyn_store, &self.pounce, blocked);
+        ui.add_space(8.0);
+        ui.weak("Preferences (preview cache, XMP sync, notices) are in the Preferences window.");
     }
 
     /// #778: hands `develop` to a GPU-lane job that does the photo's first full-resolution render,
@@ -4713,5 +4862,17 @@ mod library_drawer_tests {
         // Empty: open and not yet settled; then photos appear, still unsettled -> fold.
         assert!(!tools_drawer_plan(0, false).fold_now);
         assert!(tools_drawer_plan(3, false).fold_now);
+    }
+
+    #[test]
+    fn the_first_run_screen_is_for_a_loaded_empty_catalog_with_no_folders_only() {
+        assert!(is_first_run(true, 0, true, 0));
+        // Not before both reads have landed (never a guess).
+        assert!(!is_first_run(false, 0, true, 0));
+        assert!(!is_first_run(true, 0, false, 0));
+        // A filter that matches nothing in a catalog that has folders is not first run.
+        assert!(!is_first_run(true, 0, true, 2));
+        // Photos present: the normal grid.
+        assert!(!is_first_run(true, 5, true, 1));
     }
 }

@@ -55,7 +55,7 @@ app time (`wait:`) after startup and after every action.
 
 Steps: `wait:S`, `shot:PATH`, `click:X,Y`, `rclick:X,Y`, `dclick:X,Y`, `move:X,Y`,
 `drag:X1,Y1,X2,Y2[,SECONDS]`, `key:NAME[+MOD]` (`key:Return`, `key:a+Control_L`), `type:TEXT`,
-`resize:WxH`. Coordinates are window pixels. There is no window manager, so they equal screen
+`resize:WxH`. `--keep-size` leaves the window as the app opened it (to test a restored size; use `--home DIR` to keep the profile between runs). Coordinates are window pixels. There is no window manager, so they equal screen
 pixels. Take a screenshot first and read the coordinates off it; they move when the layout does.
 
 A worked example: import the fixtures and look at the grid at the app's minimum size.

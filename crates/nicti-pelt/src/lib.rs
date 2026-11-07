@@ -90,6 +90,7 @@ mod view_orient;
 mod viewport;
 mod volume_names;
 mod widgets;
+mod window_state;
 mod xmp_sync;
 
 use std::sync::Arc;
@@ -118,10 +119,14 @@ pub fn run_with(version: &str, control: Option<ControlOptions>) -> eframe::Resul
     });
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Nicti")
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([900.0, 600.0]),
+        // #772: the size/position/maximized state saved beside the catalog on the last run.
+        viewport: window_state::apply(
+            egui::ViewportBuilder::default()
+                .with_title("Nicti")
+                .with_inner_size([1440.0, 900.0])
+                .with_min_inner_size([900.0, 600.0]),
+            window_state::load(&catalog::resolve_path()),
+        ),
         wgpu_options: egui_wgpu::WgpuConfiguration {
             wgpu_setup,
             ..Default::default()
