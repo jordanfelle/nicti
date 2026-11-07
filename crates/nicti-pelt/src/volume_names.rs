@@ -3,6 +3,9 @@
 //! The parsing is pure and tested; the reads (`/proc`, `/dev`, the Windows volume enumeration) run
 //! on a worker like the rest of the panel's probes, never on the UI thread.
 
+// The mount-table parsing is only called on non-Windows; it is still unit-tested everywhere.
+#![cfg_attr(windows, allow(dead_code))]
+
 use std::collections::HashMap;
 
 /// `\040`-style octal escapes as `/proc/self/mounts` writes a space, tab, newline or backslash.
