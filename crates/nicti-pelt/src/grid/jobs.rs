@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use crate::t2::SharedLarder;
 
 use nicti_calico::source_transform::SourceTransforms;
+use nicti_cornea::{LinearFrame, RawDecoder};
 use nicti_lair::larder::LarderTier;
 use nicti_lair::pounce_jobs::ReportSlot;
 use nicti_lair::{CatalogStore, Filter, PreviewTier, Sort};
@@ -153,6 +154,9 @@ pub struct ThumbBatchJob {
     color: Arc<SourceTransforms>,
     /// Where rendered thumbnails live (#397); `None` shows the camera thumbnail for everything.
     rendered: Option<SharedLarder>,
+    /// The RAW decoder behind the no-embedded-preview fallback (#770); `None` leaves such a photo
+    /// with "no preview" (tests, and callers that have no decoder).
+    decoder: Option<Arc<dyn RawDecoder + Send + Sync>>,
 }
 
 impl ThumbBatchJob {
@@ -173,6 +177,7 @@ impl ThumbBatchJob {
             out: out.clone(),
             color,
             rendered: None,
+            decoder: None,
         };
         (job, out)
     }
@@ -181,6 +186,33 @@ impl ThumbBatchJob {
     pub fn with_rendered(mut self, larder: Option<SharedLarder>) -> Self {
         self.rendered = larder;
         self
+    }
+
+    /// Lets a photo with no stored preview (a DNG without an embedded JPEG, say) get a thumbnail
+    /// decoded from the RAW itself (#770). One such decode per `step()`: it is not interruptible.
+    pub fn with_decoder(mut self, decoder: Option<Arc<dyn RawDecoder + Send + Sync>>) -> Self {
+        self.decoder = decoder;
+        self
+    }
+
+    /// Decodes `id`'s file and downscales it (the T0 fallback). `Transient` when the catalog
+    /// cannot say where the file is, `Permanent` when the file will not decode.
+    fn decode_fallback(
+        &self,
+        decoder: &Arc<dyn RawDecoder + Send + Sync>,
+        id: i64,
+    ) -> Result<ThumbImage, ThumbError> {
+        let path = match nicti_lair::tier::raw_path_for(&*self.store, id) {
+            Ok(Some(path)) => path,
+            Ok(None) => return Err(ThumbError::Permanent("no stored preview".to_string())),
+            Err(e) => return Err(ThumbError::Transient(e.to_string())),
+        };
+        let frame = decoder.decode_linear(&path).map_err(|e| {
+            ThumbError::Permanent(format!(
+                "no embedded preview and the file did not decode: {e}"
+            ))
+        })?;
+        thumbnail_from_frame(&frame, &self.color).map_err(ThumbError::Permanent)
     }
 
     fn finish(&self) {
@@ -217,7 +249,7 @@ impl ChunkedJob for ThumbBatchJob {
             return Ok(Step::Done);
         }
         let end = (self.next + IMAGES_PER_STEP).min(self.ids.len());
-        let chunk = &self.ids[self.next..end];
+        let mut chunk = &self.ids[self.next..end];
 
         // One lock acquisition for the chunk's previews, not one per cell.
         let mut results: Vec<(i64, Result<ThumbImage, ThumbError>)> =
@@ -225,7 +257,7 @@ impl ChunkedJob for ThumbBatchJob {
         match self.store.get_previews(chunk, PreviewTier::T0) {
             Ok(previews) => {
                 let mut by_id: std::collections::HashMap<i64, _> = previews.into_iter().collect();
-                for &id in chunk {
+                for (i, &id) in chunk.iter().enumerate() {
                     // Not in the catalog: an archived folder's thumbnail lives in a sidecar (#72).
                     // A catalog error here is transient (a momentary lock), not "no preview".
                     let preview = match by_id.remove(&id) {
@@ -233,13 +265,27 @@ impl ChunkedJob for ThumbBatchJob {
                         None => nicti_lair::tier::load_t0_by_id(&*self.store, id)
                             .map_err(|e| ThumbError::Transient(e.to_string())),
                     };
+                    let mut decoded_raw = false;
                     let outcome = match preview {
                         Ok(Some(preview)) => make_thumbnail(&preview.bytes, &self.color)
                             .map_err(ThumbError::Permanent),
-                        Ok(None) => Err(ThumbError::Permanent("no stored preview".to_string())),
+                        // No T0 anywhere: decode the RAW itself (#770).
+                        Ok(None) => match &self.decoder {
+                            Some(decoder) => {
+                                decoded_raw = true;
+                                self.decode_fallback(decoder, id)
+                            }
+                            None => Err(ThumbError::Permanent("no stored preview".to_string())),
+                        },
                         Err(e) => Err(e),
                     };
                     results.push((id, outcome));
+                    if decoded_raw {
+                        // A full decode is hundreds of ms and cannot be cancelled mid-call: end
+                        // the chunk here so a cancel waits for one decode, not eight.
+                        chunk = &chunk[..=i];
+                        break;
+                    }
                 }
             }
             Err(e) => {
@@ -254,6 +300,7 @@ impl ChunkedJob for ThumbBatchJob {
                 );
             }
         }
+        let end = self.next + chunk.len();
 
         // #145: which of these photos have edits, one batch read for the chunk. A failed read just
         // leaves them unflagged -- a missing badge, never a failed thumbnail.
@@ -372,6 +419,94 @@ pub fn make_thumbnail(bytes: &[u8], color: &SourceTransforms) -> Result<ThumbIma
         decoded
     };
     let rgba = crate::preview_color::to_display_rgba(small, color);
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    Ok(ThumbImage {
+        image: egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+        edited: false,
+        render: ThumbRender::Camera,
+        retry: false,
+        seq: 0,
+    })
+}
+
+/// A grid thumbnail straight from a decoded RAW (#770), for a photo that has no embedded preview.
+/// A box-average down to [`THUMB_LONG_EDGE`] first, so the 45 MP frame is never widened to
+/// floats; then black level, as-shot white balance and the sRGB curve. The camera's own colour
+/// matrix is not applied: this is a stand-in until Develop opens the photo, and the pixels are
+/// tagged as sRGB so the monitor conversion still runs.
+pub fn thumbnail_from_frame(
+    frame: &LinearFrame,
+    color: &SourceTransforms,
+) -> Result<ThumbImage, String> {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    if w == 0 || h == 0 || frame.pixels.len() < w * h * 3 {
+        return Err("decoded frame has no pixels".to_string());
+    }
+    let range = (frame.maximum as f32 - frame.black as f32).max(1.0);
+    let green = if frame.cam_mul[1] > 0.0 {
+        frame.cam_mul[1]
+    } else {
+        1.0
+    };
+    let mut wb = [1.0f32; 3];
+    for (c, m) in wb.iter_mut().enumerate() {
+        let v = frame.cam_mul[c] / green;
+        if v.is_finite() && v > 0.0 {
+            *m = v;
+        }
+    }
+    let step = w.max(h).div_ceil(THUMB_LONG_EDGE as usize).max(1);
+    let (ow, oh) = (w.div_ceil(step), h.div_ceil(step));
+    let mut rgb = image::RgbImage::new(ow as u32, oh as u32);
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let (x0, y0) = (ox * step, oy * step);
+            let (x1, y1) = ((x0 + step).min(w), (y0 + step).min(h));
+            let mut sum = [0f32; 3];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = (y * w + x) * 3;
+                    for (c, acc) in sum.iter_mut().enumerate() {
+                        *acc += frame.pixels[i + c] as f32;
+                    }
+                }
+            }
+            let n = ((x1 - x0) * (y1 - y0)) as f32;
+            let mut px = [0u8; 3];
+            for c in 0..3 {
+                let lin = ((sum[c] / n - frame.black as f32 - frame.cblack[c] as f32) / range
+                    * wb[c])
+                    .clamp(0.0, 1.0);
+                let enc = if lin <= 0.003_130_8 {
+                    lin * 12.92
+                } else {
+                    1.055 * lin.powf(1.0 / 2.4) - 0.055
+                };
+                px[c] = (enc * 255.0 + 0.5) as u8;
+            }
+            rgb.put_pixel(ox as u32, oy as u32, image::Rgb(px));
+        }
+    }
+    // The pixels are in sensor orientation (`LinearFrame::orientation`); a stored T0 is turned
+    // upright on decode, so match it.
+    let img = image::DynamicImage::ImageRgb8(rgb);
+    let img = match frame.orientation {
+        2 => img.fliph(),
+        3 => img.rotate180(),
+        4 => img.flipv(),
+        5 => img.rotate90().fliph(),
+        6 => img.rotate90(),
+        7 => img.rotate270().fliph(),
+        8 => img.rotate270(),
+        _ => img,
+    };
+    let rgba = crate::preview_color::to_display_rgba(
+        crate::preview_color::DecodedJpeg {
+            image: img,
+            icc: None,
+        },
+        color,
+    );
     let size = [rgba.width() as usize, rgba.height() as usize];
     Ok(ThumbImage {
         image: egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
@@ -665,5 +800,129 @@ mod tests {
         )
         .unwrap();
         assert_ne!(thumb.image.pixels[0], unmanaged.image.pixels[0]);
+    }
+
+    // ---- #770: a photo with no stored preview is decoded from the RAW ----
+
+    struct FakeDecoder {
+        frame: Result<LinearFrame, String>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl nicti_claw::Module for FakeDecoder {
+        fn id(&self) -> &str {
+            "test.decoder.fake"
+        }
+        fn schema_version(&self) -> u32 {
+            1
+        }
+        fn migrate_params(&self, _: u32, _: serde_json::Value) -> Option<serde_json::Value> {
+            None
+        }
+    }
+
+    impl RawDecoder for FakeDecoder {
+        fn decode_linear(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<LinearFrame, nicti_cornea::DecodeError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.frame
+                .clone()
+                .map_err(|msg| nicti_cornea::DecodeError::Io {
+                    path: std::path::PathBuf::new(),
+                    source: std::io::Error::other(msg),
+                })
+        }
+    }
+
+    fn flat_frame(w: u32, h: u32, level: u16, orientation: u8) -> LinearFrame {
+        LinearFrame {
+            width: w,
+            height: h,
+            black: 0,
+            maximum: 1000,
+            cam_mul: [1.0, 1.0, 1.0, 1.0],
+            pixels: vec![level; (w * h * 3) as usize],
+            orientation,
+            ..LinearFrame::default()
+        }
+    }
+
+    fn fake(frame: Result<LinearFrame, String>) -> Arc<FakeDecoder> {
+        Arc::new(FakeDecoder {
+            frame,
+            calls: Default::default(),
+        })
+    }
+
+    #[test]
+    fn a_frame_thumbnail_is_bounded_oriented_and_tone_mapped() {
+        let t = thumbnail_from_frame(&flat_frame(1000, 500, 500, 1), &srgb()).unwrap();
+        let [w, h] = t.image.size;
+        assert!(w.max(h) <= THUMB_LONG_EDGE as usize && w > h, "{w}x{h}");
+        // Linear 0.5 encodes to sRGB ~188.
+        let px = t.image.pixels[0];
+        assert!((185..=191).contains(&px.r()), "{px:?}");
+
+        let turned = thumbnail_from_frame(&flat_frame(1000, 500, 500, 6), &srgb()).unwrap();
+        assert!(
+            turned.image.size[1] > turned.image.size[0],
+            "orientation 6 stands it up"
+        );
+
+        assert!(thumbnail_from_frame(&LinearFrame::default(), &srgb()).is_err());
+    }
+
+    #[test]
+    fn a_photo_without_a_stored_preview_gets_a_decoded_thumbnail() {
+        let (store, ids) = seeded(3, |_| false);
+        let decoder = fake(Ok(flat_frame(600, 400, 300, 1)));
+        let (job, slot) = ThumbBatchJob::new(store, ids.clone(), 0, Arc::new(srgb()));
+        let mut job = job.with_decoder(Some(decoder.clone()));
+        let steps = run_to_done(&mut job);
+        let out = slot.lock().unwrap();
+        assert_eq!(out.ready.len(), 3);
+        assert!(
+            out.ready.iter().all(|(_, r)| r.is_ok()),
+            "every cell decoded"
+        );
+        // One uninterruptible decode per step, so a cancel never waits on eight.
+        assert!(steps >= 3, "{steps} steps for 3 decodes");
+        assert_eq!(decoder.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_stored_preview_is_never_decoded_from_the_raw() {
+        let (store, ids) = seeded(4, |_| true);
+        let decoder = fake(Ok(flat_frame(10, 10, 1, 1)));
+        let (job, slot) = ThumbBatchJob::new(store, ids, 0, Arc::new(srgb()));
+        let mut job = job.with_decoder(Some(decoder.clone()));
+        let steps = run_to_done(&mut job);
+        assert_eq!(steps, 1, "previews still batch eight to a step");
+        assert_eq!(decoder.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(slot.lock().unwrap().ready.iter().all(|(_, r)| r.is_ok()));
+    }
+
+    #[test]
+    fn an_undecodable_raw_is_a_permanent_error_naming_why_and_no_decoder_keeps_the_old_message() {
+        let (store, ids) = seeded(1, |_| false);
+        let decoder = fake(Err("corrupt".into()));
+        let (job, slot) = ThumbBatchJob::new(store.clone(), ids.clone(), 0, Arc::new(srgb()));
+        let mut job = job.with_decoder(Some(decoder));
+        run_to_done(&mut job);
+        match &slot.lock().unwrap().ready[0].1 {
+            Err(ThumbError::Permanent(m)) => assert!(m.contains("did not decode"), "{m}"),
+            Err(ThumbError::Transient(m)) => panic!("transient: {m}"),
+            Ok(_) => panic!("a corrupt file produced a thumbnail"),
+        }
+
+        let (job, slot) = ThumbBatchJob::new(store, ids, 0, Arc::new(srgb()));
+        let mut job = job;
+        run_to_done(&mut job);
+        assert_eq!(
+            slot.lock().unwrap().ready[0].1.as_ref().err(),
+            Some(&ThumbError::Permanent("no stored preview".into()))
+        );
     }
 }

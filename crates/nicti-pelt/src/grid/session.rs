@@ -123,6 +123,8 @@ pub struct GridSession {
     /// Where rendered thumbnails are read from (#397); `None` while rendered previews are off for
     /// the grid.
     rendered: Option<SharedLarder>,
+    /// RAW decoder for photos that carry no stored preview (#770); `None` = they show "no preview".
+    decoder: Option<std::sync::Arc<dyn nicti_cornea::RawDecoder + Send + Sync>>,
     /// Which edited photos' textures are a render of their *current* edits; any other edited photo
     /// is flagged stale.
     render_current: HashSet<i64>,
@@ -172,6 +174,7 @@ impl GridSession {
             ))),
             color_generation: 0,
             rendered: None,
+            decoder: None,
             render_current: HashSet::new(),
             redo: HashMap::new(),
             redo_counter: 0,
@@ -202,6 +205,14 @@ impl GridSession {
         self.render_current.clear();
         self.redo.clear();
         self.cancel_batches(pounce);
+    }
+
+    /// Lets a photo with no stored preview get a thumbnail decoded from its RAW (#770).
+    pub fn set_decoder(
+        &mut self,
+        decoder: Option<std::sync::Arc<dyn nicti_cornea::RawDecoder + Send + Sync>>,
+    ) {
+        self.decoder = decoder;
     }
 
     /// Turns rendered thumbnails (#397) on (`Some`) or off for edited photos. A no-op while the
@@ -702,7 +713,9 @@ impl GridSession {
             }
             let (job, slot) =
                 ThumbBatchJob::new(self.store.clone(), missing, first_index, self.color.clone());
-            let job = job.with_rendered(self.rendered.clone());
+            let job = job
+                .with_rendered(self.rendered.clone())
+                .with_decoder(self.decoder.clone());
             let job_id = pounce.submit(Box::new(job));
             self.inflight.insert(
                 batch,

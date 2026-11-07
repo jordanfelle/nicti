@@ -1870,6 +1870,7 @@ impl PeltApp {
         if self.grid.is_none() {
             let dyn_store: Arc<dyn CatalogStore + Send + Sync> = store.clone();
             let mut grid = GridSession::new(dyn_store, PLACEHOLDER_GRID_TEXTURE_BUDGET_BYTES);
+            grid.set_decoder(Some(self.decoder.clone()));
             // Born after the display profile was resolved: start on the current conversion, not
             // the sRGB default `sync_preview_color` already moved past.
             grid.set_color(
