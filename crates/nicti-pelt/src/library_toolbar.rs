@@ -184,4 +184,30 @@ mod tests {
         let w = why_disabled(&ToolbarState::default());
         assert!(w.select_all.is_some() && w.compare.is_some() && w.copy.is_some());
     }
+
+    /// A missing clipboard is the recoverable reason, so it is shown before "select a photo".
+    #[test]
+    fn an_empty_clipboard_is_named_before_an_empty_selection() {
+        let w = why_disabled(&ToolbarState {
+            total: 10,
+            targets: 0,
+            has_clipboard: false,
+            ..ToolbarState::default()
+        });
+        assert_eq!(w.paste, Some("Copy settings first."));
+    }
+
+    /// Both batch-edit blockers apply to the two-photo actions too, with two photos selected.
+    #[test]
+    fn two_selected_photos_do_not_enable_sync_while_busy_or_asking() {
+        for (busy, asking, reason) in [(true, false, BUSY), (false, true, ASKING)] {
+            let w = why_disabled(&ToolbarState {
+                targets: 2,
+                busy,
+                asking,
+                ..state()
+            });
+            assert_eq!((w.sync, w.straighten), (Some(reason), Some(reason)));
+        }
+    }
 }
