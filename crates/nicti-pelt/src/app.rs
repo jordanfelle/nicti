@@ -1979,10 +1979,24 @@ impl PeltApp {
         let (mut select_all, mut delete, mut survey, mut compare, mut export) =
             (false, false, false, false, false);
         let mut knead_action: Option<PanelAction> = None;
-        ui.horizontal(|ui| {
+        // #776: every disabled button says what it is waiting for.
+        let why = crate::library_toolbar::why_disabled(&crate::library_toolbar::ToolbarState {
+            total,
+            targets,
+            has_selection,
+            busy,
+            delete_running: self.delete.is_running(),
+            export_running: self.export.is_running(),
+            asking: self.knead.is_asking(),
+            has_clipboard: self.knead.has_clipboard(),
+        });
+        // Grouped by task -- select | look and cull | export | settings -- and wrapping between
+        // groups rather than mid-group.
+        ui.horizontal_wrapped(|ui| {
             let r = ui
-                .add_enabled(total > 0, egui::Button::new("Select all"))
-                .on_hover_text("Ctrl+A. Every photo matching the current filter.");
+                .add_enabled(why.select_all.is_none(), egui::Button::new("Select all"))
+                .on_hover_text("Ctrl+A. Every photo matching the current filter.")
+                .on_disabled_hover_text(why.select_all.unwrap_or_default());
             crate::widgets::reg(ui.ctx(), "button:select-all", &r);
             if r.clicked() {
                 select_all = true;
@@ -1990,89 +2004,113 @@ impl PeltApp {
             if has_selection {
                 ui.label(format!("{targets} selected"));
             }
+            ui.separator();
             let r = ui
                 .add_enabled(
-                    targets > 0 && !busy && !self.delete.is_running(),
+                    why.delete.is_none(),
                     egui::Button::new(format!("Delete {targets}\u{2026}")),
                 )
-                .on_hover_text("Delete / Backspace. Asks whether to use the Recycle Bin.");
+                .on_hover_text("Delete / Backspace. Asks whether to use the Recycle Bin.")
+                .on_disabled_hover_text(why.delete.unwrap_or_default());
             // Only opens the confirmation, but it is the road to deleting files: nameable only
             // when the operator allowed destructive commands.
             crate::widgets::reg_destructive(ui.ctx(), "button:delete", &r);
             if r.clicked() {
                 delete = true;
             }
-            let r = ui.add_enabled(
-                targets >= 2 && has_selection,
-                egui::Button::new("Survey (N)"),
-            );
+            let r = ui
+                .add_enabled(why.survey.is_none(), egui::Button::new("Survey (N)"))
+                .on_disabled_hover_text(why.survey.unwrap_or_default());
             crate::widgets::reg(ui.ctx(), "button:survey", &r);
             if r.clicked() {
                 survey = true;
             }
-            let r = ui.add_enabled(total >= 2, egui::Button::new("Compare (C)"));
+            let r = ui
+                .add_enabled(why.compare.is_none(), egui::Button::new("Compare (C)"))
+                .on_disabled_hover_text(why.compare.unwrap_or_default());
             crate::widgets::reg(ui.ctx(), "button:compare", &r);
             if r.clicked() {
                 compare = true;
             }
+            ui.separator();
             let r = ui
                 .add_enabled(
-                    targets > 0 && !busy && !self.export.is_running(),
+                    why.export.is_none(),
                     egui::Button::new(format!("Export {targets}\u{2026}")),
                 )
                 .on_hover_text(
                     "Ctrl+Shift+E. Render these photos with their edits to JPEG, PNG or TIFF.",
-                );
+                )
+                .on_disabled_hover_text(why.export.unwrap_or_default());
             crate::widgets::reg(ui.ctx(), "button:export", &r);
             if r.clicked() {
                 export = true;
             }
-            let can_edit = targets > 0 && !busy && !self.knead.is_asking();
-            if ui
-                .add_enabled(total > 0, egui::Button::new("Copy settings\u{2026}"))
-                .on_hover_text("Ctrl+Shift+C. Copy the cursor photo's develop settings.")
-                .clicked()
-            {
-                knead_action = Some(PanelAction::Copy);
-            }
-            if ui
-                .add_enabled(
-                    can_edit && self.knead.has_clipboard(),
-                    egui::Button::new(format!("Paste settings {targets}")),
-                )
-                .on_hover_text("Ctrl+Shift+V. Paste the copied settings onto the selection.")
-                .clicked()
-            {
-                knead_action = Some(PanelAction::Paste);
-            }
-            if ui
-                .add_enabled(
-                    can_edit && targets >= 2,
-                    egui::Button::new(format!("Sync settings {targets}\u{2026}")),
-                )
-                .on_hover_text(
-                    "Ctrl+Shift+S. Copy the cursor photo's settings onto the rest of the selection.",
-                )
-                .clicked()
-            {
-                knead_action = Some(PanelAction::Sync);
-            }
-            if ui
-                .add_enabled(
-                    can_edit && targets >= 2,
-                    egui::Button::new(format!("Straighten {targets}\u{2026}")),
-                )
-                .on_hover_text(
-                    "Set or add the straighten angle of the cursor photo on the rest of the \
-                     selection. Only the angle changes; crops are fitted when rendered.",
-                )
-                .clicked()
-            {
-                knead_action = Some(PanelAction::Straighten);
-            }
-            if let Some(picked) = self.knead.preset_menu(ui, can_edit) {
-                knead_action = Some(picked);
-            }
+            ui.separator();
+            // The develop-settings actions share one menu instead of five more buttons.
+            ui.menu_button("Settings", |ui| {
+                if ui
+                    .add_enabled(
+                        why.copy.is_none(),
+                        egui::Button::new("Copy settings\u{2026}"),
+                    )
+                    .on_hover_text("Ctrl+Shift+C. Copy the cursor photo's develop settings.")
+                    .on_disabled_hover_text(why.copy.unwrap_or_default())
+                    .clicked()
+                {
+                    knead_action = Some(PanelAction::Copy);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        why.paste.is_none(),
+                        egui::Button::new(format!("Paste settings {targets}")),
+                    )
+                    .on_hover_text("Ctrl+Shift+V. Paste the copied settings onto the selection.")
+                    .on_disabled_hover_text(why.paste.unwrap_or_default())
+                    .clicked()
+                {
+                    knead_action = Some(PanelAction::Paste);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        why.sync.is_none(),
+                        egui::Button::new(format!("Sync settings {targets}\u{2026}")),
+                    )
+                    .on_hover_text(
+                        "Ctrl+Shift+S. Copy the cursor photo's settings onto the rest of the \
+                         selection.",
+                    )
+                    .on_disabled_hover_text(why.sync.unwrap_or_default())
+                    .clicked()
+                {
+                    knead_action = Some(PanelAction::Sync);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        why.straighten.is_none(),
+                        egui::Button::new(format!("Straighten {targets}\u{2026}")),
+                    )
+                    .on_hover_text(
+                        "Set or add the straighten angle of the cursor photo on the rest of the \
+                         selection. Only the angle changes; crops are fitted when rendered.",
+                    )
+                    .on_disabled_hover_text(why.straighten.unwrap_or_default())
+                    .clicked()
+                {
+                    knead_action = Some(PanelAction::Straighten);
+                    ui.close();
+                }
+                if let Some(picked) = self.knead.preset_menu(ui, why.apply_preset.is_none()) {
+                    knead_action = Some(picked);
+                    ui.close();
+                }
+                if let Some(reason) = why.apply_preset {
+                    ui.weak(format!("Apply preset: {reason}"));
+                }
+            });
         });
         if let Some(action) = knead_action {
             self.handle_knead_action(action);

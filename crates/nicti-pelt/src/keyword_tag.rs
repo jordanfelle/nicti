@@ -43,13 +43,17 @@ impl KeywordUi {
         let mut submit = false;
         ui.horizontal_wrapped(|ui| {
             ui.label("Keywords:");
-            let edit = ui.add_enabled(
-                target_count > 0,
-                egui::TextEdit::singleline(&mut self.input)
-                    .align(egui::Align2::LEFT_TOP)
-                    .hint_text("Name or Parent|Child")
-                    .desired_width(180.0),
-            );
+            // #776: wide enough to read the hint, but leaving room for the Tag button on the same
+            // line so the row does not wrap in the middle of the field.
+            let width = (ui.available_width() - 110.0).clamp(240.0, 420.0);
+            let edit = ui
+                .add_enabled(
+                    target_count > 0,
+                    egui::TextEdit::singleline(&mut self.input)
+                        .hint_text("Name or Parent|Child")
+                        .desired_width(width),
+                )
+                .on_disabled_hover_text("Select at least one photo to tag.");
             let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let clicked = ui
                 .add_enabled(

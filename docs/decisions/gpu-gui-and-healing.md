@@ -240,3 +240,7 @@ Tests: a click on a turned photo lands on the sensor pixel it shows for all eigh
 ## #775: folder panel volume names
 
 Folder panel volume names (#775): a drive heads as `<OS volume label> (<mount path>)` (`volume_names.rs`: `/dev/disk/by-label` joined to `/proc/self/mounts` on Linux, the volume label via `nicti_lair::volume::windows_impl` on Windows -- Windows half unverified; read on a worker with the drive probe, `/` never labelled); row and heading truncation count display columns (`unicode-width`), so CJK/emoji labels are cut where they overflow. The Archive-drive checkbox on `/` is already pinned by `the_catch_all_offers_archive_only_to_switch_an_old_location_off`; a full-panel pixel snapshot was not added (needs a GPU device).
+
+## #776: Library toolbar
+
+Library toolbar (#776): the action row is grouped select | delete/survey/compare | export | a `Settings` menu (Copy/Paste/Sync/Straighten/Apply preset), wrapping between groups; every disabled button has a hover reason from the pure `library_toolbar::why_disabled` (same conditions as before, unit-tested). The Keywords field is `available_width - 110` clamped 240..420 so the hint is readable and the Tag button stays on its line. Control-channel names (`button:delete`, `button:export`, ...) are unchanged; the settings actions were never registered. Not hidden when nothing is selected (a stable layout and the hover reasons were preferred).

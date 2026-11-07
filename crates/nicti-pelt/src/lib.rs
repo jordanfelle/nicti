@@ -55,6 +55,7 @@ mod grid;
 mod heal_tool;
 mod keyword_tag;
 mod knead;
+mod library_toolbar;
 mod loupe;
 mod lrc_import;
 mod mask_edit;
