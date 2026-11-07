@@ -92,8 +92,14 @@ class Session:
                 break
         if self.win is None:
             sys.exit("the app never opened a window; see " + os.path.join(self.home, "app.log"))
-        w, h = a.size
-        self.win.configure(x=0, y=0, width=w, height=h)
+        if a.keep_size:
+            # Leave the window as the app opened it (a restored size/position); report it.
+            g = self.win.get_geometry()
+            a.size = (g.width, g.height)
+            print(f"window opened at {g.width}x{g.height}")
+        else:
+            w, h = a.size
+            self.win.configure(x=0, y=0, width=w, height=h)
         self.d.sync()
 
     def stop(self):
@@ -212,6 +218,7 @@ def main():
     ap.add_argument("--display", default=":99")
     ap.add_argument("--home", default=None, help="keep the isolated profile here (default: a temp dir)")
     ap.add_argument("--control", action="store_true", help="start the app with --control")
+    ap.add_argument("--keep-size", action="store_true", help="do not resize the window (test a restored size)")
     ap.add_argument("steps", nargs="+")
     args = ap.parse_args()
     args.size = tuple(int(v) for v in args.size.split("x"))
