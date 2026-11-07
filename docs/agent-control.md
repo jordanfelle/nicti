@@ -61,3 +61,5 @@ nicti-mcp --token-file ./nicti-control-<pid>.json --port 5555
 
 Destructive commands and the delete/Export dialogs are refused unless the operator started the app
 with `--control-allow-destructive`. A tool the table lists as unavailable says why in its description.
+
+To run the app headless (no display or GPU) and reproduce a screen, see [ui-audit.md](ui-audit.md).
