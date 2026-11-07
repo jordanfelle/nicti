@@ -323,6 +323,7 @@ fn linear_frame(
         dng_opcode_list3: None,
         nikon_lens_info: None,
         lens_exif: Default::default(),
+        exposure: Default::default(),
         // 1 (upright) and "no tag" are indistinguishable from the decoder; both mean 0.
         orientation: if (2..=8).contains(&orientation) {
             orientation

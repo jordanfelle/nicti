@@ -455,6 +455,21 @@ pub fn one_to_one_scale(rect_size_px: (f32, f32), tex_size_px: (f32, f32)) -> [f
     ])
 }
 
+/// The Loupe's zoom as a percentage of native size (#773): 100 when pinned at 1:1, else how much
+/// the Fit view shrinks (or enlarges) the image -- the smaller of the width and height ratios of
+/// the viewport to the image, in physical pixels. A degenerate extent reads as 100.
+pub fn zoom_percent(zoomed: bool, rect_size_px: (f32, f32), tex_size_px: (f32, f32)) -> f32 {
+    if zoomed || !positive_finite(rect_size_px) || !positive_finite(tex_size_px) {
+        return 100.0;
+    }
+    let pct = (rect_size_px.0 / tex_size_px.0).min(rect_size_px.1 / tex_size_px.1) * 100.0;
+    if pct.is_finite() {
+        pct
+    } else {
+        100.0
+    }
+}
+
 /// Clamps a loupe `view_offset` so the visible window never leaves the image (#294). The shader
 /// samples texture UV `(uv - 0.5) * scale + 0.5 + offset`, so the window is `scale` wide centred on
 /// `0.5 + offset`; it stays inside `[0, 1]` while `|offset| <= (1 - scale) / 2`. An axis where the
@@ -1322,5 +1337,18 @@ mod tests {
         // A resize that widens the window shrinks the allowed range: the stored pan is pulled in.
         let p = pan_after_drag([0.375, 0.0], (0.0, 0.0), (2000.0, 800.0), [0.5, 1.0]);
         assert_eq!(p[0], 0.25);
+    }
+
+    #[test]
+    fn zoom_percent_is_100_at_one_to_one_and_the_fit_ratio_otherwise() {
+        assert_eq!(zoom_percent(true, (800.0, 600.0), (6000.0, 4000.0)), 100.0);
+        // 6000x4000 fitted into 1200x800: both ratios are 0.2.
+        assert!((zoom_percent(false, (1200.0, 800.0), (6000.0, 4000.0)) - 20.0).abs() < 1e-3);
+        // The tighter axis wins (a wide viewport, a tall image).
+        assert!((zoom_percent(false, (2000.0, 500.0), (1000.0, 1000.0)) - 50.0).abs() < 1e-3);
+        // Small images enlarge in Fit.
+        assert!(zoom_percent(false, (800.0, 600.0), (400.0, 300.0)) > 100.0);
+        assert_eq!(zoom_percent(false, (0.0, 0.0), (400.0, 300.0)), 100.0);
+        assert_eq!(zoom_percent(false, (800.0, 600.0), (f32::NAN, 1.0)), 100.0);
     }
 }

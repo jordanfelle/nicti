@@ -117,10 +117,58 @@ pub struct LinearFrame {
     /// lenses `nikon_lens_info` does not cover. All fields are empty/`None` when the file records
     /// none (older Nikon bodies keep the lens only in the MakerNote, which is not read).
     pub lens_exif: LensExif,
+    /// The shot's exposure as the file's EXIF records it (#773), for the Loupe's readout.
+    pub exposure: ExposureExif,
     /// The container's IFD0 Orientation as the EXIF value 1-8 (#341); `0` when the file has none
     /// or it is out of range. The pixels above are **not** rotated by it: crop, heal and mask
     /// coordinates stay in sensor orientation, and the on-screen view turns the image instead.
     pub orientation: u8,
+}
+
+/// The shot's exposure settings from EXIF (#773). Every field is `None` when the file records none
+/// or an unusable value; none of it feeds the render.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExposureExif {
+    /// Shutter time in seconds (`ExposureTime`).
+    pub exposure_time_s: Option<f32>,
+    pub f_number: Option<f32>,
+    /// Real focal length in millimetres.
+    pub focal_length_mm: Option<f32>,
+    /// Exposure compensation in EV (`ExposureBiasValue`), signed.
+    pub exposure_bias_ev: Option<f32>,
+}
+
+/// Reads [`ExposureExif`] from a TIFF-based or JPEG container; anything unreadable is the default.
+pub fn read_exposure_exif(data: &[u8]) -> ExposureExif {
+    use exif::{In, Reader, Tag, Value};
+
+    let Ok(exif) = Reader::new().read_from_container(&mut std::io::Cursor::new(data)) else {
+        return ExposureExif::default();
+    };
+    let positive = |tag: Tag| -> Option<f32> {
+        match &exif.get_field(tag, In::PRIMARY)?.value {
+            Value::Rational(v) => v.first().filter(|r| r.denom != 0).map(|r| r.to_f32()),
+            _ => None,
+        }
+        .filter(|v| v.is_finite() && *v > 0.0)
+    };
+    let bias = match exif
+        .get_field(Tag::ExposureBiasValue, In::PRIMARY)
+        .map(|f| &f.value)
+    {
+        Some(Value::SRational(v)) => v
+            .first()
+            .filter(|r| r.denom != 0)
+            .map(|r| r.to_f32())
+            .filter(|v| v.is_finite() && v.abs() <= 30.0),
+        _ => None,
+    };
+    ExposureExif {
+        exposure_time_s: positive(Tag::ExposureTime),
+        f_number: positive(Tag::FNumber),
+        focal_length_mm: positive(Tag::FocalLength),
+        exposure_bias_ev: bias,
+    }
 }
 
 /// The EXIF lens fields a lens-database lookup needs (#462). Default is "unknown".
@@ -244,6 +292,7 @@ impl RawDecoder for LibRawDecoder {
             .ok()
             .and_then(|mut w| w.find_nikon_lens_info().ok().flatten());
         let lens_exif = read_lens_exif(&data);
+        let exposure = read_exposure_exif(&data);
         let orientation = container_orientation(&data);
         let image = handle
             .linear_image()
@@ -284,6 +333,7 @@ impl RawDecoder for LibRawDecoder {
             dng_opcode_list3,
             nikon_lens_info,
             lens_exif,
+            exposure,
             orientation,
         })
     }
@@ -498,5 +548,39 @@ mod tests {
             container_orientation(&tiff_with_orientation(3, 1, 6)[..5]),
             0
         );
+    }
+
+    fn srat(n: i32, d: i32) -> exif::Value {
+        exif::Value::SRational(vec![exif::SRational { num: n, denom: d }])
+    }
+
+    #[test]
+    fn exposure_exif_reads_shutter_aperture_focal_and_signed_bias() {
+        let data = tiff_with(vec![
+            field(exif::Tag::ExposureTime, rat(1, 250)),
+            field(exif::Tag::FNumber, rat(28, 10)),
+            field(exif::Tag::FocalLength, rat(850, 10)),
+            field(exif::Tag::ExposureBiasValue, srat(-7, 10)),
+        ]);
+        let e = read_exposure_exif(&data);
+        assert_eq!(e.exposure_time_s, Some(1.0 / 250.0));
+        assert_eq!(e.f_number, Some(2.8));
+        assert_eq!(e.focal_length_mm, Some(85.0));
+        assert_eq!(e.exposure_bias_ev, Some(-0.7));
+    }
+
+    #[test]
+    fn exposure_exif_drops_zero_division_and_garbage() {
+        let data = tiff_with(vec![
+            field(exif::Tag::ExposureTime, rat(1, 0)),
+            field(exif::Tag::FNumber, rat(0, 10)),
+            field(exif::Tag::ExposureBiasValue, srat(5, 0)),
+        ]);
+        assert_eq!(read_exposure_exif(&data), ExposureExif::default());
+        assert_eq!(read_exposure_exif(b"not a tiff"), ExposureExif::default());
+        assert_eq!(read_exposure_exif(&[]), ExposureExif::default());
+        // An absurd compensation is not a real one.
+        let wild = tiff_with(vec![field(exif::Tag::ExposureBiasValue, srat(9000, 10))]);
+        assert_eq!(read_exposure_exif(&wild).exposure_bias_ev, None);
     }
 }
