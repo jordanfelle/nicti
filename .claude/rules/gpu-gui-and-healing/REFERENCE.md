@@ -51,6 +51,10 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 
 - A drive heads as `<OS label> (<path>)` via `volume_names.rs` (worker-read); labels/rows truncate by display columns (`unicode-width`). Windows half unverified. Detail: `docs/decisions/gpu-gui-and-healing.md`.
 
+## #776: Library toolbar
+
+- Grouped action row + `Settings` menu; disabled-button reasons in pure `library_toolbar::why_disabled`; wider Keywords field. Detail: `docs/decisions/gpu-gui-and-healing.md`.
+
 ## Package contents
 
 - **`spikes/glint`** (#16/ADR-0016) — wgpu-vs-CUDA measured comparison: correctness, feature/limit
