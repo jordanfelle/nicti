@@ -263,6 +263,13 @@ impl DevelopView {
         changed
     }
 
+    /// What the last `render` dispatched (baked/live/geometry passes), for tests that pin which
+    /// work a call did.
+    #[cfg(test)]
+    pub(crate) fn last_render_stats(&self) -> nicti_tapetum::renderer::RenderStats {
+        self.engine.renderer.last_stats()
+    }
+
     /// The current quantized canvas minification (`1.0` unless the canvas is painted smaller).
     #[cfg(test)]
     pub fn view_scale(&self) -> f32 {
