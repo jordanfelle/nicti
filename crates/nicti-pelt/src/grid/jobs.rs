@@ -207,10 +207,13 @@ impl ThumbBatchJob {
             Ok(None) => return Err(ThumbError::Permanent("no stored preview".to_string())),
             Err(e) => return Err(ThumbError::Transient(e.to_string())),
         };
-        let frame = decoder.decode_linear(&path).map_err(|e| {
-            ThumbError::Permanent(format!(
+        let frame = decoder.decode_linear(&path).map_err(|e| match e {
+            // Unreadable right now (an unmounted drive, a failing share): the cell asks again
+            // after a back-off instead of being written off until the next refresh.
+            nicti_cornea::DecodeError::Io { .. } => ThumbError::Transient(e.to_string()),
+            e => ThumbError::Permanent(format!(
                 "no embedded preview and the file did not decode: {e}"
-            ))
+            )),
         })?;
         thumbnail_from_frame(&frame, &self.color).map_err(ThumbError::Permanent)
     }
@@ -805,7 +808,7 @@ mod tests {
     // ---- #770: a photo with no stored preview is decoded from the RAW ----
 
     struct FakeDecoder {
-        frame: Result<LinearFrame, String>,
+        frame: Result<LinearFrame, fn() -> nicti_cornea::DecodeError>,
         calls: std::sync::atomic::AtomicUsize,
     }
 
@@ -827,12 +830,7 @@ mod tests {
             _path: &std::path::Path,
         ) -> Result<LinearFrame, nicti_cornea::DecodeError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.frame
-                .clone()
-                .map_err(|msg| nicti_cornea::DecodeError::Io {
-                    path: std::path::PathBuf::new(),
-                    source: std::io::Error::other(msg),
-                })
+            self.frame.clone().map_err(|make| make())
         }
     }
 
@@ -849,7 +847,7 @@ mod tests {
         }
     }
 
-    fn fake(frame: Result<LinearFrame, String>) -> Arc<FakeDecoder> {
+    fn fake(frame: Result<LinearFrame, fn() -> nicti_cornea::DecodeError>) -> Arc<FakeDecoder> {
         Arc::new(FakeDecoder {
             frame,
             calls: Default::default(),
@@ -907,7 +905,10 @@ mod tests {
     #[test]
     fn an_undecodable_raw_is_a_permanent_error_naming_why_and_no_decoder_keeps_the_old_message() {
         let (store, ids) = seeded(1, |_| false);
-        let decoder = fake(Err("corrupt".into()));
+        let decoder = fake(Err(|| nicti_cornea::DecodeError::Jpeg {
+            path: std::path::PathBuf::new(),
+            message: "corrupt".into(),
+        }));
         let (job, slot) = ThumbBatchJob::new(store.clone(), ids.clone(), 0, Arc::new(srgb()));
         let mut job = job.with_decoder(Some(decoder));
         run_to_done(&mut job);
@@ -924,5 +925,74 @@ mod tests {
             slot.lock().unwrap().ready[0].1.as_ref().err(),
             Some(&ThumbError::Permanent("no stored preview".into()))
         );
+    }
+
+    #[test]
+    fn an_unreadable_file_is_transient_so_a_reconnected_drive_is_retried() {
+        let (store, ids) = seeded(1, |_| false);
+        let decoder = fake(Err(|| nicti_cornea::DecodeError::Io {
+            path: std::path::PathBuf::new(),
+            source: std::io::Error::other("drive gone"),
+        }));
+        let (job, slot) = ThumbBatchJob::new(store, ids, 0, Arc::new(srgb()));
+        let mut job = job.with_decoder(Some(decoder));
+        run_to_done(&mut job);
+        assert!(matches!(
+            slot.lock().unwrap().ready[0].1,
+            Err(ThumbError::Transient(_))
+        ));
+    }
+
+    #[test]
+    fn a_mixed_chunk_loses_no_id_and_decodes_only_the_previewless_ones() {
+        // previews at 0, 1, 3, 5; none at 2, 4 (decoded), across one 6-id batch.
+        let (store, ids) = seeded(6, |i| matches!(i, 0 | 1 | 3 | 5));
+        let decoder = fake(Ok(flat_frame(60, 40, 300, 1)));
+        let (job, slot) = ThumbBatchJob::new(store, ids.clone(), 0, Arc::new(srgb()));
+        let mut job = job.with_decoder(Some(decoder.clone()));
+        run_to_done(&mut job);
+        let out = slot.lock().unwrap();
+        let got: Vec<i64> = out.ready.iter().map(|(id, _)| *id).collect();
+        assert_eq!(got, ids, "every id exactly once, in order");
+        assert!(out.ready.iter().all(|(_, r)| r.is_ok()));
+        assert_eq!(decoder.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn all_eight_orientations_turn_a_corner_marker_to_the_right_place() {
+        // A 4x2 frame, a bright pixel at the top-left in sensor orientation; the thumbnail is
+        // one pixel per source pixel (long edge < 256), so its position is exact.
+        for (orientation, size, at) in [
+            (1u8, (4, 2), (0, 0)),
+            (2, (4, 2), (3, 0)),
+            (3, (4, 2), (3, 1)),
+            (4, (4, 2), (0, 1)),
+            (5, (2, 4), (0, 0)),
+            (6, (2, 4), (1, 0)),
+            (7, (2, 4), (1, 3)),
+            (8, (2, 4), (0, 3)),
+        ] {
+            let mut f = flat_frame(4, 2, 0, orientation);
+            f.pixels[..3].fill(1000);
+            let t = thumbnail_from_frame(&f, &srgb()).unwrap();
+            assert_eq!(
+                (t.image.size[0], t.image.size[1]),
+                size,
+                "orientation {orientation}"
+            );
+            let bright: Vec<usize> = t
+                .image
+                .pixels
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.r() > 200)
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(
+                bright,
+                vec![at.1 * size.0 + at.0],
+                "orientation {orientation}"
+            );
+        }
     }
 }
