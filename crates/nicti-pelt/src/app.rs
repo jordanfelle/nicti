@@ -220,6 +220,8 @@ pub struct PeltApp {
     /// The first full-resolution render running on the GPU lane (#778). `develop` is `None` while
     /// it runs (the view travels with the job); `poll_render_job` puts it back.
     render_job: Option<crate::render_job::RenderSlot>,
+    /// Photos a batch edit touched while `develop` was out with that job: re-read when it returns.
+    render_job_touched: Vec<i64>,
     /// The Loupe's info line for one asset (#760), so the catalog is not read every frame.
     loupe_info: Option<(i64, String)>,
     /// Pan offset in texture-UV units, only meaningful (and only adjustable, via drag) in 100%
@@ -587,6 +589,7 @@ impl PeltApp {
             loupe_render_pending: false,
             loupe_render_notice: false,
             render_job: None,
+            render_job_touched: Vec::new(),
             loupe_info: None,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
@@ -1772,6 +1775,15 @@ impl eframe::App for PeltApp {
             View::Survey => self.show_survey(ui),
             View::Compare => self.show_compare(ui),
             View::Develop => {
+                if self.render_job.is_some() {
+                    // #778: Develop is out with the first-render job.
+                    ui.heading("Develop");
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Rendering the full-resolution photo\u{2026}");
+                    });
+                    return;
+                }
                 ui.horizontal(|ui| {
                     ui.heading("Develop");
                     // #771: only for a photo opened from the Library, not the built-in test frame.
@@ -3196,13 +3208,20 @@ impl PeltApp {
 
     /// Re-reads the loaded photo's document into `DevelopView` if a batch touched it.
     fn refresh_loaded_develop(&mut self, store: &dyn CatalogStore, touched: &[i64]) {
-        let (Some((id, _)), Some(develop)) = (self.loupe_loaded_asset, self.develop.as_mut())
-        else {
+        use crate::render_job::{refresh_plan, RefreshPlan};
+        let loaded = self.loupe_loaded_asset.map(|(id, _)| id);
+        match refresh_plan(loaded, self.render_job.is_some(), touched) {
+            RefreshPlan::Skip => return,
+            // #778: the view is out with the first-render job; `poll_render_job` re-reads then.
+            RefreshPlan::Defer => {
+                self.render_job_touched.extend_from_slice(touched);
+                return;
+            }
+            RefreshPlan::Now => {}
+        }
+        let (Some(id), Some(develop)) = (loaded, self.develop.as_mut()) else {
             return;
         };
-        if !touched.contains(&id) {
-            return;
-        }
         if let Ok(Some(doc)) = store.get_master_edit(id) {
             if &doc != develop.document() {
                 develop.replace_document(doc);
@@ -3585,6 +3604,12 @@ impl PeltApp {
                 }
                 self.develop = Some(back.view);
                 self.render_job = None;
+                // A batch edit that landed while the view was out: it holds the old document.
+                let touched = std::mem::take(&mut self.render_job_touched);
+                if !touched.is_empty() {
+                    let store = self.catalog.clone();
+                    self.refresh_loaded_develop(&*store, &touched);
+                }
                 ctx.request_repaint();
             }
             // Nothing else wakes an idle window: ask again shortly.
@@ -4339,6 +4364,9 @@ impl crate::cmd::CommandHost for PeltApp {
     fn develop_ready(&self) -> Result<(), String> {
         if self.develop.is_some() && self.loupe_loaded_asset.is_some() {
             Ok(())
+        } else if self.render_job.is_some() {
+            // #778: the photo is open; Develop is rendering its first frame.
+            Err("Develop is still rendering this photo's first frame; try again in a moment".into())
         } else {
             Err("no photo is loaded in Develop (open one in the loupe first)".into())
         }

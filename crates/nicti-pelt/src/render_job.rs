@@ -106,6 +106,31 @@ impl Drop for FirstRenderJob {
     }
 }
 
+/// What to do when a batch edit touched photos while `develop` may be out with a render job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshPlan {
+    /// The loaded photo was not touched (or none is loaded): nothing to do.
+    Skip,
+    /// Re-read its document from the catalog now.
+    Now,
+    /// The view is out with the render job: remember it and re-read when it comes back, or the
+    /// returned view would hold the old document and a later autosave would overwrite the batch.
+    Defer,
+}
+
+pub fn refresh_plan(loaded: Option<i64>, job_in_flight: bool, touched: &[i64]) -> RefreshPlan {
+    match loaded {
+        Some(id) if touched.contains(&id) => {
+            if job_in_flight {
+                RefreshPlan::Defer
+            } else {
+                RefreshPlan::Now
+            }
+        }
+        _ => RefreshPlan::Skip,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +194,13 @@ mod tests {
         assert_eq!(job.progress().done, 0);
         job.step().unwrap();
         assert_eq!(job.progress().done, 1);
+    }
+
+    #[test]
+    fn a_batch_edit_during_the_render_is_deferred_not_lost() {
+        assert_eq!(refresh_plan(Some(7), true, &[3, 7]), RefreshPlan::Defer);
+        assert_eq!(refresh_plan(Some(7), false, &[3, 7]), RefreshPlan::Now);
+        assert_eq!(refresh_plan(Some(7), true, &[3]), RefreshPlan::Skip);
+        assert_eq!(refresh_plan(None, true, &[7]), RefreshPlan::Skip);
     }
 }
