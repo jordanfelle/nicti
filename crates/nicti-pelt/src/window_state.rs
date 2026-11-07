@@ -101,7 +101,11 @@ impl Tracker {
 
     /// Feeds this frame's geometry. Returns a state to write once it has stopped changing.
     pub fn observe(&mut self, now: Instant, current: WindowState) -> Option<WindowState> {
-        let current = sanitize(current)?;
+        let Some(current) = sanitize(current) else {
+            // A frame no real window has (minimised: zero size): nothing is waiting any more.
+            self.pending = None;
+            return None;
+        };
         if self.saved == Some(current) {
             self.pending = None;
             return None;
@@ -206,6 +210,12 @@ mod tests {
         let t0 = Instant::now();
         let mut t = Tracker::new(None);
         // A minimised window reports a zero size: sanitize refuses it.
+        assert_eq!(t.observe(t0, st(0.0, 0.0)), None);
+        assert!(!t.is_pending());
+        // ...and it drops a change that was waiting out its settle time, so no repaint loop runs
+        // for a window that is not being shown.
+        assert_eq!(t.observe(t0, st(1000.0, 700.0)), None);
+        assert!(t.is_pending());
         assert_eq!(t.observe(t0, st(0.0, 0.0)), None);
         assert!(!t.is_pending());
     }
