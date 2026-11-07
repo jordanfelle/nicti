@@ -217,6 +217,11 @@ pub struct PeltApp {
     loupe_render_pending: bool,
     /// True only while that notice frame is being drawn (it hides the "Decoding..." line).
     loupe_render_notice: bool,
+    /// The first full-resolution render running on the GPU lane (#778). `develop` is `None` while
+    /// it runs (the view travels with the job); `poll_render_job` puts it back.
+    render_job: Option<crate::render_job::RenderSlot>,
+    /// Photos a batch edit touched while `develop` was out with that job: re-read when it returns.
+    render_job_touched: Vec<i64>,
     /// The Loupe's info line for one asset (#760), so the catalog is not read every frame.
     loupe_info: Option<(i64, String)>,
     /// Pan offset in texture-UV units, only meaningful (and only adjustable, via drag) in 100%
@@ -583,6 +588,8 @@ impl PeltApp {
             loupe_zoomed: false,
             loupe_render_pending: false,
             loupe_render_notice: false,
+            render_job: None,
+            render_job_touched: Vec::new(),
             loupe_info: None,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
@@ -1464,6 +1471,7 @@ impl eframe::App for PeltApp {
         self.poll_backup();
         self.poll_move();
         self.poll_recovery();
+        self.poll_render_job(ui.ctx());
         // The pass runs under `JobKind::Sync`, so the grid's busy -> idle edge refreshes it.
         self.righting.poll(&self.catalog_path);
         self.geotag_ui.poll();
@@ -1767,6 +1775,15 @@ impl eframe::App for PeltApp {
             View::Survey => self.show_survey(ui),
             View::Compare => self.show_compare(ui),
             View::Develop => {
+                if self.render_job.is_some() {
+                    // #778: Develop is out with the first-render job.
+                    ui.heading("Develop");
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Rendering the full-resolution photo\u{2026}");
+                    });
+                    return;
+                }
                 ui.horizontal(|ui| {
                     ui.heading("Develop");
                     // #771: only for a photo opened from the Library, not the built-in test frame.
@@ -3191,13 +3208,20 @@ impl PeltApp {
 
     /// Re-reads the loaded photo's document into `DevelopView` if a batch touched it.
     fn refresh_loaded_develop(&mut self, store: &dyn CatalogStore, touched: &[i64]) {
-        let (Some((id, _)), Some(develop)) = (self.loupe_loaded_asset, self.develop.as_mut())
-        else {
+        use crate::render_job::{refresh_plan, RefreshPlan};
+        let loaded = self.loupe_loaded_asset.map(|(id, _)| id);
+        match refresh_plan(loaded, self.render_job.is_some(), touched) {
+            RefreshPlan::Skip => return,
+            // #778: the view is out with the first-render job; `poll_render_job` re-reads then.
+            RefreshPlan::Defer => {
+                self.render_job_touched.extend_from_slice(touched);
+                return;
+            }
+            RefreshPlan::Now => {}
+        }
+        let (Some(id), Some(develop)) = (loaded, self.develop.as_mut()) else {
             return;
         };
-        if !touched.contains(&id) {
-            return;
-        }
         if let Ok(Some(doc)) = store.get_master_edit(id) {
             if &doc != develop.document() {
                 develop.replace_document(doc);
@@ -3443,6 +3467,12 @@ impl PeltApp {
                 // file can get a fresh `asset_cache_key` without ever changing its asset id --
                 // comparing on id alone would skip `load_real_frame` forever after that, leaving
                 // Develop stuck showing the stale pre-reingest decode (caught by CodeRabbit).
+                // #778: Develop is out with the first-render job; keep the preview up until it
+                // is back (loading a different photo now would find no view to load into).
+                if self.render_job.is_some() {
+                    self.show_render_notice(ui, store.as_ref(), asset_id);
+                    return;
+                }
                 let current_asset = store.get_asset(asset_id).ok().flatten();
                 let current_identity = current_asset.as_ref().map(asset_cache_key);
                 let already_loaded =
@@ -3509,13 +3539,10 @@ impl PeltApp {
                 // a frame that says so (over the preview) before it starts, so the UI reads as
                 // working, not frozen.
                 if take_render_notice(&mut self.loupe_render_pending) {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Rendering the full-resolution photo\u{2026}");
-                    });
-                    self.loupe_render_notice = true;
-                    self.show_loupe_t0_fallback(ui, store.as_ref(), asset_id);
-                    self.loupe_render_notice = false;
+                    // #778: the render runs on the GPU lane; if it could not be handed off, the next
+                    // frame renders inline as before.
+                    self.start_first_render(asset_id);
+                    self.show_render_notice(ui, store.as_ref(), asset_id);
                     ui.ctx().request_repaint();
                     return;
                 }
@@ -3530,6 +3557,63 @@ impl PeltApp {
                     self.show_loupe_t0_fallback(ui, store.as_ref(), asset_id);
                 }
             }
+        }
+    }
+
+    /// The "Rendering..." line over the preview, shared by the frame that starts the render and
+    /// the frames that wait for it.
+    fn show_render_notice(&mut self, ui: &mut egui::Ui, store: &dyn CatalogStore, asset_id: i64) {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Rendering the full-resolution photo\u{2026}");
+        });
+        self.loupe_render_notice = true;
+        self.show_loupe_t0_fallback(ui, store, asset_id);
+        self.loupe_render_notice = false;
+    }
+
+    /// #778: hands `develop` to a GPU-lane job that does the photo's first full-resolution render,
+    /// so the UI thread keeps painting the preview instead of freezing. `false` when there is
+    /// nothing to hand off (no view, or a job already running): the caller falls back to rendering
+    /// inline on the next frame, as before.
+    fn start_first_render(&mut self, asset_id: i64) -> bool {
+        if self.render_job.is_some() {
+            return false;
+        }
+        let Some(view) = self.develop.take() else {
+            return false;
+        };
+        let (job, slot) =
+            crate::render_job::FirstRenderJob::new(view, format!("Rendering photo #{asset_id}"));
+        self.pounce.submit(Box::new(job));
+        self.render_job = Some(slot);
+        true
+    }
+
+    /// Takes `develop` back from the first-render job once it has finished (every frame, whatever
+    /// view is showing: Develop is unavailable until then).
+    fn poll_render_job(&mut self, ctx: &egui::Context) {
+        let Some(slot) = &self.render_job else {
+            return;
+        };
+        let done = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match done {
+            Some(back) => {
+                if let Some(why) = back.panicked {
+                    eprintln!("nicti: the first render of a photo panicked: {why}");
+                }
+                self.develop = Some(back.view);
+                self.render_job = None;
+                // A batch edit that landed while the view was out: it holds the old document.
+                let touched = std::mem::take(&mut self.render_job_touched);
+                if !touched.is_empty() {
+                    let store = self.catalog.clone();
+                    self.refresh_loaded_develop(&*store, &touched);
+                }
+                ctx.request_repaint();
+            }
+            // Nothing else wakes an idle window: ask again shortly.
+            None => ctx.request_repaint_after(Duration::from_millis(50)),
         }
     }
 
@@ -4280,6 +4364,9 @@ impl crate::cmd::CommandHost for PeltApp {
     fn develop_ready(&self) -> Result<(), String> {
         if self.develop.is_some() && self.loupe_loaded_asset.is_some() {
             Ok(())
+        } else if self.render_job.is_some() {
+            // #778: the photo is open; Develop is rendering its first frame.
+            Err("Develop is still rendering this photo's first frame; try again in a moment".into())
         } else {
             Err("no photo is loaded in Develop (open one in the loupe first)".into())
         }

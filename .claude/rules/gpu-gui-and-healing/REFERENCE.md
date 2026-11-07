@@ -55,6 +55,10 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 
 - Grouped action row + `Settings` menu; disabled-button reasons in pure `library_toolbar::why_disabled`; wider Keywords field. Detail: `docs/decisions/gpu-gui-and-healing.md`.
 
+## #778: first render off the UI thread
+
+- `render_job::FirstRenderJob` hands `DevelopView` to a GPU-lane job for the photo's first render (view back via slot, warm baked cache); `develop` is `None` meanwhile. Detail: `docs/decisions/gpu-gui-and-healing.md`.
+
 ## Package contents
 
 - **`spikes/glint`** (#16/ADR-0016) — wgpu-vs-CUDA measured comparison: correctness, feature/limit

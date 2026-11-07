@@ -69,6 +69,7 @@ mod prebake;
 mod preview_color;
 mod preview_settings;
 mod render;
+mod render_job;
 mod repaint_trace;
 mod righting_ui;
 mod section_state;
