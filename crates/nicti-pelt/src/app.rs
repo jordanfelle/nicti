@@ -222,6 +222,8 @@ pub struct PeltApp {
     render_job: Option<crate::render_job::RenderSlot>,
     /// Photos a batch edit touched while `develop` was out with that job: re-read when it returns.
     render_job_touched: Vec<i64>,
+    /// The Loupe's current zoom as a percentage, from the last paint (#773).
+    loupe_zoom_pct: Option<f32>,
     /// The Preferences window (#772) is open.
     prefs_open: bool,
     /// Debounced saving of the window's size/position/maximized state (#772).
@@ -606,6 +608,7 @@ impl PeltApp {
             loupe_render_notice: false,
             render_job: None,
             render_job_touched: Vec::new(),
+            loupe_zoom_pct: None,
             prefs_open: false,
             window_tracker: crate::window_state::Tracker::new(window_loaded),
             window_normal: window_loaded,
@@ -3452,6 +3455,38 @@ impl PeltApp {
             {
                 step = 1;
             }
+            // #773: zoom control. Space still toggles; these name the two states and say how far
+            // the image is from native size.
+            ui.separator();
+            let was_zoomed = self.loupe_zoomed;
+            if ui
+                .selectable_label(!was_zoomed, "Fit")
+                .on_hover_text("Fit the whole photo in the window (Space toggles).")
+                .clicked()
+                && was_zoomed
+            {
+                self.loupe_zoomed = false;
+                self.loupe_pan = [0.0, 0.0];
+            }
+            if ui
+                .selectable_label(was_zoomed, "100%")
+                .on_hover_text("One image pixel per screen pixel, to check focus (Space toggles).")
+                .clicked()
+                && !was_zoomed
+            {
+                self.loupe_zoomed = true;
+                self.loupe_pan = [0.0, 0.0];
+            }
+            if let Some(pct) = self.loupe_zoom_pct {
+                ui.weak(format!("{pct:.0}%"));
+            }
+            if let Some(line) = frame
+                .as_ref()
+                .and_then(|f| crate::loupe::exposure_line(&f.exposure))
+            {
+                ui.separator();
+                ui.label(line);
+            }
             if let Some(note) = frame
                 .as_ref()
                 .and_then(|f| crate::loupe::colour_profile_note(f))
@@ -3811,6 +3846,11 @@ impl PeltApp {
         let ppp = ui.ctx().pixels_per_point();
         let rect_size_px = (rect_size.0 * ppp, rect_size.1 * ppp);
 
+        self.loupe_zoom_pct = Some(crate::viewport::zoom_percent(
+            self.loupe_zoomed,
+            rect_size_px,
+            tex_extent,
+        ));
         let scale = if self.loupe_zoomed {
             one_to_one_scale(rect_size_px, tex_extent)
         } else {

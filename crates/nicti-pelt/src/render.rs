@@ -79,6 +79,7 @@ pub(crate) fn synthetic_linear_frame() -> LinearFrame {
         dng_opcode_list3: None,
         nikon_lens_info: None,
         lens_exif: Default::default(),
+        exposure: Default::default(),
         orientation: 0,
     }
 }

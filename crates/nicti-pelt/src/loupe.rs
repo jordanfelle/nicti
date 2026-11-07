@@ -71,6 +71,43 @@ pub fn info_line(asset: &Asset) -> String {
     parts.join(" \u{b7} ")
 }
 
+/// The exposure readout shown next to the info line (#773): `1/250 s · f/2.8 · 85 mm · -0.7 EV`,
+/// whichever of the four the file recorded; `None` when it recorded none.
+pub fn exposure_line(e: &nicti_cornea::ExposureExif) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(t) = e.exposure_time_s {
+        // Long enough to read as decimals ("0.4 s", "2 s"), short ones as the classic 1/N.
+        parts.push(if t >= 0.3 {
+            if (t - t.round()).abs() < 0.05 {
+                format!("{:.0} s", t.round())
+            } else {
+                format!("{t:.1} s")
+            }
+        } else {
+            format!("1/{:.0} s", (1.0 / t).round())
+        });
+    }
+    if let Some(f) = e.f_number {
+        parts.push(if (f - f.round()).abs() < 0.05 {
+            format!("f/{:.0}", f.round())
+        } else {
+            format!("f/{f:.1}")
+        });
+    }
+    if let Some(mm) = e.focal_length_mm {
+        parts.push(if (mm - mm.round()).abs() < 0.05 {
+            format!("{:.0} mm", mm.round())
+        } else {
+            format!("{mm:.1} mm")
+        });
+    }
+    // Compensation is only worth a slot when it is not zero.
+    if let Some(ev) = e.exposure_bias_ev.filter(|v| v.abs() >= 0.05) {
+        parts.push(format!("{ev:+.1} EV"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
+}
+
 /// The one-line explanation shown (and logged) when a decoded photo has no usable camera colour
 /// matrix and renders with sRGB primaries instead (#756, #771); `None` when the file's own matrix
 /// is fine. A short badge reads "sRGB colour", this is its hover text.
@@ -669,6 +706,7 @@ mod tests {
                 dng_opcode_list3: None,
                 nikon_lens_info: None,
                 lens_exif: Default::default(),
+                exposure: Default::default(),
                 orientation: 0,
             })
         }
@@ -898,6 +936,7 @@ mod tests {
                 dng_opcode_list3: None,
                 nikon_lens_info: None,
                 lens_exif: Default::default(),
+                exposure: Default::default(),
                 orientation: 0,
             })
         }
@@ -1002,6 +1041,7 @@ mod tests {
                 dng_opcode_list3: None,
                 nikon_lens_info: None,
                 lens_exif: Default::default(),
+                exposure: Default::default(),
                 orientation: 0,
             })
         }
@@ -1361,5 +1401,37 @@ mod tests {
         assert_eq!(colour_profile_note(&f), None);
         f.cam_xyz[4] = f32::NAN;
         assert!(colour_profile_note(&f).is_some(), "non-finite cam_xyz");
+    }
+
+    #[test]
+    fn the_exposure_line_names_what_the_file_recorded_in_the_usual_notation() {
+        use nicti_cornea::ExposureExif;
+        let full = ExposureExif {
+            exposure_time_s: Some(1.0 / 250.0),
+            f_number: Some(2.8),
+            focal_length_mm: Some(85.0),
+            exposure_bias_ev: Some(-0.7),
+        };
+        assert_eq!(
+            exposure_line(&full).as_deref(),
+            Some("1/250 s \u{b7} f/2.8 \u{b7} 85 mm \u{b7} -0.7 EV")
+        );
+        let slow = ExposureExif {
+            exposure_time_s: Some(2.0),
+            f_number: Some(8.0),
+            ..Default::default()
+        };
+        assert_eq!(exposure_line(&slow).as_deref(), Some("2 s \u{b7} f/8"));
+        let fraction = ExposureExif {
+            exposure_time_s: Some(0.4),
+            focal_length_mm: Some(24.5),
+            exposure_bias_ev: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            exposure_line(&fraction).as_deref(),
+            Some("0.4 s \u{b7} 24.5 mm")
+        );
+        assert_eq!(exposure_line(&ExposureExif::default()), None);
     }
 }

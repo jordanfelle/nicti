@@ -669,6 +669,7 @@ mod tests {
                 aperture: Some(4.0),
                 focus_distance_m: None,
             },
+            exposure: Default::default(),
             orientation: 0,
         }
     }
@@ -956,6 +957,7 @@ mod tests {
             dng_opcode_list3: None,
             nikon_lens_info: None,
             lens_exif: Default::default(),
+            exposure: Default::default(),
             orientation: 0,
         };
         let kernel = LensKernel::new(&gpu);
@@ -993,6 +995,7 @@ mod tests {
             dng_opcode_list3: None,
             nikon_lens_info: None,
             lens_exif: Default::default(),
+            exposure: Default::default(),
             orientation: 0,
         };
         let params = LensParams {
@@ -1037,6 +1040,7 @@ mod tests {
             dng_opcode_list3: None,
             nikon_lens_info: Some(blob),
             lens_exif: Default::default(),
+            exposure: Default::default(),
             orientation: 0,
         };
         assert!(has_nikon_profile(&frame) && !has_embedded_profile(&frame));
@@ -1084,6 +1088,7 @@ mod tests {
             dng_opcode_list3: Some(blob),
             nikon_lens_info: None,
             lens_exif: Default::default(),
+            exposure: Default::default(),
             orientation: 0,
         };
         let on = LensPlan::resolve(&LensParams::default(), &frame, e);

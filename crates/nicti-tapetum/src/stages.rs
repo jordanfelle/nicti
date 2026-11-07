@@ -2011,6 +2011,7 @@ mod tests {
             dng_opcode_list3: None,
             nikon_lens_info: None,
             lens_exif: Default::default(),
+            exposure: Default::default(),
             orientation: 0,
         }
     }
@@ -2342,6 +2343,7 @@ mod tests {
             dng_opcode_list3: None,
             nikon_lens_info: None,
             lens_exif: Default::default(),
+            exposure: Default::default(),
             orientation: 0,
         };
         let kernel = DecodeKernel::new(&gpu);
@@ -2396,6 +2398,7 @@ mod tests {
             dng_opcode_list3: None,
             nikon_lens_info: None,
             lens_exif: Default::default(),
+            exposure: Default::default(),
             orientation: 0,
         };
         let kernel = DecodeKernel::new(&gpu);

@@ -92,3 +92,4 @@ Full reasoning/history: `docs/decisions/preview-tiers.md`.
 - Righting trigger (#606): `righting::Righting` + `pounce_jobs::RightingJob` (kind Sync), marker `<catalog>.migrations.json`
   per root, Library "Repair thumbnails"; also fills `asset.orientation`. Detail: `docs/decisions/preview-tiers.md`.
 - Grid thumbnail fallback (#770): a photo with no T0 (catalog or sidecar) is decoded from the RAW (`grid/jobs.rs::thumbnail_from_frame`: box-average to 256px, black level + as-shot WB + sRGB curve, no camera colour matrix, orientation applied; one uninterruptible decode per `ThumbBatchJob` step; `GridSession::set_decoder`). Failed cells say why in a tooltip. Unverified on real files (no RAW on the dev host).
+- Loupe exposure readout + Fit/100%/zoom% control (#773): `ExposureExif` on `LinearFrame` (RAW only), `loupe::exposure_line`, `viewport::zoom_percent`. Detail: `docs/decisions/preview-tiers.md`.

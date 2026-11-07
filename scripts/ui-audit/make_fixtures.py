@@ -39,31 +39,54 @@ class Dng:
     def strip_offsets(self):
         self.put(0x0111, 4, 1, None)
 
-    def finish(self, strip):
-        entries = sorted(self.entries, key=lambda e: e[0])
+    def finish(self, strip, exif=None):
+        """`exif`: optional [(tag, type, count, bytes)] written as an Exif sub-IFD (tag 0x8769)."""
+        entries = list(self.entries)
+        if exif:
+            entries.append((0x8769, 4, 1, b"EXIF"))  # placeholder: patched to the sub-IFD offset
+        entries = sorted(entries, key=lambda e: e[0])
         ifd_len = 2 + len(entries) * 12 + 4
         cursor = 8 + ifd_len
         out_of_line = []
-        for _, _, _, data in entries:
-            if data is not None and len(data) > 4:
+        for tag, _, _, data in entries:
+            if data is not None and len(data) > 4 and not (tag == 0x8769):
                 out_of_line.append(cursor)
                 cursor += len(data) + len(data) % 2
+        exif_off = cursor
+        exif_blob = b""
+        if exif:
+            exif_entries = sorted(exif, key=lambda e: e[0])
+            base = exif_off + 2 + len(exif_entries) * 12 + 4
+            tail = b""
+            body = struct.pack("<H", len(exif_entries))
+            for tag, ty, count, data in exif_entries:
+                body += struct.pack("<HHI", tag, ty, count)
+                if len(data) <= 4:
+                    body += data.ljust(4, b"\x00")
+                else:
+                    body += struct.pack("<I", base + len(tail))
+                    tail += data + (b"\x00" if len(data) % 2 else b"")
+            exif_blob = body + struct.pack("<I", 0) + tail
+            cursor += len(exif_blob)
         strip_off = cursor
         out = bytearray(b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", len(entries)))
         offs = iter(out_of_line)
         for tag, ty, count, data in entries:
             out += struct.pack("<HHI", tag, ty, count)
-            if data is None:
+            if tag == 0x8769:
+                out += struct.pack("<I", exif_off)
+            elif data is None:
                 out += struct.pack("<I", strip_off)
             elif len(data) <= 4:
                 out += data.ljust(4, b"\x00")
             else:
                 out += struct.pack("<I", next(offs))
         out += struct.pack("<I", 0)
-        for _, _, _, data in entries:
-            if data is not None and len(data) > 4:
+        for tag, _, _, data in entries:
+            if data is not None and len(data) > 4 and tag != 0x8769:
                 out += data + (b"\x00" if len(data) % 2 else b"")
-        assert len(out) == strip_off
+        out += exif_blob
+        assert len(out) == strip_off, (len(out), strip_off)
         return bytes(out) + strip
 
 
@@ -99,7 +122,14 @@ def synthetic_dng(w=128, h=96, seed=0, with_matrix=True):
     d.rationals(0xC621, 10, matrix)  # ColorMatrix1 (XYZ -> camera)
     d.rationals(0xC628, 5, [(1, 2), (1, 1), (3, 5)])  # AsShotNeutral
     d.short(0xC65A, [21])  # CalibrationIlluminant1: D65
-    return d.finish(bytes(pixels))
+    # Exposure EXIF (an Exif sub-IFD): 1/250 s, f/2.8, 85 mm, -0.7 EV, so the Loupe has a readout.
+    exif = [
+        (0x829A, 5, 1, struct.pack("<II", 1, 250)),  # ExposureTime
+        (0x829D, 5, 1, struct.pack("<II", 28, 10)),  # FNumber
+        (0x9204, 10, 1, struct.pack("<ii", -7, 10)),  # ExposureBiasValue
+        (0x920A, 5, 1, struct.pack("<II", 850, 10)),  # FocalLength
+    ]
+    return d.finish(bytes(pixels), exif)
 
 
 def write_jpegs(out, n):
