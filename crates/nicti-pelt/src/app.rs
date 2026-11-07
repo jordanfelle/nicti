@@ -222,6 +222,12 @@ pub struct PeltApp {
     render_job: Option<crate::render_job::RenderSlot>,
     /// Photos a batch edit touched while `develop` was out with that job: re-read when it returns.
     render_job_touched: Vec<i64>,
+    /// Debounced saving of the window's size/position/maximized state (#772).
+    window_tracker: crate::window_state::Tracker,
+    /// The last non-maximized geometry, kept so a maximized window restores to its normal size.
+    window_normal: Option<crate::window_state::WindowState>,
+    /// Whether the restored position has been checked against the monitor (once).
+    window_rescue_checked: bool,
     /// The Loupe's info line for one asset (#760), so the catalog is not read every frame.
     loupe_info: Option<(i64, String)>,
     /// Pan offset in texture-UV units, only meaningful (and only adjustable, via drag) in 100%
@@ -368,6 +374,7 @@ impl PeltApp {
             render_state.device.clone(),
             render_state.queue.clone(),
         ));
+        let window_loaded = crate::window_state::load(&catalog_path);
         let develop = DevelopView::new(gpu.clone());
 
         let resources = ViewportResources::new(&render_state.device, render_state.target_format);
@@ -590,6 +597,9 @@ impl PeltApp {
             loupe_render_notice: false,
             render_job: None,
             render_job_touched: Vec::new(),
+            window_tracker: crate::window_state::Tracker::new(window_loaded),
+            window_normal: window_loaded,
+            window_rescue_checked: false,
             loupe_info: None,
             loupe_pan: [0.0, 0.0],
             loupe_preview: None,
@@ -1472,6 +1482,7 @@ impl eframe::App for PeltApp {
         self.poll_move();
         self.poll_recovery();
         self.poll_render_job(ui.ctx());
+        self.persist_window_state(ui.ctx());
         // The pass runs under `JobKind::Sync`, so the grid's busy -> idle edge refreshes it.
         self.righting.poll(&self.catalog_path);
         self.geotag_ui.poll();
@@ -3570,6 +3581,49 @@ impl PeltApp {
         self.loupe_render_notice = true;
         self.show_loupe_t0_fallback(ui, store, asset_id);
         self.loupe_render_notice = false;
+    }
+
+    /// #772: pulls a window restored off the monitor back, then saves the window's geometry
+    /// (debounced) so the next launch opens the same way.
+    fn persist_window_state(&mut self, ctx: &egui::Context) {
+        use crate::window_state::{needs_rescue, save, WindowState};
+        let vp = ctx.input(|i| i.viewport().clone());
+        if !self.window_rescue_checked {
+            if let (Some(outer), Some(monitor)) = (vp.outer_rect, vp.monitor_size) {
+                self.window_rescue_checked = true;
+                if needs_rescue([outer.min.x, outer.min.y], [monitor.x, monitor.y]) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                        40.0, 40.0,
+                    )));
+                }
+            }
+        }
+        if vp.minimized == Some(true) || vp.fullscreen == Some(true) {
+            return;
+        }
+        let Some(inner) = vp.inner_rect else { return };
+        let maximized = vp.maximized.unwrap_or(false);
+        let here = WindowState {
+            size: [inner.width(), inner.height()],
+            pos: vp.outer_rect.map(|r| [r.min.x, r.min.y]),
+            maximized,
+        };
+        let state = if maximized {
+            // Keep the normal size/position: restoring should not open maximized-sized.
+            WindowState {
+                maximized: true,
+                ..self.window_normal.unwrap_or(here)
+            }
+        } else {
+            self.window_normal = Some(here);
+            here
+        };
+        if let Some(s) = self.window_tracker.observe(Instant::now(), state) {
+            let _ = save(&self.catalog_path, &s);
+        }
+        if self.window_tracker.is_pending() {
+            ctx.request_repaint_after(Duration::from_millis(400));
+        }
     }
 
     /// #778: hands `develop` to a GPU-lane job that does the photo's first full-resolution render,
