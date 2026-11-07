@@ -37,7 +37,7 @@ getrandom = "0.4"
 # dependency (no docs/licensing.md update needed per ADR-0018's amendment).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # ui.screenshot replies with the PNG as base64 (#649).
-base64 = "0.22"
+base64 = "0.23"
 # f16 conversion for the display LUT texture upload (ADR-0042) -- already a nicti-tapetum dependency.
 half = "2"
 raw-window-handle = "0.6"
@@ -55,7 +55,7 @@ nicti-siamese = { path = "../nicti-siamese" }
 nicti-preen = { path = "../nicti-preen" }
 thiserror = "2"
 nicti-stalk = { path = "../nicti-stalk" }
-rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal"] }
 
 [dev-dependencies]
 tempfile = "3"
