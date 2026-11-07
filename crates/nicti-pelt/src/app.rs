@@ -1767,7 +1767,18 @@ impl eframe::App for PeltApp {
             View::Survey => self.show_survey(ui),
             View::Compare => self.show_compare(ui),
             View::Develop => {
-                ui.heading("Develop");
+                ui.horizontal(|ui| {
+                    ui.heading("Develop");
+                    // #771: only for a photo opened from the Library, not the built-in test frame.
+                    let note = self
+                        .loupe_loaded_asset
+                        .and(self.develop.as_ref())
+                        .and_then(|d| crate::loupe::colour_profile_note(&d.frame_arc()));
+                    if let Some(note) = note {
+                        ui.colored_label(egui::Color32::from_rgb(230, 170, 60), "sRGB colour")
+                            .on_hover_text(note);
+                    }
+                });
                 if let Some(frame) = viewport_frame {
                     let available = ui.available_size();
                     // Only the heal and mask tools need clicks. Sensing them makes egui report
@@ -3397,6 +3408,14 @@ impl PeltApp {
             {
                 step = 1;
             }
+            if let Some(note) = frame
+                .as_ref()
+                .and_then(|f| crate::loupe::colour_profile_note(f))
+            {
+                // #771: the photo has no usable camera colour matrix (silent before).
+                ui.colored_label(egui::Color32::from_rgb(230, 170, 60), "sRGB colour")
+                    .on_hover_text(note);
+            }
             if let Some((_, line)) = &self.loupe_info {
                 // Truncated with an ellipsis (full text on hover) rather than clipped or wrapped.
                 ui.add(egui::Label::new(line.as_str()).truncate())
@@ -3430,6 +3449,12 @@ impl PeltApp {
                     loaded_revision_matches(self.loupe_loaded_asset, asset_id, current_identity);
 
                 if !already_loaded {
+                    if crate::loupe::colour_profile_note(&frame).is_some() {
+                        eprintln!(
+                            "nicti: photo {asset_id} has no usable camera colour matrix; \
+                             rendering with sRGB primaries"
+                        );
+                    }
                     // Adversarial review caught a real data-loss path here: `develop` is one
                     // instance shared with the Develop tab, and switching Loupe to a different
                     // photo (or a fresher revision of the same one) than whatever Develop

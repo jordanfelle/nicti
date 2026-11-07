@@ -71,6 +71,16 @@ pub fn info_line(asset: &Asset) -> String {
     parts.join(" \u{b7} ")
 }
 
+/// The one-line explanation shown (and logged) when a decoded photo has no usable camera colour
+/// matrix and renders with sRGB primaries instead (#756, #771); `None` when the file's own matrix
+/// is fine. A short badge reads "sRGB colour", this is its hover text.
+pub fn colour_profile_note(frame: &LinearFrame) -> Option<&'static str> {
+    (!nicti_tapetum::color::cam_xyz_is_usable(&frame.cam_xyz)).then_some(
+        "No camera colour profile: this file has no usable colour matrix, so it is shown \
+         with sRGB primaries. Colours may differ from the camera's.",
+    )
+}
+
 /// A stable per-asset cache key: fingerprint when the catalog has one (every real ingested asset
 /// does, `scruff::Ingest` always computes one), falling back to `(id, mtime_unix)` for the
 /// pathological case of a row with none recorded, so this stays total rather than panicking.
@@ -1339,5 +1349,17 @@ mod tests {
                 && session.t2.as_ref().unwrap().compaction.is_none()
         });
         assert!(larder.lock().unwrap().get(key).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_frame_with_no_colour_matrix_is_noted_and_a_real_one_is_not() {
+        let mut f = LinearFrame::default();
+        assert!(colour_profile_note(&f).is_some(), "all-zero cam_xyz");
+        f.cam_xyz = [
+            0.6, 0.2, 0.1, 0.15, 0.75, 0.1, 0.05, 0.15, 0.9, 0.0, 0.0, 0.0,
+        ];
+        assert_eq!(colour_profile_note(&f), None);
+        f.cam_xyz[4] = f32::NAN;
+        assert!(colour_profile_note(&f).is_some(), "non-finite cam_xyz");
     }
 }

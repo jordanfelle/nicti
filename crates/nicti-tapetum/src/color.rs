@@ -64,12 +64,25 @@ pub(crate) fn mat3_invert(m: &Mat3) -> Mat3 {
     inverse.unwrap_or_else(mat3_identity)
 }
 
-/// Cramer's-rule 3x3 inverse; `None` when the determinant is ~0 or any entry is non-finite.
+/// Smallest `|det| / (product of row lengths)` [`mat3_try_invert`] accepts. Real camera matrices
+/// sit around 0.1-0.5; this only rejects numerically degenerate ones.
+const MIN_RELATIVE_DET: f32 = 1e-6;
+
+/// Cramer's-rule 3x3 inverse; `None` when the matrix is degenerate (relative to its own scale) or
+/// any entry is non-finite.
 fn mat3_try_invert(m: &Mat3) -> Option<Mat3> {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-    if !det.is_finite() || det.abs() <= 1e-9 || m.iter().flatten().any(|v| !v.is_finite()) {
+    if !det.is_finite() || m.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
+    // Relative to the rows' own size (the Hadamard ratio, 1 for orthogonal rows, ~0 for a
+    // degenerate matrix), so a valid matrix scaled by 1e-3 is still invertible and a near-singular
+    // one is not waved through by a large scale (#771).
+    let row_norm = |r: &[f32; 3]| (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+    let scale = row_norm(&m[0]) * row_norm(&m[1]) * row_norm(&m[2]);
+    if !scale.is_finite() || scale <= 0.0 || det.abs() <= MIN_RELATIVE_DET * scale {
         return None;
     }
     let inv_det = 1.0 / det;
@@ -1844,5 +1857,27 @@ mod tests {
         assert!((srgb_oetf(1.0) - 1.0).abs() < 1e-6);
         // 18% mid-gray linear -> ~0.4614 in sRGB gamma space (1.055*0.18^(1/2.4) - 0.055).
         assert!((srgb_oetf(0.18) - 0.4614).abs() < 0.001);
+    }
+
+    /// #771: usability is relative to the matrix's own scale, not an absolute determinant.
+    #[test]
+    fn usability_does_not_depend_on_the_matrixs_scale() {
+        let real = [
+            0.6, 0.2, 0.1, 0.15, 0.75, 0.1, 0.05, 0.15, 0.9, 0.0, 0.0, 0.0,
+        ];
+        // The same matrix scaled to ~1e-3 (det ~2e-10, under the old absolute 1e-9) is usable...
+        let mut small = real;
+        small.iter_mut().for_each(|v| *v *= 1e-3);
+        assert!(cam_xyz_is_usable(&small), "a valid small-scale matrix");
+        assert_eq!(usable_cam_xyz(&small), small, "not swapped for sRGB");
+        // ...and a near-singular matrix whose absolute determinant is large (1e3, far over the
+        // old 1e-9) is still rejected: the third row is almost in the span of the first two.
+        let degenerate = [1e3, 0.0, 0.0, 0.0, 1e3, 0.0, 1e3, 1e3, 1e-3, 0.0, 0.0, 0.0];
+        assert!(!cam_xyz_is_usable(&degenerate), "near-singular at scale");
+        // Scaling a valid matrix up never makes it unusable either.
+        let mut big = real;
+        big.iter_mut().for_each(|v| *v *= 1e3);
+        assert!(cam_xyz_is_usable(&big));
+        assert!(!cam_xyz_is_usable(&[f32::NAN; 12]));
     }
 }
