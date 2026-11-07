@@ -481,6 +481,13 @@ fn show_cell(
         stale: flag_stale && session.is_stale(id),
     };
     paint_cell(ui, session, id, rect, margin, &marks);
+    if session.texture(id).is_none() && session.has_failed(id) {
+        // #770: the grid tried the embedded preview, then decoding the file itself.
+        response.clone().on_hover_text(
+            "No preview: the file has no embedded preview and could not be decoded \
+             (it may be unsupported, damaged or on a drive that is not connected).",
+        );
+    }
     if response.clicked() {
         let mods = ui.input(|i| i.modifiers);
         if mods.command {
