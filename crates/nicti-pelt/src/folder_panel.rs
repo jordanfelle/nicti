@@ -55,6 +55,8 @@ pub struct DriveNode {
     /// The drive's mount path: `D:\`, `/mnt/d`, `/Volumes/Archive`, or `/`.
     pub path: String,
     pub roots: Vec<Root>,
+    /// The volume's OS label (`Photo Archive`), once the label probe has answered (#775).
+    pub label: Option<String>,
 }
 
 /// The drive/mount a path lives on: a Windows drive letter, the first component under a
@@ -102,6 +104,7 @@ pub fn build_tree(roots: &[Root], extra_drives: &[String]) -> Vec<DriveNode> {
                 nodes.push(DriveNode {
                     path: drive,
                     roots: Vec::new(),
+                    label: None,
                 });
                 nodes.len() - 1
             }
@@ -237,6 +240,9 @@ pub struct Cache {
     probe: DriveProbe,
     pub roots: Vec<Root>,
     pub drives: Vec<String>,
+    /// Volume labels by mount path (#775), read on a worker with the drive probe.
+    pub labels: std::collections::HashMap<String, String>,
+    labels_src: Source<std::collections::HashMap<String, String>>,
     pub open_moves: Vec<RootMove>,
 }
 
@@ -255,6 +261,8 @@ impl Cache {
             probe,
             roots: Vec::new(),
             drives: Vec::new(),
+            labels: std::collections::HashMap::new(),
+            labels_src: Source::default(),
             open_moves: Vec::new(),
         }
     }
@@ -311,6 +319,12 @@ impl Cache {
         if let Some(drives) = self.mounted.step(ctx, self.probe) {
             self.drives = drives;
         }
+        if let Some(labels) = self
+            .labels_src
+            .step(ctx, crate::volume_names::volume_labels)
+        {
+            self.labels = labels;
+        }
     }
 }
 
@@ -356,13 +370,54 @@ pub fn attention_items(open: &[RootMove], move_running: bool) -> Vec<AttentionIt
         .collect()
 }
 
-/// A drive's heading. The catch-all `/` holds everything outside a conventional mount parent
-/// (`/tmp`, `/home`, ...), so it says so instead of posing as a disk (#761).
-fn drive_label(path: &str) -> String {
-    if path == "/" {
-        "/ (other locations)".to_string()
-    } else {
-        path.to_string()
+/// Gives each drive its OS volume label from `labels` (mount path -> label), matching the
+/// mount path exactly or, on Windows, ignoring case and a trailing separator (#775).
+pub fn apply_labels(tree: &mut [DriveNode], labels: &std::collections::HashMap<String, String>) {
+    let key = |p: &str| p.trim_end_matches(['/', '\\']).to_lowercase();
+    for node in tree {
+        // The `/` catch-all is not one disk; never label it with the root filesystem's name.
+        node.label = (node.path != "/")
+            .then(|| {
+                labels
+                    .iter()
+                    .find(|(mount, _)| key(mount) == key(&node.path))
+                    .map(|(_, label)| label.clone())
+            })
+            .flatten();
+    }
+}
+
+/// `text` cut to at most `max` display columns (CJK and emoji count two), with an ellipsis when
+/// it was cut. Cutting by `char` count would let a wide label overflow the panel (#775).
+pub fn truncate_to_width(text: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= max {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w + 1 > max {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('\u{2026}');
+    out
+}
+
+/// A drive's heading: the volume label with the mount path after it (`Photo Archive (/mnt/d)`),
+/// or just the path when the volume has no label. The catch-all `/` holds everything outside a
+/// conventional mount parent (`/tmp`, `/home`, ...), so it says so instead of posing as a disk
+/// (#761).
+fn drive_heading(drive: &DriveNode) -> String {
+    const LABEL_COLUMNS: usize = 24;
+    match (&drive.label, drive.path.as_str()) {
+        (_, "/") => "/ (other locations)".to_string(),
+        (Some(label), path) => format!("{} ({path})", truncate_to_width(label, LABEL_COLUMNS)),
+        (None, path) => path.to_string(),
     }
 }
 
@@ -379,7 +434,7 @@ fn normalised(path: &str) -> String {
 
 /// A root's row text: its path below the drive (`photos/2026`, not just `2026`), so two folders
 /// with the same leaf name are told apart and the location is readable at a glance. Over 40
-/// characters it keeps the first and the last two components around an ellipsis (the first one
+/// display columns (CJK and emoji count two) it keeps the first and the last two components around an ellipsis (the first one
 /// is usually what tells `2025/...` from `2026/...`); a path of three components or fewer is
 /// never shortened. The full path is the hover text.
 fn root_label(root_path: &str, drive_path: &str) -> String {
@@ -401,7 +456,7 @@ fn root_label(root_path: &str, drive_path: &str) -> String {
         || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':');
     let sep = if windows { "\\" } else { "/" };
     let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
-    if rel.chars().count() <= MAX_CHARS || parts.len() <= 3 {
+    if unicode_width::UnicodeWidthStr::width(rel) <= MAX_CHARS || parts.len() <= 3 {
         return parts.join(sep);
     }
     format!(
@@ -466,7 +521,7 @@ pub fn show(
         let is_archive = archive.is_location(&drive.path);
         let badge = if is_archive { " \u{1F5C4} archive" } else { "" };
         let (_, dropped) = ui.dnd_drop_zone::<i64, ()>(egui::Frame::group(ui.style()), |ui| {
-            egui::CollapsingHeader::new(format!("\u{1F4BF} {}{badge}", drive_label(&drive.path)))
+            egui::CollapsingHeader::new(format!("\u{1F4BF} {}{badge}", drive_heading(drive)))
                 .id_salt(("folder_panel_drive", &drive.path))
                 .default_open(true)
                 .show(ui, |ui| {
@@ -977,6 +1032,7 @@ mod tests {
         let tree = vec![DriveNode {
             path: drive,
             roots: vec![registered],
+            label: None,
         }];
         egui_kittest::Harness::new_ui_state(
             |ui, (out, tree, browse)| {
@@ -1091,6 +1147,7 @@ mod tests {
         let tree = vec![DriveNode {
             path: drive,
             roots: vec![root(9, &t.path().join("a/b").to_string_lossy())],
+            label: None,
         }];
         let mut h = egui_kittest::Harness::new_ui_state(
             |ui, (tree, browse): &mut (Vec<DriveNode>, crate::folder_browse::Browse)| {
@@ -1421,10 +1478,116 @@ mod tests {
         );
     }
 
+    fn node(path: &str, label: Option<&str>) -> DriveNode {
+        DriveNode {
+            path: path.to_string(),
+            roots: Vec::new(),
+            label: label.map(str::to_string),
+        }
+    }
+
     #[test]
     fn the_catch_all_drive_is_not_presented_as_a_disk() {
-        assert_eq!(drive_label("/"), "/ (other locations)");
-        assert_eq!(drive_label("/mnt/d"), "/mnt/d");
+        assert_eq!(drive_heading(&node("/", None)), "/ (other locations)");
+        // Even a stray label never renames it.
+        assert_eq!(
+            drive_heading(&node("/", Some("rootfs"))),
+            "/ (other locations)"
+        );
+        assert_eq!(drive_heading(&node("/mnt/d", None)), "/mnt/d");
+    }
+
+    /// #775: a volume shows its OS label, with the mount path after it so two same-named
+    /// volumes are still told apart.
+    #[test]
+    fn a_labelled_volume_is_headed_by_its_label_then_its_path() {
+        assert_eq!(
+            drive_heading(&node("/mnt/cache", Some("Photo Archive"))),
+            "Photo Archive (/mnt/cache)"
+        );
+        let long = "A very long volume label that would crowd the panel";
+        let h = drive_heading(&node("D:\\", Some(long)));
+        assert!(h.starts_with("A very long volume labe\u{2026} ("), "{h}");
+    }
+
+    #[test]
+    fn labels_are_applied_by_mount_path_ignoring_case_and_a_trailing_separator() {
+        let mut tree = vec![node("D:\\", None), node("/mnt/b", None), node("/", None)];
+        let labels = std::collections::HashMap::from([
+            ("d:".to_string(), "Photos".to_string()),
+            ("/mnt/b/".to_string(), "Backup".to_string()),
+            ("/".to_string(), "rootfs".to_string()),
+        ]);
+        apply_labels(&mut tree, &labels);
+        assert_eq!(tree[0].label.as_deref(), Some("Photos"));
+        assert_eq!(tree[1].label.as_deref(), Some("Backup"));
+        assert_eq!(tree[2].label, None, "the catch-all is never labelled");
+        apply_labels(&mut tree, &std::collections::HashMap::new());
+        assert!(
+            tree.iter().all(|n| n.label.is_none()),
+            "a gone label clears"
+        );
+    }
+
+    /// #775: wide characters count two columns, so a CJK or emoji label is cut where it would
+    /// overflow, not 40 characters later.
+    #[test]
+    fn truncation_counts_display_columns_not_characters() {
+        assert_eq!(truncate_to_width("short", 10), "short");
+        assert_eq!(truncate_to_width("abcdefghij", 6), "abcde\u{2026}");
+        // Five CJK characters are ten columns.
+        let cjk = "\u{5199}\u{771f}\u{5199}\u{771f}\u{5199}";
+        assert_eq!(truncate_to_width(cjk, 10), cjk);
+        assert_eq!(
+            truncate_to_width(cjk, 7),
+            "\u{5199}\u{771f}\u{5199}\u{2026}"
+        );
+        // The ellipsis never makes it wider than `max`.
+        use unicode_width::UnicodeWidthStr;
+        assert!(truncate_to_width(cjk, 6).width() <= 6);
+    }
+
+    #[test]
+    fn a_wide_character_path_is_shortened_by_columns() {
+        // 4 components, 26 CJK characters = 52 columns (> 40) but only 26 `char`s (< 40).
+        let seg = "\u{5199}\u{771f}".repeat(3);
+        let path = format!("/mnt/d/{seg}/{seg}/{seg}/{seg}");
+        let got = root_label(&path, "/mnt/d");
+        assert!(got.contains('\u{2026}'), "not shortened: {got}");
+    }
+
+    /// The Archive checkbox is offered on a real drive, and (with the `/` test above) the whole
+    /// panel shows the label heading.
+    #[test]
+    fn the_panel_heads_a_drive_with_its_label_and_offers_archive_on_it() {
+        use egui_kittest::kittest::Queryable;
+        let mut tree = build_tree(&[root(5, "/mnt/cache/shoot")], &[]);
+        apply_labels(
+            &mut tree,
+            &std::collections::HashMap::from([("/mnt/cache".to_string(), "Photos".to_string())]),
+        );
+        let mut h = egui_kittest::Harness::new_ui_state(
+            move |ui, tree: &mut Vec<DriveNode>| {
+                let archive = ArchiveDrives::with_locations(&[]);
+                let mut set_archive = None;
+                show(
+                    ui,
+                    tree,
+                    &[],
+                    None,
+                    false,
+                    &archive,
+                    &mut set_archive,
+                    None,
+                    true,
+                    &mut crate::folder_browse::Browse::already_revealed(5),
+                );
+            },
+            tree,
+        );
+        h.run();
+        assert!(h.query_by_label_contains("Photos (/mnt/cache)").is_some());
+        assert!(h.query_by_label("Archive drive").is_some());
     }
 
     #[test]

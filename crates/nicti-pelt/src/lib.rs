@@ -86,6 +86,7 @@ mod update;
 mod verify_ui;
 mod view_orient;
 mod viewport;
+mod volume_names;
 mod widgets;
 mod xmp_sync;
 

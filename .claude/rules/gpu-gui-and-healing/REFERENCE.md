@@ -47,6 +47,10 @@ Full reasoning/history: `docs/decisions/gpu-gui-and-healing.md`.
 
 - `folder_browse.rs` + `folder_panel::show_browse`: lazy, off-thread subfolder listing per drive/folder, real directories only, "Import this folder" per row. Detail: `docs/decisions/gpu-gui-and-healing.md`.
 
+## #775: folder panel volume names
+
+- A drive heads as `<OS label> (<path>)` via `volume_names.rs` (worker-read); labels/rows truncate by display columns (`unicode-width`). Windows half unverified. Detail: `docs/decisions/gpu-gui-and-healing.md`.
+
 ## Package contents
 
 - **`spikes/glint`** (#16/ADR-0016) — wgpu-vs-CUDA measured comparison: correctness, feature/limit

@@ -26,6 +26,8 @@ nicti-vibrissa = { path = "../nicti-vibrissa" }
 semver = "1"
 serde = "1"
 serde_json = "1"
+# Display width of a row label (CJK/emoji are two columns), already in the tree via egui (#775).
+unicode-width = "0.2"
 # The control channel's token (#543): 128 bits from the OS RNG. Already in the lockfile (a
 # transitive dependency of several vetted crates), so this is a new direct edge, not a new crate.
 getrandom = "0.4"
