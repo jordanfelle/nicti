@@ -127,7 +127,7 @@ pub struct ExportUi {
 /// Slack added to the measured footer height (the separator and the frame margins).
 const FOOTER_RESERVE: f32 = 40.0;
 /// The scrolling options never shrink below this (a window shorter than this overflows).
-const MIN_BODY: f32 = 80.0;
+const MIN_BODY: f32 = 40.0;
 /// The footer's messages scroll past this height so the buttons stay on screen.
 const FOOTER_MESSAGES_MAX: f32 = 90.0;
 
@@ -408,13 +408,15 @@ impl ExportUi {
         ui.separator();
         size_section(ui, &mut d.spec);
         ui.separator();
-        metadata_section(ui, &mut d.spec);
-        ui.separator();
-        watermark_section(ui, &mut d.spec);
+        // #774: the common path (format, size, where it goes) comes first so it fits without
+        // scrolling; the rarely changed options follow.
+        destination_section(ui, &mut d.spec, &mut d.folder_picker);
         ui.separator();
         naming_section(ui, d);
         ui.separator();
-        destination_section(ui, &mut d.spec, &mut d.folder_picker);
+        metadata_section(ui, &mut d.spec);
+        ui.separator();
+        watermark_section(ui, &mut d.spec);
     }
 
     /// Validation problems and the Export/Cancel buttons: pinned under the scrolling options.
@@ -1169,6 +1171,12 @@ mod tests {
     /// The dialog's Area rect after a few frames on a `w` x `h` window: the largest rect that is
     /// not the full-window Modal backdrop (identified by being exactly the screen).
     fn dialog_rect(w: f32, h: f32, break_footer: bool) -> egui::Rect {
+        dialog_layout(w, h, 1.0, break_footer).0
+    }
+
+    /// [`dialog_rect`] at a display scale, plus whether the "Destination" heading is painted
+    /// fully inside the visible (unscrolled) part of the dialog. `w`/`h` are in points.
+    fn dialog_layout(w: f32, h: f32, ppp: f32, break_footer: bool) -> (egui::Rect, bool) {
         let dir = tempfile::tempdir().unwrap();
         let mut ui_state = ExportUi::new(&dir.path().join("catalog.db"));
         ui_state.request(vec![1], "1 photo".into(), vec![facts("a")]);
@@ -1180,9 +1188,18 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
         let input = egui::RawInput {
             screen_rect: Some(screen),
+            viewports: std::iter::once((
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    native_pixels_per_point: Some(ppp),
+                    ..Default::default()
+                },
+            ))
+            .collect(),
             ..Default::default()
         };
         let mut rect = egui::Rect::NOTHING;
+        let mut destination_visible = false;
         for _ in 0..4 {
             let out = ctx.run_ui(input.clone(), |ui| {
                 ui_state.show_dialog(ui.ctx(), &|| None);
@@ -1199,9 +1216,18 @@ mod tests {
                         })
                 });
             });
+            destination_visible = out.shapes.iter().any(|clipped| {
+                let egui::Shape::Text(text) = &clipped.shape else {
+                    return false;
+                };
+                text.galley.text() == "Destination"
+                    && clipped
+                        .clip_rect
+                        .contains_rect(text.galley.rect.translate(text.pos.to_vec2()))
+            });
             out.drop_without_applying_deltas();
         }
-        rect
+        (rect, destination_visible)
     }
 
     /// #759: on a tall window the dialog used about 40% of it (a centred Area handed the scroll
@@ -1222,6 +1248,41 @@ mod tests {
                 r.top() >= -0.5 && r.bottom() <= h + 0.5,
                 "h={h} long_error={long}: dialog {r:?} leaves the window"
             );
+        }
+    }
+
+    /// #774: the dialog stays inside windows far shorter than the app's 600 px minimum, at the
+    /// display scales Windows ships (a 600 px window at 150% is 400 points tall).
+    #[test]
+    fn the_dialog_fits_very_short_windows_and_high_display_scales() {
+        for (w, h, ppp) in [
+            (900.0, 300.0, 1.0),
+            (900.0, 240.0, 1.0),
+            (900.0, 200.0, 1.0),
+            (900.0, 400.0, 1.5),
+            (800.0, 300.0, 2.0),
+        ] {
+            let (r, _) = dialog_layout(w, h, ppp, true);
+            assert!(r.height() > 100.0, "no dialog at {w}x{h}@{ppp}: {r:?}");
+            assert!(
+                r.top() >= -0.5 && r.bottom() <= h + 0.5,
+                "{w}x{h}@{ppp}: dialog {r:?} leaves the window"
+            );
+        }
+    }
+
+    /// #774: at the app's minimum window (900x600 points, also at 125%/150%) the common path -- format,
+    /// size, destination, Export -- needs no scrolling.
+    #[test]
+    fn the_destination_is_visible_without_scrolling_at_the_minimum_window() {
+        // The minimum window is 900x600 *points* whatever the display scale (#764).
+        for (w, h, ppp) in [
+            (900.0, 600.0, 1.0),
+            (900.0, 600.0, 1.25),
+            (900.0, 600.0, 1.5),
+        ] {
+            let (_, visible) = dialog_layout(w, h, ppp, false);
+            assert!(visible, "Destination needs scrolling at {w}x{h}@{ppp}");
         }
     }
 

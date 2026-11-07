@@ -74,6 +74,7 @@ Full reasoning/history: `docs/decisions/export.md`.
   read, EXIF/XMP build + embed), `exporters.rs` (`JpegExporter`/`PngExporter`/`TiffExporter`,
   `builtin_registry`), and `lib.rs` (`Exporter`, `export_frame`). `tests/exiftool_validate.rs`
   skips when `exiftool` isn't on PATH.
+- Export dialog small windows (#774): common-path sections first (Format, Size, Destination), `MIN_BODY` 40; detail `docs/decisions/export.md`.
 - **`crates/nicti-pelt/src/export/`** (#57) — see the Export pipeline bullet above. Presets are
   `<catalog>.export-presets.json` (temp+rename), three built-ins never written. Ctrl+Shift+E or the
   Library toolbar's "Export N…" opens the dialog.
