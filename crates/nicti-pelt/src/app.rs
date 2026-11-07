@@ -2217,7 +2217,9 @@ impl PeltApp {
                 read_store.open_root_moves().unwrap_or_default(),
             )
         });
-        let tree = folder_panel::build_tree(&self.folder_cache.roots, &self.folder_cache.drives);
+        let mut tree =
+            folder_panel::build_tree(&self.folder_cache.roots, &self.folder_cache.drives);
+        folder_panel::apply_labels(&mut tree, &self.folder_cache.labels);
         let loaded = self.folder_cache.loaded();
         let attention = folder_panel::attention_items(&self.folder_cache.open_moves, move_running);
         let mut out = folder_panel::PanelOutput::default();
